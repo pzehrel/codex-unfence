@@ -1,5 +1,113 @@
 # Codex Browser Site Status Patch
 
+## Node.js CLI (current implementation)
+
+The npm CLI currently provides read-only macOS plugin discovery. Structural
+compatibility is **not analyzed**; real Codex loading and website operation are
+**not verified**. Discovery does not execute plugin sources, modify targets, or
+create plans/backups. The Python tools below are historical research and are not
+used by the Node.js CLI.
+
+Requires Node.js 22.13.0 or newer and npm. Build and install locally:
+
+```bash
+npm ci --ignore-scripts
+npm run build
+npm pack
+npm install --global ./codex-browser-liberation-patch-0.1.0.tgz
+codex-browser-patch --help
+codex-browser-patch detect
+codex-browser-patch detect --plugin-root /path/to/openai-bundled --json
+```
+
+Only the local install prefix receives CLI files. Do not run npm publish for this
+local workflow. The npm package allowlist contains `dist/`; npm also includes
+`package.json` and this README. Tests, test process fixtures, research, real
+application artifacts, local plans, and backups are excluded.
+
+Discovery enumerates `<root>/{browser,chrome}/<version>/scripts/browser-service.mjs`.
+Default root is `~/.codex/plugins/cache/openai-bundled`, based on the current home
+directory; `--plugin-root` overrides it. Relative paths resolve from the working
+directory. Version metadata is the directory name, preserved verbatim without
+semantic version filtering or selecting a maximum/running version. Symlinks are
+followed for discovery; each entry reports its lexical absolute `path` and
+canonical `realPath`. Aliases remain separate entries. This read-only discovery
+behavior grants no permission for future write commands to follow aliases.
+Artifacts sort by plugin (`browser`, then `chrome`), then version name using
+lexical order. Missing roots/empty discovery succeed. Missing, non-file, or
+unreadable artifacts produce errors while retaining other discovered entries.
+
+### Output contract (schemaVersion 1)
+
+Human-readable and JSON output share one command result. `--json` writes exactly
+one JSON object and a newline to stdout, including command errors; stderr is
+reserved for unexpected process-level failures. `--help` is plain text.
+
+```json
+{
+  "schemaVersion": 1,
+  "command": "detect",
+  "outcome": "success",
+  "exitCode": 0,
+  "data": {
+    "pluginRoot": "/absolute/plugin/root",
+    "artifacts": [
+      {
+        "plugin": "browser",
+        "version": "directory-name",
+        "path": "/absolute/plugin/root/browser/directory-name/scripts/browser-service.mjs",
+        "realPath": "/canonical/path/scripts/browser-service.mjs",
+        "availability": "readable",
+        "compatibility": "not-analyzed"
+      }
+    ],
+    "runtime": "not-verified"
+  },
+  "diagnostics": []
+}
+```
+
+| Exit code | Outcome | Meaning |
+| --- | --- | --- |
+| 0 | `success` | Discovery completed, including an empty installation. |
+| 1 | `runtime-error` | Unsupported platform, unreadable root/target, or discovery failure. |
+| 2 | `usage-error` | Missing/unknown command, unknown/duplicate option, missing option value. |
+
+`data` is null when discovery could not start; otherwise partial discoveries are
+retained on failure. `command` is null for unrecognized/missing commands.
+`availability` is `readable` or `unavailable`; `realPath` is null if resolution
+failed. `compatibility` remains `not-analyzed` for every artifact in this release.
+Diagnostics have `code`, `severity`, `message`, optional `path`, and optional
+`systemCode` (for example `EACCES`). Stable codes are `NO_ARTIFACTS`,
+`INVALID_ARGUMENTS`, `UNSUPPORTED_PLATFORM`, `ROOT_UNAVAILABLE`,
+`DISCOVERY_FAILED`, and `ARTIFACT_UNAVAILABLE`. Automate against codes and fields,
+not prose. New fields/diagnostic codes may be added within schema 1; incompatible
+field or meaning changes require a new schema version. Exit codes for future
+analysis/conflict results are not emitted by this discovery-only release.
+
+### Development and independent verification
+
+```bash
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
+
+`npm test` builds and runs real CLI child processes against temporary plugin
+roots and isolated homes, plus packs, installs offline into a temporary prefix,
+and executes the installed public bin. All plugin sources are synthetic. Core
+tests never require Codex and never skip because Codex is absent. On CI, explicit
+`--require` fixtures in `tests/fixtures/` inject macOS or unsupported platform
+identity into test children only; the production CLI exposes no platform bypass.
+Permission tests use temporary files with denied read permissions and expect an
+unprivileged runner. GitHub Actions runs all checks on Linux and macOS with Node
+22 and 24. Source responsibilities are command entry/output (`src/cli.ts`,
+`src/result.ts`) and installation discovery (`src/discovery.ts`); source analysis
+and persistent transactions are subsequent work.
+
+## Historical fixed-sample Python research
+
 针对本机已分析的 Codex Desktop `26.1007.71326`，在浏览器插件的站点状态响应消费点，将本地 `feature_status.agent` 固定为 `false`。
 
 该项目包含静态逆向记录和可恢复的本地补丁工具。当前只生成了补丁副本，未修改已安装应用，未验证应用运行时是否接受修改后的插件。

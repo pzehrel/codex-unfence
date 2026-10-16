@@ -3,3 +3,9 @@ evidence/
 patch-plans/
 __pycache__/
 *.pyc
+
+# Node.js build and local package output.
+node_modules/
+dist/
+*.tgz
+coverage/
