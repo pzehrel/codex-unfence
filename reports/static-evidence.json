@@ -1,0 +1,266 @@
+{
+  "sources": [
+    {
+      "source": "/Users/pzehrel/.codex/plugins/cache/openai-bundled/browser/26.1007.71326/scripts/browser-service.mjs",
+      "sha256": "4295ad5e22e0504b53e32daa4844169610fd65a613290593649b97277b12978f",
+      "size": 1448627,
+      "records": [
+        {
+          "label": "site-status-response",
+          "line": 999,
+          "char_offset": 122543,
+          "excerpt": "function vS(t){return X4(t,$4)}function X4(t,e){if(!yS(t))return!1;let r=t.feature_status;return yS(r)?r[e]===!0:!1}function xS(t,{conversationId:e,turnId:r,urlRequestSource:n=qc}="
+        },
+        {
+          "label": "site-status-url",
+          "line": 999,
+          "char_offset": 122659,
+          "excerpt": "function xS(t,{conversationId:e,turnId:r,urlRequestSource:n=qc}={}){let o;try{o=new URL(t)}catch{throw new Error(\"Browser Use cannot visit the requested page because the URL is invalid. Use a complete http:// or https:// URL.\")}if(o.protocol!==\"http:\"&&o.protocol!==\"https:\")return null;let i=o.hostname.trim().toLowerCase();if(i.length===0)throw new Error(\"Browser Use cannot visit the requested page because the URL does not include a website host.\");return Z4(i)?null:{cacheKey:i.startsWith(\"www.\")?i.slice(4):i,displayUrl:Y4(o),endpoint:J4(o,{conversationId:e,turnId:r,urlRequestSource:n})}}function J4(t,{conversationId:e,turnId:r,urlRequestSource:n}){let o=new URL(t.origin);o.pathname=t.pathname,o.search=t.search;let i=new URL(`${W4}/aura/site_status`);return i.searchParams.set(\"site_url\",o.toString()),i.searchParams.set(\"url_request_source\",n),e!=null&&i.searchParams.set(\"conversation_id\",e),r!=null&&i.searchParams.set(\"turn_id\",r),i.toString()}function Y4(t){let e=new URL(t.origin);e.pathname=t.pathname;let r=e.toString();return e.pathname===\"/\"?r.slice(0,-1):r}function Z4(t){return t===\"localhost\"||t.endsWith(\".localhost\")||t===\"127.0.0.1\"||t===\"[::1]\"||t===\"::1\"}function yS(t){return typeof t==\"object\"&&t!=null}var W4,$4,H4,V4,z4,G4,qc,wS,dt,jg=se(()=>{\"use strict\";u();Ug();W4=\"https://chatgpt.com/backend-api\",$4=\"agent\",H4=\"Browser Use rejected this action due to browser security policy. Reason:\",V4=\"Browser Use could not complete this action because a browser security check was unavailable. Reason:\",z4=\" The agent must not attempt to achieve the same outcome via workaround, indirect execution, raw CDP or browser commands, alternate browser surfaces, or policy circumvention. Proceed only with a materially safer alternative that does not require this blocked browser action; if none exists, stop and request user input"
+        },
+        {
+          "label": "site-status-error-definition",
+          "line": 999,
+          "char_offset": 126494,
+          "excerpt": "site_status_blocked:{decisionSource:\"site_status\",message:\"The site-safety policy blocks this action; no user permission prompt or Auto-review was attempted.\",retryable:!1},site_status_unavailable:{decisionSource:\"site_status\",message:\"The site-safety check was unavailable.\",retryable:!0},user_declined:{decisionSource:\"user_decision\",message:\"The user declin"
+        },
+        {
+          "label": "site-status-check-and-cache",
+          "line": 1068,
+          "char_offset": 603256,
+          "excerpt": "var NV=1440*60*1e3,Zy=class{constructor(e=Date.now,r=je){this.now=e;this.getTurnMetadata=r}now;getTurnMetadata;cache=new Map;inflightRequests=new Map;async throwIfBlocksUrl(e,r,n,o,i=\"browser-origin-access\"){if(qn(e,\"check-url-site-status\")||typeof r!=\"string\")return;let s=this.getTurnMetadata(e),a=xS(r,{conversationId:s?.session_id,turnId:s?.turn_id,urlRequestSource:n==null?qc:`${qc}:${n}`});if(a==null)return;let l=He(o),c=o?.browserFamily,d;try{d=await this.isBlocked(e,a)}catch{return}if(d.blocked)throw Yt(()=>({authorization:i,backend:n,browserFamily:c,check:\"check-url-site-status\",origin:ze(r)??void 0,permissionSource:\"site-status\",outcome:\"denied\",reason:\"site_status_blocked\",...d.cached?{cached:!0}:{}})),new dt(\"site_status_blocked\",`${l} is not permitted on ${a.displayUrl}.`)}async isBlocked(e,r){let n=this.fetchBlocked(e,r),o=this.cachedBlocked(r.cacheKey);if(o!=null)return n.catch(()=>{}),{blocked:o,cached:!0};let i=this.inflightRequests.get(r.cacheKey);if(i!=null)return n.catch(()=>{}),{blocked:await i,cached:!1};let s=n.then(a=>(this.cache.set(r.cacheKey,{blocked:a,timestampMs:this.now()}),a)).finally(()=>{this.inflightRequests.get(r.cacheKey)===s&&this.inflightRequests.delete(r.cacheKey)});return this.inflightRequests.set(r.cacheKey,s),{blocked:await s,cached:!1}}cachedBlocked(e){let r=this.cache.get(e);return r==null||this.now()-r.timestampMs>=NV?(r!=null&&this.cache.delete(e),null):r.blocked}async fetchBlocked(e,r){let n=await tk(e,r.endpoint,{method:\"GET\"});if(!n.ok)throw new Error(\"Browser Use site-status request failed.\");let o=await n.json();return vS(o)}},FV=new Zy;async function rk(t,e,r,n,o=\"browser-origin-access\"){await FV.throwIfBlocksUrl(t,e,r,n,o)}u();ke();var Ps=class extends dt{constructor(r,n,o){super(\"navigation_url_policy_blocked\",o);this.urlPolicyReason=r;this.urlSchemeCategory=LV(n)}urlPolicyReason;urlSchemeCategory};function LV(t){try{switch(new URL(t).protocol){case\"chrome-error:\":case\"edge-error:\":return\"browser_error\";case\"about:\":return\"about\";case\"blob:\":return\"blob\";case\"data:\":return\"data\";case\"file:\":return\"file\";case\"javascript:\":return\"javascript\";default:return\"other\"}}catch{return\"invalid"
+        },
+        {
+          "label": "command-classification",
+          "line": 1068,
+          "char_offset": 616031,
+          "excerpt": "function WV(t){if(qV.has(t.type))return{kind:\"none\"};if(UV.has(t.type))return{kind:\"targetUrl\",url:ii(t.params,\"url\")};let e=$V(t.params);return e==null?{kind:\"none\"}:{kind:\"currentTab\",tabId:e}}function $V(t){let e=ii(t,\"tab_id\"),r=Number(e);return!Number.isInteger(r)||r<=0?null:r}function HV(t,e){switch(t.type){case ie.WebMcpListTools.commandType:return{type:t.type};case ie.WebMcpInvokeTool.commandType:{let r=ii(t.params,\"tool_name\");(typeof r!=\"string\"||r.trim().length===0)&&Oe({check:\"webmcp-tool-call\",options:e,reason:\"browser_context_unavailable\"},"
+        },
+        {
+          "label": "current-page-dispatch",
+          "line": 1068,
+          "char_offset": 606566,
+          "excerpt": "let r=WV(e);switch(r.kind){case\"none\":return;case\"targetUrl\":{await this.ensureTargetUrlOriginAllowed(r.url);return}case\"currentTab\":{let n=await this.tabs.get(r.tabId);if(this.browserBackend===\"mcpapps\"){if(n.url==null)throw new Error(\"MCP App target is unavailable.\");let s=new URL(n.url);await this.ensureOriginConsentAllowed(`${s.protocol}//${s.host}`,{requireConsent:!1});return}let o=n.url;await this.ensureUrlOriginAllowed(o);let i=HV(e,this.displayOptions);if(i!=null&&(await this.assertWebMcpEnabled(r.tabId),i.type===ie.WebMcpInvokeTool.commandType&&i.toolOrigin!=null&&i.toolOrigin!==qe(o)&&await this.assertWebMcpOriginEnabled(i.toolOrigin)),i!=null&&!Nr(this.runtime,\"webmcp-tool-call\")){let s=await ek(this.getCreateElicitation,o,i,this.displayOptions);(await this.tabs.get(r.tabId)).url!==o&&Oe({audit:s,check:\"webmcp-tool-call\",options:this.displayOptions,reason:\"browser_context_unavailable\"},`${this.browserName()} cannot use WebMCP tools because the current page changed while waiting for approval.`)}return}}}async runCommand(e,r){return await this.ensureCommandAllowed(e),await r()}async ensureDownl"
+        },
+        {
+          "label": "origin-gate-order",
+          "line": 1068,
+          "char_offset": 610678,
+          "excerpt": "async ensureTargetUrlOriginAllowed(e){await this.ensureUrlPolicyAllowed(e,\"browser-origin-access\",!1),await this.ensureOriginConsentAllowed(qe(e))}async ensureUrlOriginAllowed(e){await this.ensureUrlPolicyAllowed(e),await this.ensureOriginConsentAllowed(qe(e))}async ensureOriginConsentAllowed(e,{requireConsent:r=!0}={}){if(qn(this.runtime,\"browser-origin-access\")||e==null)return;let n=await this.ensureOriginPolicyAndDenialsAllowAccess(e);if(!r){jt(\"browser-origin-access\",this.displayOptions,n?.source,{origin:e});return}Nr(this.runtime,\"browser-origin-access\")||await $R(this.getCreateElicitation,e,this.preferences,this.displayOptions,this.commandTiming)}async ensureOriginPolicyAndDenialsAllowAccess(e){await this.preferences.isOriginBlockedByPolicy(e,\"access\")&&Oe({audit:{origin:e},check:\"browser-origin-access\",options:this.displayOptions,permissionSource:\"codex-network-policy\",reason:\"enterprise_policy_blocked\"},`${this.browserName()} cannot access ${e} because the admin-enforced policy blocks it.`);let n=await this.preferences.getOriginPermission(e);return n?.decision===\"deny\"&&qt(\"browser-origin-access\",n.source,`access ${e}`,this.displayOptions,{origin:e}),n}async ensureUrlPolicyAllowed(e,r=\"browser-origin-access\",n=!0){typeof e==\"string\"&&await this.runtime.assertBrowserUrlAllowed?.(e),qn(this.runtime,\"check-navigation-url-policy\")||JV(e,this.displayOptions,r),n&&await rk(this.runtime,e,this.browserBackend,this.displayOptions,r)}async ensureOriginDownloadPolicyAllowed(e,r=\"file-download\"){if(qn(this.runtime,r))return;let n=await this.preferences.isOriginBlockedByPolicy(e,\"downloads\"),o=r==="
+        },
+        {
+          "label": "security-mode-separation",
+          "line": 1068,
+          "char_offset": 589693,
+          "excerpt": "var Ky=new Set,AV=new Set([\"browser-history-read\",\"browser-origin-access\",\"file-download\",\"file-upload\",\"full-cdp\",\"page-asset-cross-origin-fetch\",\"page-asset-download\",\"raw-cdp-destination-url\",\"webmcp-tool-call\"]),PV=new Set([\"browser-history-read\",\"browser-origin-access\",\"check-navigation-url-policy\",\"check-url-site-status\",\"file-download\",\"file-upload\",\"full-cdp\",\"page-asset-cross-origin-fetch\",\"page-asset-download\",\"raw-cdp-destination-url\"]),IV=new Set([\"browser-history-read\",\"file-download\",\"page-asset-cross-origin-fetch\",\"page-asset-download\"]),LR={\"\":{bypassedSecurityChecks:Ky,operationsWithoutUserConsent:Ky},\"disabled-for-local-testing\":{bypassedSecurityChecks:PV,operationsWithoutUserConsent:AV},\"gaas-browser-environment\":{bypassedSecurityChecks:Ky,operationsWithoutUserConsent:IV}};function Nr(t,e){let r=Lt(t),n=LR[r].operationsWithoutUserConsent.has(e);return n&&Yt(()=>({check:e,outcome:\"bypassed\",permissionSource:\"security-mode\",policy:r})),n}function qn(t,e){let r=Lt(t),n=LR[r].bypassedSecurityChecks.has(e);return n&&Yt(()=>({check:e,outcome:\"bypassed\",permissionSource:\"security-mode\",policy:r})),n}u();var pn=new Map,As,Zt={get(t){if(t==null)return;let e=pn.get(t.threadId)?.get(t.origin)?.approval;return e!=null&&e.expiresAt>Date.now()?e:void 0},record(t,e){e?.revoked!==!0&&(UR(t).approval={expiresAt:Date.now()+3e5},jR())},revoke(t){let e=pn.get(t.threadId)?.get(t.origin);e!=null&&(delete e.approval,e.pending!=null&&(e.pending.review.revoked=!0,delete e.pending),Xy(t.threadId,t.origin,e,Date.now()))},start(t,e,r){let n=Zt.get(t);if"
+        },
+        {
+          "label": "runtime-fetch",
+          "line": 1068,
+          "char_offset": 603049,
+          "excerpt": "async function tk(t,e,r){if(typeof t.fetch!=\"function\")throw new Error(Co(\"Browser Use cannot determine if this website is allowed. Please try again later or use another source.\"));return await t.fetch(e,r)}var NV=1440*60*1e3,Zy=class{constructor(e=Date.now,r=je){this.now=e;"
+        }
+      ]
+    },
+    {
+      "source": "/Users/pzehrel/Documents/repositories/my/codex-browser-liberation-patch/evidence/asar-o8o1zl6s/.vite/build/main-CwxgTOle.js",
+      "sha256": "87d52265eb13608a380fabcac47ecf13a39b981115c0960c18af563ea6d32d51",
+      "size": 3827852,
+      "records": [
+        {
+          "label": "main-process-navigation-gate",
+          "line": 93,
+          "char_offset": 248422,
+          "excerpt": "function Sie(e,t){return e.isBrowserUseNavigationRestrictionActive&&!g.F(t)&&!(jd&&Cie(t))?Error(`Blocked browser navigation by Browser Use URL policy: ${t}`):null}function Cie(e){try{return new URL(e).protocol===`chrome:`}catch{return!1}}function wie(e){return e===`mainFrame`||e===`subFrame`}var Pd=f.r(`BrowserUseLocalToBundledMigration`),Tie=n.T({name:n.N(),source:n.T({path:n"
+        },
+        {
+          "label": "main-process-cdp-gate",
+          "line": 1001,
+          "char_offset": 1765647,
+          "excerpt": "async executeCdpForBrowserUse(e,t){let n=await this.getTabForCommand(e,t),r=this.getBrowserHost(e),i=await this.getCdpNavigationUrl(e,n,t),a=!1;this.markBrowserUseCommandForTab(e,n);try{if(t.method===`Target.closeTarget`)return await this.executeEmulatedTargetCommand(n,t);this.assertCurrentPageAllowed(e,n),r!=null&&i!=null&&(r.assertBrowserUseNavigationAllowed(n.pageKey,i),r.trackPendingBrowserUseNavigation(n.pageKey,i),a=!0);let o=GOe(t.method);if(o||uq(t.method),t.method!==`Target.getTargetInfo`&&await this.attachForBrowserUse(e,{tabId:n.cdpTabId}),await this.waitForTabReadyForCdp(e,n),this.assertTabMatchesCurrentBrowserUsePage(e,n),this.assertCurrentPageAllowed(e,n),o)return await this.executeEmulatedTargetCommand(n,t);if(t.method===`Page.reload`)return pq(t.commandParams)&&t.commandParams.ignoreCache===!0?n.webContents.reloadIgnoringCache():n.webContents.reload(),{};try{let i=Sq(t.timeoutMs,this.cdpCommandTimeoutMs),a=Date.now()+i;return r?.waitForPendingDebuggerSync!=null&&await Cq(r.waitForPendingDebuggerSync(n.browserTabId),i,`Timed out "
+        },
+        {
+          "label": "annotation-site-status",
+          "line": 713,
+          "char_offset": 1449265,
+          "excerpt": "function CR({appServerClient:e,desktopApiOptions:t=SR,now:n=Date.now}){let r=new Map,i=new Map;function a(e){let t=TR(e);if(t==null)return!1;let i=r.get(t);return i==null||n()-i.timestampMs>=bR?(i!=null&&r.delete(t),null):i.blocked}async function o(e){let t=a(e);if(t!=null)return t;let n=TR(e);if(n==null)return!1;let r=i.get(n);if(r!=null)return r;let o=s(e,n).finally(()=>{i.get(n)===o&&i.delete(n)});return i.set(n,o),o}async function s(e,t){try{let i=await c(e);if(i==null)return!1;let a=i.feature_status[xR]===!0;return r.set(t,{blocked:a,timestampMs:n()}),a}catch(e){return yR().warning(`failed to load browser sidebar comment mode site status`,{safe:{},sensitive:{error:e}}),!1}}async function c(n){let r=await g.ct({action:`load browser site status`,appServerClient:e,desktopApiOptions:t,path:ER(n)});return r.ok?vR.parse(JSON.parse(await r.text())):(yR().warning(`browser sidebar comment mode site status request failed`,{safe:{status:r.status},sensitive:{}}),null)}return{cachedCommentModeBlocked:a,isCommentModeBlocked:o}}function wR(){return{cachedCommentModeBlocked:()=>!1,isCommentModeBlocked:async()=>!1}}function TR(e){try{let t=new URL(e);if(t.protocol!==`http:`&&t.protocol!==`https:`)return null;let n=t.hostname.trim().toLowerCase();return n.length===0?null:n.startsWith(`www.`)?n.slice(4):n}catch{return null}}function ER(e){return`/aura/site_status?${new URLSearchParams({site_url:e}).toString()}`}function DR(e){return OR(e)?{type:`step-zoom`,delta:1}:kR(e)?{type:`step-zoom`,delta:-1}:AR(e)?{type:`reset-zoom`}:null}function OR(e){return jR(e)&&(e.code==="
+        },
+        {
+          "label": "settings-sync",
+          "line": 498,
+          "char_offset": 798886,
+          "excerpt": "var fS=`/wham/browser/settings`,pS=15e3,Cde=class{fetchJson;expectedPrincipal;constructor(e,t){this.fetchJson=e,this.expectedPrincipal=t}async read(e){return Bx.parse(await this.fetchJson(fS,{expectedPrincipal:this.expectedPrincipal,signal:AbortSignal.any([e,AbortSignal.timeout(pS)])}))}async update(e,t,n){return Bx.parse(await this.fetchJson(fS,{method:`PATCH`,body:{...t,expected_revision:e},expectedPrincipal:this.expectedPrincipal,signal:AbortSignal.any([n,AbortSignal.timeout(pS)])}))}},wde=6e4,Tde=200,mS=[`origin`,`download`,`upload`,`full_cdp`,`webmcp`],Ede=class{options;logger=f.r(`BrowserSettingsSync`);scope=null;projection=null;generation=0;queue=Promise.resolve();watcher=null;refreshTimer=null;fileChangeTimer=null;refreshQ"
+        }
+      ]
+    },
+    {
+      "source": "/Users/pzehrel/Documents/repositories/my/codex-browser-liberation-patch/evidence/asar-o8o1zl6s/.vite/build/bootstrap-DOZRFVdo.js",
+      "sha256": "8602f1022fc835148268e8cdfcfb939d8ab5a969e4fd0b4141e264ce8ec4be4d",
+      "size": 461537,
+      "records": [
+        {
+          "label": "protocol-allowlist",
+          "line": 7,
+          "char_offset": 404785,
+          "excerpt": "var sE=Object.freeze([`http:`,`https:`]),cE=new Set([`about:blank`]);function lE(e){return uE(e).allowed}function uE(e){if(cE.has(e))return{allowed:!0,reason:`allowed`};let t;try{t=new URL(e)}catch{return{allowed:!1,reason:`invalid_url`}}return sE.includes(t.protocol)?{allowed:!0,reason:`allowed`}:{allowed:!1,reason:`unsupported_protocol`}}n.O({blockId:n.N().min(1).max(256).optional(),threadId:n.N().min(1).max(256).optional(),messageId:n.N().min(1).max(256).optional(),requestId:n.N()});function dE(e,t,n){"
+        }
+      ]
+    }
+  ],
+  "actor_safety_lists": {
+    "source": "/Users/pzehrel/Library/Application Support/Codex/ActorSafetyLists/9.8200.9609/listdata.json",
+    "sha256": "246c7c41b38463721c0476e2659f7fda73bca7c9408ab244be2fbbc716db00d2",
+    "counts": {
+      "navigation_blocked": 2144,
+      "navigation_allowed": 20751
+    },
+    "taobao_matches": {
+      "navigation_blocked": [],
+      "navigation_allowed": [
+        {
+          "from": "https://login.taobao.com",
+          "to": "https://item.taobao.com"
+        },
+        {
+          "from": "https://i.taobao.com",
+          "to": "https://passport.taobao.com"
+        },
+        {
+          "from": "https://web.m.taobao.com",
+          "to": "https://intlcashier.taobao.com"
+        },
+        {
+          "from": "https://item.taobao.com",
+          "to": "https://passport.taobao.com"
+        },
+        {
+          "from": "https://item.taobao.com",
+          "to": "https://s.click.taobao.com"
+        },
+        {
+          "from": "https://web.m.taobao.com",
+          "to": "https://cashiersa127.alipay.com"
+        },
+        {
+          "from": "https://web.m.taobao.com",
+          "to": "https://cashiersa128.alipay.com"
+        },
+        {
+          "from": "https://login.taobao.com",
+          "to": "https://detail.tmall.com"
+        },
+        {
+          "from": "https://web.m.taobao.com",
+          "to": "https://cashierea179.alipay.com"
+        },
+        {
+          "from": "https://passport.taobao.com",
+          "to": "https://login.taobao.com"
+        },
+        {
+          "from": "https://web.m.taobao.com",
+          "to": "https://cashierea178.alipay.com"
+        },
+        {
+          "from": "https://detail.tmall.com",
+          "to": "https://s.click.taobao.com"
+        },
+        {
+          "from": "https://buy.taobao.com",
+          "to": "https://item.taobao.com"
+        },
+        {
+          "from": "https://buyertrade.taobao.com",
+          "to": "https://web.m.taobao.com"
+        },
+        {
+          "from": "https://detail.tmall.com",
+          "to": "https://passport.taobao.com"
+        },
+        {
+          "from": "https://world.taobao.com",
+          "to": "https://pages.tmall.com"
+        },
+        {
+          "from": "https://buyertrade.taobao.com",
+          "to": "https://passport.taobao.com"
+        },
+        {
+          "from": "https://detail.tmall.com",
+          "to": "https://pages-fast.m.taobao.com"
+        },
+        {
+          "from": "https://web.m.taobao.com",
+          "to": "https://cashieret2.alipay.com"
+        },
+        {
+          "from": "https://www.taobao.com",
+          "to": "https://pages.tmall.com"
+        },
+        {
+          "from": "https://item.taobao.com",
+          "to": "https://e.tb.cn"
+        },
+        {
+          "from": "https://www.taobao.com",
+          "to": "https://passport.taobao.com"
+        },
+        {
+          "from": "https://detail.tmall.com",
+          "to": "https://item.taobao.com"
+        },
+        {
+          "from": "https://buyertrade.taobao.com",
+          "to": "https://i.taobao.com"
+        },
+        {
+          "from": "https://item.taobao.com",
+          "to": "https://pages-fast.m.taobao.com"
+        },
+        {
+          "from": "https://buyertrade.taobao.com",
+          "to": "https://www.taobao.com"
+        },
+        {
+          "from": "https://s.click.taobao.com",
+          "to": "https://go.smzdm.com"
+        },
+        {
+          "from": "https://s.taobao.com",
+          "to": "https://item.taobao.com"
+        },
+        {
+          "from": "https://s.taobao.com",
+          "to": "https://pages.tmall.com"
+        },
+        {
+          "from": "https://cart.taobao.com",
+          "to": "https://item.taobao.com"
+        },
+        {
+          "from": "https://world.taobao.com",
+          "to": "https://item.taobao.com"
+        },
+        {
+          "from": "https://havanalogin.taobao.com",
+          "to": "https://passport.tmall.com"
+        },
+        {
+          "from": "https://ads.taobao.com",
+          "to": "https://tao.santvm.com"
+        },
+        {
+          "from": "https://www.taobao.com",
+          "to": "https://item.taobao.com"
+        },
+        {
+          "from": "https://login.1688.com",
+          "to": "https://login.taobao.com"
+        },
+        {
+          "from": "https://login.1688.com",
+          "to": "https://havanalogin.taobao.com"
+        }
+      ]
+    }
+  }
+}

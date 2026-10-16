@@ -1,0 +1,5 @@
+# Local copies of installed proprietary assets and prepared backups.
+evidence/
+patch-plans/
+__pycache__/
+*.pyc
