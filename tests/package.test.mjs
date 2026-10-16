@@ -20,7 +20,8 @@ test('packed npm CLI installs offline into a temporary prefix and executes throu
   const [output] = JSON.parse(pack.stdout);
   const files = output.files.map((file) => file.path);
   assert.deepEqual(files.filter((path) => !path.startsWith('node_modules/')).sort(), [
-    'README.md', 'dist/analysis.js', 'dist/cli.js', 'dist/discovery.js', 'dist/plan.js', 'dist/result.js', 'package.json',
+    'README.md', 'dist/analysis.js', 'dist/cli.js', 'dist/discovery.js', 'dist/plan.js', 'dist/processes.js', 'dist/result.js',
+    'dist/transaction-locks.js', 'dist/transaction-storage.js', 'dist/transactions.js', 'package.json',
   ]);
   for (const path of files.filter((path) => path.startsWith('node_modules/'))) {
     assert.match(path, /^node_modules\/(acorn|eslint-scope|esrecurse|estraverse)\//);

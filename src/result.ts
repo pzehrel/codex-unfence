@@ -5,6 +5,7 @@ export const EXIT_CODES = {
   runtimeError: 1,
   usageError: 2,
   incompatible: 3,
+  conflict: 4,
 } as const;
 
 export interface Diagnostic {
@@ -41,7 +42,7 @@ export interface Preparation {
 
 interface ResultBase {
   schemaVersion: 1;
-  outcome: 'success' | 'usage-error' | 'runtime-error' | 'incompatible';
+  outcome: 'success' | 'usage-error' | 'runtime-error' | 'incompatible' | 'conflict';
   exitCode: number;
   diagnostics: Diagnostic[];
 }
@@ -56,12 +57,28 @@ export interface PreparationResult extends ResultBase {
   data: Preparation | null;
 }
 
-export type CommandResult = DetectionResult | PreparationResult | (ResultBase & { command: null; data: null });
+export type TransactionCommand = 'apply' | 'status' | 'recover';
+export type TargetState = 'original' | 'tool-applied' | 'incompatible' | 'conflict' | 'incomplete';
+export interface OperationResult extends ResultBase {
+  command: TransactionCommand;
+  data: {
+    store: string;
+    transaction: string | null;
+    targets: { path: string; state: TargetState; action?: 'applied' | 'already-applied' | 'rolled-back' }[];
+    runtime: 'not-verified';
+  } | null;
+}
+
+export type CommandResult = DetectionResult | PreparationResult | OperationResult | (ResultBase & { command: null; data: null });
 
 export function renderHuman(result: CommandResult): string {
   const lines = [`${result.command ?? 'CLI'}: ${result.outcome}`];
   if (result.data) {
-    lines.push(`Plugin root: ${result.data.pluginRoot}`);
+    if ('pluginRoot' in result.data) lines.push(`Plugin root: ${result.data.pluginRoot}`);
+    if ('store' in result.data) {
+      lines.push(`Operation store: ${result.data.store}`, `Transaction: ${result.data.transaction ?? 'none'}`);
+      for (const target of result.data.targets) lines.push(`${target.path}: ${target.state}${target.action ? ` (${target.action})` : ''}`);
+    }
     for (const artifact of result.command === 'detect' ? result.data.artifacts : []) {
       lines.push(
         `${artifact.plugin} ${artifact.version}: ${artifact.realPath ?? artifact.path}`,
