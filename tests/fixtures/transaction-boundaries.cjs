@@ -48,7 +48,11 @@ promises.rename = async function (from, to) {
   }
   if (String(to).endsWith('/journal.json')) {
     const record = JSON.parse(fs.readFileSync(from, 'utf8')).record;
-    if (record.phase === 'rolled-back' && fault === 'rollback-journal-failure') throw ioError();
+    if (record.phase === 'rolled-back') {
+      await boundary('before-rollback-commit');
+      if (fault === 'rollback-journal-failure') throw ioError();
+    }
+    if (record.phase === 'rolling-back' && fault === 'recovery-backup-change') fs.writeFileSync(process.env.CODEX_TEST_BACKUP, 'external backup change');
     if (record.phase === 'verifying') await boundary('after-postverification');
     if (record.phase === 'committed') {
       await boundary('before-commit');
@@ -56,6 +60,8 @@ promises.rename = async function (from, to) {
     }
   }
   const result = await rename(from, to);
+  if (String(from).includes('/transactions/.staging-')) await boundary('after-intent-publication');
+  if (String(to).endsWith('/journal.json') && JSON.parse(fs.readFileSync(to, 'utf8')).record.phase === 'rolling-back') await boundary('after-rollback-intent');
   if (String(to).endsWith('/journal.json') && fault === 'commit-journal-renamed-error' && JSON.parse(fs.readFileSync(to, 'utf8')).record.phase === 'committed') throw ioError();
   if (to === target) {
     if (fault === 'postwrite-change' && replacements === 1) fs.writeFileSync(target, 'external boundary change');
@@ -82,7 +88,7 @@ promises.open = async function (path, ...args) {
 promises.link = async function (from, to) {
   if (fault === 'release-failure' && String(to).endsWith('.next') && JSON.parse(fs.readFileSync(from, 'utf8')).released) throw ioError();
   const result = await link(from, to);
-  if (String(to).endsWith('.codex-browser-patch.lock')) targetLeasePublished = true;
+  if ((String(to).endsWith('.codex-browser-patch.lock') || String(to).includes('.codex-browser-patch.lock.')) && !JSON.parse(fs.readFileSync(from, 'utf8')).released) targetLeasePublished = true;
   return result;
 };
 promises.rm = async function (path, ...args) {

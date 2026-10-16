@@ -21,11 +21,12 @@ interface Snapshot {
   parentDevice: string;
   parentInode: string;
 }
+type Operation = 'apply' | 'restore';
 interface Journal {
   formatVersion: 1;
   id: string;
   store: string;
-  operation: 'apply';
+  operation: Operation;
   sequence: number;
   planHash: string;
   phase: 'prepared' | 'writing' | 'verifying' | 'committed' | 'rolling-back' | 'rolled-back';
@@ -94,8 +95,14 @@ async function processes(): Promise<ProcessIdentity[]> {
 function validateJournal(value: unknown, id: string, store: string): asserts value is Journal {
   check(value !== null && typeof value === 'object', 'INVALID_JOURNAL', 'Missing transaction intent.');
   const item = value as Journal;
-  check(item.formatVersion === 1 && item.id === id && uuid.test(id) && item.store === store && item.operation === 'apply' && Number.isSafeInteger(item.sequence) && item.sequence >= 0 && /^[a-f0-9]{64}$/.test(item.planHash) && ['prepared', 'writing', 'verifying', 'committed', 'rolling-back', 'rolled-back'].includes(item.phase), 'INVALID_JOURNAL', 'Invalid transaction intent.');
+  check(item.formatVersion === 1 && item.id === id && uuid.test(id) && item.store === store && (item.operation === 'apply' || item.operation === 'restore') && Number.isSafeInteger(item.sequence) && item.sequence >= 0 && /^[a-f0-9]{64}$/.test(item.planHash) && ['prepared', 'writing', 'verifying', 'committed', 'rolling-back', 'rolled-back'].includes(item.phase), 'INVALID_JOURNAL', 'Invalid transaction intent.');
   check(item.target && typeof item.target.path === 'string' && item.target.before && /^[a-f0-9]{64}$/.test(item.target.afterHash) && Number.isSafeInteger(item.target.afterSize) && (item.target.previous === null || uuid.test(item.target.previous)), 'INVALID_JOURNAL', 'Invalid target transaction intent.');
+}
+
+async function backupBytes(directory: string, before: Snapshot): Promise<Buffer> {
+  const bytes = await regularBytes(join(directory, 'before.mjs'), true);
+  check(digest(bytes) === before.sha256 && bytes.length === before.size, 'BACKUP_CHANGED', 'Operation backup does not match authenticated preoperation state.');
+  return bytes;
 }
 
 async function recordAt(store: Store, id: string): Promise<RecordEntry> {
@@ -107,9 +114,10 @@ async function recordAt(store: Store, id: string): Promise<RecordEntry> {
   const plan = await loadPlan(join(directory, 'plan'));
   check(plan.manifest.contentHash === value.planHash && plan.targets.length === 1, 'INVALID_JOURNAL', 'Stored plan does not match authenticated transaction.');
   const target = plan.targets[0];
-  check(target && target.target.identity.path === value.target.path && target.target.patched.sha256 === value.target.afterHash && target.target.patched.size === value.target.afterSize, 'INVALID_JOURNAL', 'Stored target identity does not match intent.');
-  const before = await regularBytes(join(directory, 'before.mjs'), true);
-  check(digest(before) === value.target.before.sha256 && before.length === value.target.before.size && (before.equals(target.original) || before.equals(target.patched)), 'BACKUP_CHANGED', 'Operation backup does not match authenticated known state.');
+  const desired = value.operation === 'apply' ? target?.target.patched : target?.target.original;
+  check(target && target.target.identity.path === value.target.path && desired?.sha256 === value.target.afterHash && desired.size === value.target.afterSize, 'INVALID_JOURNAL', 'Stored target identity and operation outcome do not match intent.');
+  const before = await backupBytes(directory, value.target.before);
+  check(before.equals(target.original) || before.equals(target.patched), 'BACKUP_CHANGED', 'Operation backup does not match a known plan state.');
   if (terminal(value)) {
     const final = value.target.final;
     const expectedHash = value.phase === 'committed' ? value.target.afterHash : value.target.before.sha256;
@@ -167,7 +175,7 @@ async function copyPlan(plan: LoadedPlan, destination: string): Promise<void> {
   check(copied.manifest.contentHash === plan.manifest.contentHash, 'PLAN_CHANGED', 'Plan changed while copying.');
 }
 
-async function createIntent(store: Store, id: string, plan: LoadedPlan, before: Snapshot, previous: string | null, sequence: number): Promise<RecordEntry> {
+async function createIntent(store: Store, id: string, operation: Operation, plan: LoadedPlan, before: Snapshot, previous: string | null, sequence: number): Promise<RecordEntry> {
   const parent = join(store.path, 'transactions');
   const staging = join(parent, `.staging-${id}`);
   const destination = join(parent, id);
@@ -179,7 +187,8 @@ async function createIntent(store: Store, id: string, plan: LoadedPlan, before: 
     const bytes = await regularBytes(item.target.identity.path);
     check(digest(bytes) === before.sha256, 'TARGET_CHANGED', 'Target changed before intent publication.');
     await writeExclusive(join(staging, 'before.mjs'), bytes);
-    const journal: Journal = { formatVersion: 1, id, store: store.path, operation: 'apply', sequence, planHash: plan.manifest.contentHash, phase: 'prepared', target: { path: item.target.identity.path, before, afterHash: item.target.patched.sha256, afterSize: item.patched.length, final: null, previous } };
+    const desired = operation === 'apply' ? item.target.patched : item.target.original;
+    const journal: Journal = { formatVersion: 1, id, store: store.path, operation, sequence, planHash: plan.manifest.contentHash, phase: 'prepared', target: { path: item.target.identity.path, before, afterHash: desired.sha256, afterSize: desired.size, final: null, previous } };
     await writeExclusive(join(staging, 'journal.json'), JSON.stringify(sign(journal, store.key)) + '\n');
     await syncDirectory(staging);
     await rename(staging, destination);
@@ -260,8 +269,10 @@ async function rollback(store: Store, entry: RecordEntry): Promise<void> {
   await persist(store, entry);
   await processes();
   let final = current;
-  if (current.sha256 !== before.sha256 || current.size !== before.size) final = await replaceTarget(journal.target.path, await regularBytes(join(entry.directory, 'before.mjs'), true), current);
+  const bytes = await backupBytes(entry.directory, before);
+  if (current.sha256 !== before.sha256 || current.size !== before.size) final = await replaceTarget(journal.target.path, bytes, current);
   check(final.sha256 === before.sha256 && final.size === before.size, 'ROLLBACK_FAILED', 'Rollback did not restore preoperation content.');
+  check(same(await snapshot(journal.target.path), final), 'TARGET_CHANGED', 'Target changed before rollback commit.', journal.target.path);
   journal.target.final = final;
   journal.phase = 'rolled-back';
   await persist(store, entry);
@@ -273,14 +284,19 @@ function result(command: TransactionCommand, outcome: OperationResult['outcome']
 
 function failure(command: TransactionCommand, error: unknown): OperationResult {
   const known = error instanceof TransactionError;
-  return result(command, known ? error.kind : 'runtime-error', null, [{ code: known ? error.code : 'OPERATION_FAILED', severity: 'error', message: error instanceof Error ? error.message : 'Operation failed.', ...(known && error.path ? { path: error.path } : {}), ...(error instanceof Error && 'code' in error && !known ? { systemCode: String(error.code) } : {}) }]);
+  const invalidPlan = error instanceof Error && 'code' in error && error.code === 'INVALID_PLAN';
+  return result(command, known ? error.kind : invalidPlan ? 'conflict' : 'runtime-error', null, [{ code: known ? error.code : invalidPlan ? 'INVALID_PLAN' : 'OPERATION_FAILED', severity: 'error', message: error instanceof Error ? error.message : 'Operation failed.', ...(known && error.path ? { path: error.path } : {}), ...(error instanceof Error && 'code' in error && !known && !invalidPlan ? { systemCode: String(error.code) } : {}) }]);
 }
 
 export async function apply(options: Options): Promise<OperationResult> {
-  try { return await applyTransaction(options); } catch (error) { return failure('apply', error); }
+  try { return await changeTransaction('apply', options); } catch (error) { return failure('apply', error); }
 }
 
-async function applyTransaction(options: Options): Promise<OperationResult> {
+export async function restore(options: Options): Promise<OperationResult> {
+  try { return await changeTransaction('restore', options); } catch (error) { return failure('restore', error); }
+}
+
+async function changeTransaction(operation: Operation, options: Options): Promise<OperationResult> {
   let entry: RecordEntry | null = null;
   let store: Store | null = null;
   const leases: { root: string; lease: Awaited<ReturnType<typeof acquireLease>> }[] = [];
@@ -308,18 +324,21 @@ async function applyTransaction(options: Options): Promise<OperationResult> {
     check(!currentRecords.some((record) => !terminal(record.journal)), 'INCOMPLETE_TRANSACTION', 'Another transaction requires recovery.');
     const current = await classify(plan, currentRecords);
     check(same(current.snapshot, classified.snapshot), 'TARGET_CHANGED', 'Target changed while acquiring locks.');
-    entry = await createIntent(store, transaction, plan, current.snapshot, current.previous, Math.max(0, ...currentRecords.map((record) => record.journal.sequence)) + 1);
-    if (current.state === 'tool-applied') {
+    const desiredState = operation === 'apply' ? 'tool-applied' : 'original';
+    const desiredBytes = operation === 'apply' ? plan.targets[0]!.patched : plan.targets[0]!.original;
+    entry = await createIntent(store, transaction, operation, plan, current.snapshot, current.previous, Math.max(0, ...currentRecords.map((record) => record.journal.sequence)) + 1);
+    if (current.state === desiredState) {
+      check(same(await snapshot(path), current.snapshot), 'TARGET_CHANGED', 'Target changed before idempotent operation commit.', path);
       entry.journal.target.final = current.snapshot;
       entry.journal.phase = 'committed';
       await persist(store, entry);
-      return result('apply', 'success', { store: store.path, transaction: entry.journal.id, targets: [{ path, state: 'tool-applied', action: 'already-applied' }], runtime: 'not-verified' });
+      return result(operation, 'success', { store: store.path, transaction: entry.journal.id, operation: entry.journal.operation, targets: [{ path, state: desiredState, action: operation === 'apply' ? 'already-applied' : 'already-original' }], runtime: 'not-verified' });
     }
     await processes();
     entry.journal.phase = 'writing';
     await persist(store, entry);
     writing = true;
-    const final = await replaceTarget(path, plan.targets[0]!.patched, current.snapshot);
+    const final = await replaceTarget(path, desiredBytes, current.snapshot);
     entry.journal.phase = 'verifying';
     await persist(store, entry);
     check(same(await snapshot(path), final), 'POSTVERIFY_FAILED', 'Target changed before commit.');
@@ -327,17 +346,17 @@ async function applyTransaction(options: Options): Promise<OperationResult> {
     entry.journal.phase = 'committed';
     await persist(store, entry);
     writing = false;
-    return result('apply', 'success', { store: store.path, transaction: entry.journal.id, targets: [{ path, state: 'tool-applied', action: 'applied' }], runtime: 'not-verified' });
+    return result(operation, 'success', { store: store.path, transaction: entry.journal.id, operation: entry.journal.operation, targets: [{ path, state: desiredState, action: operation === 'apply' ? 'applied' : 'restored' }], runtime: 'not-verified' });
   } catch (error) {
     if (entry && store && !terminal(entry.journal) && !(error instanceof TransactionError && error.code === 'JOURNAL_WRITE_FAILED')) {
       try {
         if (writing) await rollback(store, entry);
         else { entry.journal.phase = 'rolled-back'; entry.journal.target.final = entry.journal.target.before; await persist(store, entry); }
       } catch (rollbackError) {
-        return result('apply', 'runtime-error', { store: store.path, transaction: entry.journal.id, targets: [{ path: entry.journal.target.path, state: 'incomplete' }], runtime: 'not-verified' }, [{ code: 'ROLLBACK_FAILED', severity: 'error', message: `${error instanceof Error ? error.message : 'Apply failed.'} Rollback failed: ${rollbackError instanceof Error ? rollbackError.message : 'unknown error'}. Explicit recover is required.` }]);
+        return result(operation, 'runtime-error', { store: store.path, transaction: entry.journal.id, operation: entry.journal.operation, targets: [{ path: entry.journal.target.path, state: 'incomplete' }], runtime: 'not-verified' }, [{ code: 'ROLLBACK_FAILED', severity: 'error', message: `${error instanceof Error ? error.message : `${operation} failed.`} Rollback failed: ${rollbackError instanceof Error ? rollbackError.message : 'unknown error'}. Explicit recover is required.` }]);
       }
     }
-    return failure('apply', error);
+    return failure(operation, error);
   } finally {
     if (!entry || terminal(entry.journal)) for (const { root, lease } of leases.reverse()) await releaseLease(root, lease);
   }
@@ -358,10 +377,10 @@ export async function status(options: Options): Promise<OperationResult> {
       if (pending) {
         try {
           await recoverySnapshot(pending);
-          return result('status', 'success', { store: options.store, transaction: pending.journal.id, targets: [{ path, state: 'incomplete' }], runtime: 'not-verified' });
+          return result('status', 'success', { store: options.store, transaction: pending.journal.id, operation: pending.journal.operation, targets: [{ path, state: 'incomplete' }], runtime: 'not-verified' });
         } catch (error) {
           if (!(error instanceof TransactionError)) throw error;
-          return result('status', 'conflict', { store: options.store, transaction: pending.journal.id, targets: [{ path, state: 'conflict' }], runtime: 'not-verified' });
+          return result('status', 'conflict', { store: options.store, transaction: pending.journal.id, operation: pending.journal.operation, targets: [{ path, state: 'conflict' }], runtime: 'not-verified' });
         }
       }
       const bytes = await regularBytes(path);
@@ -369,14 +388,16 @@ export async function status(options: Options): Promise<OperationResult> {
       const analysis = analyzeSource(bytes.toString('utf8'));
       const untrusted = analysis.diagnostics.some((entry) => entry.code === 'UNTRUSTED_PATCHED_SHAPE');
       const state = untrusted ? 'conflict' : analysis.compatibility === 'compatible' ? 'original' : 'incompatible';
-      return result('status', untrusted ? 'conflict' : state === 'incompatible' ? 'incompatible' : 'success', { store: options.store, transaction: null, targets: [{ path, state }], runtime: 'not-verified' }, analysis.diagnostics.map((entry) => ({ ...entry, path })));
+      return result('status', untrusted ? 'conflict' : state === 'incompatible' ? 'incompatible' : 'success', { store: options.store, transaction: null, operation: null, targets: [{ path, state }], runtime: 'not-verified' }, analysis.diagnostics.map((entry) => ({ ...entry, path })));
     }
     const plan = await loadPlan(options.plan);
     const targets: NonNullable<OperationResult['data']>['targets'] = [];
+    let pendingTransaction = incomplete[0] ?? null;
     for (const item of plan.targets) {
       const path = item.target.identity.path;
       const pending = incomplete.find((entry) => entry.journal.target.path === path) ?? await pendingAtTarget(path);
       if (pending) {
+        pendingTransaction ??= pending;
         try { await recoverySnapshot(pending); targets.push({ path, state: 'incomplete' }); }
         catch (error) { if (!(error instanceof TransactionError)) throw error; targets.push({ path, state: 'conflict' }); }
       } else {
@@ -387,7 +408,7 @@ export async function status(options: Options): Promise<OperationResult> {
       }
     }
     const conflict = targets.some((target) => target.state === 'conflict');
-    return result('status', conflict ? 'conflict' : 'success', { store: options.store, transaction: incomplete[0]?.journal.id ?? null, targets, runtime: 'not-verified' });
+    return result('status', conflict ? 'conflict' : 'success', { store: options.store, transaction: pendingTransaction?.journal.id ?? null, operation: pendingTransaction?.journal.operation ?? null, targets, runtime: 'not-verified' });
   } catch (error) { return failure('status', error); }
 }
 
@@ -406,7 +427,7 @@ async function recoverTransaction(options: Options): Promise<OperationResult> {
     const pending = history.filter((record) => !terminal(record.journal));
     check(pending.length <= 1, 'AMBIGUOUS_TRANSACTION', 'Store contains multiple incomplete transactions; refusing to guess.');
     entry = pending[0] ?? null;
-    if (!entry) return result('recover', 'success', { store: store.path, transaction: null, targets: [], runtime: 'not-verified' }, [{ code: 'NO_INCOMPLETE_TRANSACTION', severity: 'info', message: 'No incomplete transaction; nothing to roll back.' }]);
+    if (!entry) return result('recover', 'success', { store: store.path, transaction: null, operation: null, targets: [], runtime: 'not-verified' }, [{ code: 'NO_INCOMPLETE_TRANSACTION', severity: 'info', message: 'No incomplete transaction; nothing to roll back.' }]);
     const table = await processes();
     for (const root of [join(store.path, 'operation.lock'), targetLock(entry.journal.target.path)]) {
       const lease = await acquireLease(root, { store: store.path, transaction: entry.journal.id, table }, (previous) => previousTransaction(previous, entry, true));
@@ -414,7 +435,7 @@ async function recoverTransaction(options: Options): Promise<OperationResult> {
     }
     await rollback(store, entry);
     const original = entry.plan.targets[0]?.target.original.sha256 === entry.journal.target.before.sha256;
-    return result('recover', 'success', { store: store.path, transaction: entry.journal.id, targets: [{ path: entry.journal.target.path, state: original ? 'original' : 'tool-applied', action: 'rolled-back' }], runtime: 'not-verified' });
+    return result('recover', 'success', { store: store.path, transaction: entry.journal.id, operation: entry.journal.operation, targets: [{ path: entry.journal.target.path, state: original ? 'original' : 'tool-applied', action: 'rolled-back' }], runtime: 'not-verified' });
   } catch (error) { return failure('recover', error); } finally {
     if (entry && terminal(entry.journal)) for (const { root, lease } of leases.reverse()) await releaseLease(root, lease);
   }

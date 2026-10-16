@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout } from 'node:timers';
-import { access, link, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, link, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,11 +46,12 @@ function response(result, expected = 0) {
 }
 
 const apply = (box, extra = {}) => run(box, ['apply', '--plan', box.plan, '--store', box.store], extra);
+const restore = (box, extra = {}) => run(box, ['restore', '--plan', box.plan, '--store', box.store], extra);
 const status = (box) => run(box, ['status', '--plan', box.plan, '--store', box.store]);
 const recover = (box, extra = {}) => run(box, ['recover', '--store', box.store], extra);
 
 async function paused(t, box, command, boundary, extraEnv = {}) {
-  const args = command === 'apply' ? ['apply', '--plan', box.plan, '--store', box.store] : ['recover', '--store', box.store];
+  const args = command === 'recover' ? ['recover', '--store', box.store] : [command, '--plan', box.plan, '--store', box.store];
   const child = spawn(process.execPath, ['--require', fixture, cli, ...args, '--json'], {
     ...options(box, { CODEX_TEST_PAUSE: boundary, CODEX_TEST_TARGET: box.target, ...extraEnv }),
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
@@ -96,6 +97,159 @@ test('single-target apply records tool provenance, preserves mode and supports e
   assert.equal(await readFile(box.target, 'utf8'), patched);
 });
 
+test('restore returns verified original bytes, preserves mode and supports round trips and original-state idempotence', async (t) => {
+  const box = await sandbox(t);
+  const initialInode = (await stat(box.target)).ino;
+  const original = response(restore(box));
+  assert.equal(original.command, 'restore');
+  assert.equal(original.data.targets[0].action, 'already-original');
+  assert.equal(original.data.targets[0].state, 'original');
+  assert.equal((await stat(box.target)).ino, initialInode);
+  const applied = response(apply(box));
+  const patched = await readFile(box.target);
+  const restored = response(restore(box));
+  assert.notEqual(restored.data.transaction, applied.data.transaction);
+  assert.equal(restored.data.targets[0].action, 'restored');
+  assert.equal(restored.data.targets[0].state, 'original');
+  assert.equal(restored.data.runtime, 'not-verified');
+  assert.equal(await readFile(box.target, 'utf8'), source);
+  assert.equal((await stat(box.target)).mode & 0o7777, 0o640);
+  assert.equal(response(status(box)).data.targets[0].state, 'original');
+  const restoredInode = (await stat(box.target)).ino;
+  assert.equal(response(restore(box)).data.targets[0].action, 'already-original');
+  assert.equal((await stat(box.target)).ino, restoredInode);
+  response(apply(box));
+  assert.deepEqual(await readFile(box.target), patched);
+  assert.equal(response(status(box)).data.targets[0].state, 'tool-applied');
+  assert.equal(response(apply(box)).data.targets[0].action, 'already-applied');
+});
+
+test('idempotent restore rechecks current original identity after durable intent publication', async (t) => {
+  const box = await sandbox(t);
+  const restoring = await paused(t, box, 'restore', 'after-intent-publication');
+  await writeFile(box.target, 'external edit after original preflight');
+  const failed = response(await restoring.finish(), 4);
+  assert.equal(failed.diagnostics[0].code, 'TARGET_CHANGED');
+  assert.equal(await readFile(box.target, 'utf8'), 'external edit after original preflight');
+  assert.equal(response(status(box), 4).data.targets[0].state, 'conflict');
+});
+
+test('interrupted original-state restore recovers original and protects changes during no-replacement recovery', async (t) => {
+  const box = await sandbox(t);
+  const interrupted = await paused(t, box, 'restore', 'after-intent-publication');
+  await interrupted.kill();
+  assert.equal(response(status(box)).data.operation, 'restore');
+  const recovered = response(recover(box));
+  assert.equal(recovered.data.targets[0].state, 'original');
+  assert.equal(await readFile(box.target, 'utf8'), source);
+  const again = await paused(t, box, 'restore', 'after-intent-publication');
+  await again.kill();
+  const recovering = await paused(t, box, 'recover', 'after-rollback-intent');
+  await writeFile(box.target, 'external change during no-replacement recovery');
+  const rejected = response(await recovering.finish(), 4);
+  assert.equal(rejected.diagnostics[0].code, 'TARGET_CHANGED');
+  assert.equal(await readFile(box.target, 'utf8'), 'external change during no-replacement recovery');
+  const state = response(status(box), 4);
+  assert.equal(state.data.targets[0].state, 'conflict');
+  assert.equal(state.data.operation, 'restore');
+  response(recover(box), 4);
+});
+
+test('restore refuses untrusted patched contents without creating store or changing target', async (t) => {
+  const box = await sandbox(t);
+  const patched = await readFile(join(box.plan, 'contents/0000.patched.mjs'));
+  await writeFile(box.target, patched);
+  const unknown = response(restore(box), 4);
+  assert.equal(unknown.diagnostics[0].code, 'TARGET_CONFLICT');
+  assert.deepEqual(await readFile(box.target), patched);
+  await assert.rejects(access(box.store));
+  assert.equal(response(run(box, ['status', '--target', box.target, '--store', box.store]), 4).diagnostics[0].code, 'UNTRUSTED_PATCHED_SHAPE');
+});
+
+test('restore validates review and stored plans, backups and provenance before any target replacement', async (t) => {
+  for (const mutation of ['original', 'patched', 'manifest', 'complete', 'backup', 'stored-plan', 'journal', 'key', 'missing-record', 'other-store']) {
+    const box = await sandbox(t);
+    const id = response(apply(box)).data.transaction;
+    const directory = join(box.store, 'transactions', id);
+    if (mutation === 'original' || mutation === 'patched') await writeFile(join(box.plan, 'contents', `0000.${mutation}.mjs`), 'tampered review artifact');
+    if (mutation === 'manifest') {
+      const path = join(box.plan, 'contents/manifest.json');
+      const value = JSON.parse(await readFile(path, 'utf8'));
+      value.targets[0].identity.version = 'elsewhere';
+      await writeFile(path, JSON.stringify(value));
+    }
+    if (mutation === 'complete') await writeFile(join(box.plan, 'complete.json'), '{}');
+    if (mutation === 'backup') await writeFile(join(directory, 'before.mjs'), 'damaged verified original');
+    if (mutation === 'stored-plan') await writeFile(join(directory, 'plan/contents/0000.original.mjs'), 'damaged stored original');
+    if (mutation === 'journal') {
+      const path = join(directory, 'journal.json');
+      const value = JSON.parse(await readFile(path, 'utf8'));
+      value.record.operation = 'restore';
+      await writeFile(path, JSON.stringify(value));
+    }
+    if (mutation === 'key') await writeFile(join(box.store, 'key'), Buffer.alloc(32));
+    if (mutation === 'missing-record') await rm(directory, { recursive: true });
+    const selected = mutation === 'other-store' ? { ...box, store: join(box.directory, 'other-store') } : box;
+    const before = await readFile(box.target);
+    const inode = (await stat(box.target)).ino;
+    const rejected = response(restore(selected), 4);
+    assert.equal(rejected.outcome, 'conflict', mutation);
+    assert.deepEqual(await readFile(box.target), before, mutation);
+    assert.equal((await stat(box.target)).ino, inode, mutation);
+    if (mutation === 'other-store') await assert.rejects(access(selected.store));
+  }
+});
+
+test('restore CLI requires explicit single-plan selection and explains restoration versus interrupted rollback', async (t) => {
+  const box = await sandbox(t);
+  for (const args of [
+    ['restore'], ['restore', '--plan', box.plan], ['restore', '--store', box.store],
+    ['restore', '--target', box.target, '--store', box.store],
+    ['restore', '--plan', box.plan, '--store', box.store, '--all-compatible'],
+    ['restore', '--plan', box.plan, '--store', box.store, '--plugin-root', join(box.directory, 'plugins')],
+  ]) {
+    const invalid = response(run(box, args), 2);
+    assert.equal(invalid.command, 'restore');
+    assert.equal(invalid.diagnostics[0].code, 'INVALID_ARGUMENTS');
+  }
+  const help = spawnSync(process.execPath, ['--require', fixture, cli, 'restore', '--help'], options(box));
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /restore --plan <directory> --store <private-directory>/);
+  assert.match(help.stdout, /restore returns a trusted target to verified original content/);
+  assert.match(help.stdout, /never continues apply or restore/);
+  const human = spawnSync(process.execPath, ['--require', fixture, cli, 'restore', '--plan', box.plan, '--store', box.store], options(box));
+  assert.equal(human.status, 0, human.stdout + human.stderr);
+  assert.match(human.stdout, /restore: success/);
+  assert.match(human.stdout, /original \(already-original\)/);
+  assert.match(human.stdout, /Runtime: not-verified/);
+});
+
+test('restore preserves external content, filesystem identity changes and aliases detected during preflight', async (t) => {
+  for (const mutation of ['external', 'upgrade', 'identity', 'mode', 'symlink', 'hardlink']) {
+    const box = await sandbox(t);
+    response(apply(box));
+    if (mutation === 'external') await writeFile(box.target, 'user edited after apply');
+    if (mutation === 'upgrade') await writeFile(box.target, source + '// new plugin build');
+    if (mutation === 'identity') {
+      const bytes = await readFile(box.target);
+      await rm(box.target); await writeFile(box.target, bytes, { mode: 0o640 });
+    }
+    if (mutation === 'mode') await chmod(box.target, 0o600);
+    if (mutation === 'symlink') {
+      const bytes = await readFile(box.target);
+      const outside = join(box.directory, 'outside.mjs');
+      await writeFile(outside, bytes); await rm(box.target); await symlink(outside, box.target);
+    }
+    if (mutation === 'hardlink') await link(box.target, join(box.directory, 'alias.mjs'));
+    const before = await readFile(box.target);
+    const identity = await stat(box.target);
+    response(restore(box), 4);
+    assert.deepEqual(await readFile(box.target), before, mutation);
+    assert.equal((await stat(box.target)).ino, identity.ino, mutation);
+    assert.equal((await stat(box.target)).mode, identity.mode, mutation);
+  }
+});
+
 test('process enumeration fails closed; actual ChatGPT/Codex and standalone browser-service block writes', async (t) => {
   const box = await sandbox(t);
   const blockers = [
@@ -118,6 +272,28 @@ test('process enumeration fails closed; actual ChatGPT/Codex and standalone brow
     { pid: 4011, executable: '/usr/local/bin/node', command: 'node --test /tmp/tests/Codex-process.test.mjs' },
   ];
   response(apply(box, { CODEX_TEST_PROCESS_ROWS: JSON.stringify(harmless) }));
+});
+
+test('restore refuses running processes and failed enumeration before locks or target writes', async (t) => {
+  const box = await sandbox(t);
+  response(apply(box));
+  const patched = await readFile(box.target);
+  const inode = (await stat(box.target)).ino;
+  const blockers = [
+    { pid: 4201, executable: '/Applications/ChatGPT.app/Contents/MacOS/ChatGPT', command: 'ChatGPT' },
+    { pid: 4202, executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' },
+    { pid: 4203, executable: '/usr/local/bin/node', command: 'node /tmp/synthetic/browser-service.mjs --stdio' },
+  ];
+  for (const row of blockers) {
+    const blocked = response(restore(box, { CODEX_TEST_PROCESS_ROWS: JSON.stringify([row]) }), 4);
+    assert.equal(blocked.diagnostics[0].code, 'PROCESSES_RUNNING');
+    assert.match(blocked.diagnostics[0].message, new RegExp(String(row.pid)));
+  }
+  assert.equal(response(restore(box, { CODEX_TEST_PROCESS_FAILURE: '1' }), 1).diagnostics[0].code, 'PROCESS_ENUMERATION_FAILED');
+  assert.deepEqual(await readFile(box.target), patched);
+  assert.equal((await stat(box.target)).ino, inode);
+  assert.equal(response(status(box)).data.targets[0].state, 'tool-applied');
+  response(restore(box));
 });
 
 test('apply preflights current identity and every plan artifact before target or store writes', async (t) => {
@@ -153,8 +329,10 @@ test('multi-target plans reject entirely and operation commands require explicit
   await writeFile(second, source);
   const plan = join(box.directory, 'multi');
   response(run(box, ['prepare', '--plugin-root', join(box.directory, 'plugins'), '--all-compatible', '--output', plan]));
-  const output = response(apply({ ...box, plan }), 2);
-  assert.equal(output.diagnostics[0].code, 'MULTI_TARGET_UNSUPPORTED');
+  for (const operation of [apply, restore]) {
+    const output = response(operation({ ...box, plan }), 2);
+    assert.equal(output.diagnostics[0].code, 'MULTI_TARGET_UNSUPPORTED');
+  }
   assert.equal(await readFile(box.target, 'utf8'), source);
   assert.equal(await readFile(second, 'utf8'), source);
   await assert.rejects(access(box.store));
@@ -184,6 +362,42 @@ test('SIGKILL after target rename and again during recovery rolls back from dura
   response(apply(box));
 });
 
+test('interrupted restore and repeatedly interrupted recover return the actual patched pre-restore state', async (t) => {
+  for (const boundary of ['before-target-rename', 'after-target-rename', 'after-postverification', 'before-commit']) {
+    const box = await sandbox(t);
+    response(apply(box));
+    const patched = await readFile(box.target);
+    const interrupted = await paused(t, box, 'restore', boundary);
+    if (boundary !== 'before-target-rename') assert.equal(await readFile(box.target, 'utf8'), source);
+    await interrupted.kill();
+    const incomplete = response(status(box));
+    assert.equal(incomplete.data.targets[0].state, 'incomplete');
+    assert.equal(incomplete.data.operation, 'restore');
+    assert.equal(response(restore(box), 4).diagnostics[0].code, 'INCOMPLETE_TRANSACTION');
+    assert.equal(response(apply(box), 4).diagnostics[0].code, 'INCOMPLETE_TRANSACTION');
+    const other = { ...box, store: join(box.directory, 'other-store') };
+    assert.equal(response(restore(other), 4).diagnostics[0].code, 'INCOMPLETE_TRANSACTION');
+    if (boundary !== 'before-target-rename') {
+      const recovering = await paused(t, box, 'recover', 'after-target-rename');
+      assert.deepEqual(await readFile(box.target), patched);
+      await recovering.kill();
+      assert.equal(response(status(box)).data.targets[0].state, 'incomplete');
+    }
+    const finalizing = await paused(t, box, 'recover', 'before-rollback-commit');
+    assert.deepEqual(await readFile(box.target), patched);
+    await finalizing.kill();
+    assert.equal(response(status(box)).data.targets[0].state, 'incomplete');
+    const recovered = response(recover(box));
+    assert.equal(recovered.data.targets[0].state, 'tool-applied');
+    assert.equal(recovered.data.targets[0].action, 'rolled-back');
+    assert.deepEqual(await readFile(box.target), patched);
+    assert.equal(response(status(box)).data.targets[0].state, 'tool-applied');
+    assert.equal(response(recover(box)).diagnostics[0].code, 'NO_INCOMPLETE_TRANSACTION');
+    response(restore(box));
+    assert.equal(await readFile(box.target, 'utf8'), source);
+  }
+});
+
 test('status accepts explicit targets, distinguishes incompatibility and untrusted patches, and never creates state', async (t) => {
   const box = await sandbox(t);
   const original = response(run(box, ['status', '--target', box.target, '--store', box.store]));
@@ -210,6 +424,21 @@ test('held locks exclude concurrent stores; dead owners without an intent can be
   await holder.kill();
   response(apply(other));
   assert.match(await readFile(box.target, 'utf8'), /agent:false/);
+});
+
+test('restore holds the same operation and target locks; a dead pre-intent owner can be superseded', async (t) => {
+  const box = await sandbox(t);
+  response(apply(box));
+  const patched = await readFile(box.target);
+  const holder = await paused(t, box, 'restore', 'target-lock-acquired');
+  assert.equal(response(restore(box), 4).diagnostics[0].code, 'OWNER_UNVERIFIED');
+  const other = { ...box, store: join(box.directory, 'other-store') };
+  assert.equal(response(apply(other), 4).outcome, 'conflict');
+  assert.deepEqual(await readFile(box.target), patched);
+  await holder.kill();
+  response(restore(box));
+  assert.equal(await readFile(box.target, 'utf8'), source);
+  assert.equal(response(status(box)).data.targets[0].state, 'original');
 });
 
 test('unprovable owner and aliased operation stores fail closed without touching targets', async (t) => {
@@ -282,6 +511,76 @@ test('write failures including rename-then-error roll back; failed rollback stay
     assert.equal(response(status(box)).data.targets[0].state, 'original');
     response(apply(box));
   }
+});
+
+test('restore write and rollback failures preserve patched before-state and remain explicitly recoverable', async (t) => {
+  for (const fault of ['write-failure', 'rename-then-error', 'rollback-failure', 'commit-journal-failure']) {
+    const box = await sandbox(t);
+    response(apply(box));
+    const patched = await readFile(box.target);
+    const output = response(restore(box, { CODEX_TEST_TARGET: box.target, CODEX_TEST_FAULT: fault }), 1);
+    assert.equal(output.command, 'restore');
+    if (fault === 'rollback-failure' || fault === 'commit-journal-failure') {
+      assert.equal(output.diagnostics[0].code, fault === 'rollback-failure' ? 'ROLLBACK_FAILED' : 'JOURNAL_WRITE_FAILED');
+      assert.equal(await readFile(box.target, 'utf8'), source);
+      assert.equal(response(status(box)).data.targets[0].state, 'incomplete');
+      assert.equal(response(restore(box), 4).diagnostics[0].code, 'INCOMPLETE_TRANSACTION');
+      response(recover(box, { CODEX_TEST_TARGET: box.target, CODEX_TEST_FAULT: 'rollback-journal-failure' }), 1);
+      assert.deepEqual(await readFile(box.target), patched);
+      assert.equal(response(status(box)).data.targets[0].state, 'incomplete');
+      response(recover(box));
+    }
+    assert.deepEqual(await readFile(box.target), patched);
+    assert.equal(response(status(box)).data.targets[0].state, 'tool-applied');
+    response(recover(box));
+    response(restore(box));
+    assert.equal(await readFile(box.target, 'utf8'), source);
+  }
+});
+
+test('recover rejects a restore backup changed after preflight without replacing current original bytes', async (t) => {
+  const box = await sandbox(t);
+  response(apply(box));
+  const interrupted = await paused(t, box, 'restore', 'after-target-rename');
+  await interrupted.kill();
+  const id = response(status(box)).data.transaction;
+  const directory = join(box.store, 'transactions', id);
+  const backup = join(directory, 'before.mjs');
+  const rejected = response(recover(box, { CODEX_TEST_TARGET: box.target, CODEX_TEST_BACKUP: backup, CODEX_TEST_FAULT: 'recovery-backup-change' }), 4);
+  assert.equal(rejected.diagnostics[0].code, 'BACKUP_CHANGED');
+  assert.equal(await readFile(box.target, 'utf8'), source);
+  assert.equal(await readFile(backup, 'utf8'), 'external backup change');
+  await access(join(directory, 'journal.json'));
+  assert.equal(response(restore(box), 4).diagnostics[0].code, 'BACKUP_CHANGED');
+});
+
+test('restore and recover preserve external modifications at replacement and interrupted recovery boundaries', async (t) => {
+  for (const fault of ['prewrite-change', 'postwrite-change', 'parent-replaced']) {
+    const box = await sandbox(t);
+    response(apply(box));
+    const patched = await readFile(box.target, 'utf8');
+    const failed = restore(box, { CODEX_TEST_TARGET: box.target, CODEX_TEST_FAULT: fault });
+    assert.ok(failed.status === 4 || failed.status === 1, failed.stdout + failed.stderr);
+    const changed = await readFile(box.target, 'utf8');
+    assert.equal(changed, fault === 'parent-replaced' ? patched : 'external boundary change');
+    assert.equal(response(status(box), 4).data.targets[0].state, 'conflict');
+    response(recover(box), 4);
+    assert.equal(await readFile(box.target, 'utf8'), changed);
+  }
+  const box = await sandbox(t);
+  response(apply(box));
+  const interrupted = await paused(t, box, 'restore', 'after-target-rename');
+  await interrupted.kill();
+  const id = response(status(box)).data.transaction;
+  const journal = join(box.store, 'transactions', id, 'journal.json');
+  const beforeJournal = await readFile(journal);
+  await writeFile(box.target, 'external edit during interrupted restore');
+  const rejected = response(recover(box), 4);
+  assert.equal(rejected.diagnostics[0].code, 'RECOVERY_CONFLICT');
+  assert.equal(await readFile(box.target, 'utf8'), 'external edit during interrupted restore');
+  assert.deepEqual(await readFile(journal), beforeJournal);
+  assert.equal(response(status(box), 4).data.transaction, id);
+  assert.equal(response(restore(box), 4).diagnostics[0].code, 'INCOMPLETE_TRANSACTION');
 });
 
 test('prewrite and postverification interruptions stay incomplete; explicit recover always restores before state', async (t) => {

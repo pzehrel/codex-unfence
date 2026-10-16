@@ -57,14 +57,15 @@ export interface PreparationResult extends ResultBase {
   data: Preparation | null;
 }
 
-export type TransactionCommand = 'apply' | 'status' | 'recover';
+export type TransactionCommand = 'apply' | 'restore' | 'status' | 'recover';
 export type TargetState = 'original' | 'tool-applied' | 'incompatible' | 'conflict' | 'incomplete';
 export interface OperationResult extends ResultBase {
   command: TransactionCommand;
   data: {
     store: string;
     transaction: string | null;
-    targets: { path: string; state: TargetState; action?: 'applied' | 'already-applied' | 'rolled-back' }[];
+    operation: 'apply' | 'restore' | null;
+    targets: { path: string; state: TargetState; action?: 'applied' | 'already-applied' | 'restored' | 'already-original' | 'rolled-back' }[];
     runtime: 'not-verified';
   } | null;
 }
@@ -76,7 +77,8 @@ export function renderHuman(result: CommandResult): string {
   if (result.data) {
     if ('pluginRoot' in result.data) lines.push(`Plugin root: ${result.data.pluginRoot}`);
     if ('store' in result.data) {
-      lines.push(`Operation store: ${result.data.store}`, `Transaction: ${result.data.transaction ?? 'none'}`);
+      lines.push(`Operation store: ${result.data.store}`, `Transaction: ${result.data.transaction ?? 'none'}`, `Operation: ${result.data.operation ?? 'none'}`);
+      if (result.data.targets.some((target) => target.state === 'incomplete')) lines.push('Explicit recover rolls back to the preoperation state; it does not continue apply or restore.');
       for (const target of result.data.targets) lines.push(`${target.path}: ${target.state}${target.action ? ` (${target.action})` : ''}`);
     }
     for (const artifact of result.command === 'detect' ? result.data.artifacts : []) {

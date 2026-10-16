@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import { detect } from './discovery.js';
 import { prepare } from './plan.js';
-import { apply, recover, status } from './transactions.js';
+import { apply, recover, restore, status } from './transactions.js';
 import { isAbsolute } from 'node:path';
 import { EXIT_CODES, renderHuman } from './result.js';
 import type { CommandResult } from './result.js';
@@ -14,6 +14,7 @@ Usage:
   codex-browser-patch prepare [--plugin-root <directory>] --target <absolute-artifact-path> [--target <path> ...] --output <new-plan-directory> [--json]
   codex-browser-patch prepare [--plugin-root <directory>] --all-compatible --output <new-plan-directory> [--json]
   codex-browser-patch apply --plan <directory> --store <private-directory> [--json]
+  codex-browser-patch restore --plan <directory> --store <private-directory> [--json]
   codex-browser-patch status --plan <directory> --store <private-directory> [--json]
   codex-browser-patch status --target <absolute-artifact-path> --store <private-directory> [--json]
   codex-browser-patch recover --store <private-directory> [--json]
@@ -28,12 +29,15 @@ Exact paths come from detect. --all-compatible filters compatible artifacts expl
 Aliases to the same file are rejected. Existing output paths are never overwritten.
 Plans retain UTF-8 originals, patched artifacts, UTF-16 evidence, local diffs and hashes.
 Plan integrity is consistency, not authentication or proof of tool application.
-apply accepts a single-target plan; multi-target writing is rejected entirely.
+apply and restore accept a single-target plan; multi-target writing is rejected entirely.
 All operation commands require explicit --store. status is read-only.
 The store must be private (0700), owned by this user, and use canonical paths.
-apply records durable intent and a private authenticated backup before atomic rename.
+apply and restore record durable intent and a private authenticated backup before atomic rename.
+restore returns a trusted target to verified original content; known originals report already-original.
+Patched contents require verified tool records and backups; patch shape alone proves no provenance.
 An incomplete transaction blocks ordinary writes, including from other stores.
-recover always rolls back to that operation's before state; it never continues apply.
+recover always rolls back to that operation's before state; it never continues apply or restore.
+An interrupted restore is rolled back to its actual pre-restore state, usually tool-applied.
 Keep the store and sibling .codex-browser-patch.lock history until recovery is complete.
 Unknown contents and aliases are conflicts. Exit Codex/ChatGPT and browser-service first.
 Process checks use ps snapshots; detection is limited and never terminates processes.
@@ -77,13 +81,13 @@ async function main(): Promise<CommandResult | null> {
       if (token.name !== 'target' && seen.has(token.name)) throw new Error(`Duplicate option: --${token.name}`);
       seen.add(token.name);
     }
-    if (values.help && (positionals.length === 0 || (positionals.length === 1 && ['detect', 'prepare', 'apply', 'status', 'recover'].includes(positionals[0] ?? '')))) {
+    if (values.help && (positionals.length === 0 || (positionals.length === 1 && ['detect', 'prepare', 'apply', 'restore', 'status', 'recover'].includes(positionals[0] ?? '')))) {
       process.stdout.write(help);
       return null;
     }
     const command = positionals[0];
-    if (positionals.length !== 1 || !['detect', 'prepare', 'apply', 'status', 'recover'].includes(command ?? '')) throw new Error('Expected command: detect, prepare, apply, status or recover. Use --help for usage.');
-    if (command === 'apply' || command === 'status' || command === 'recover') {
+    if (positionals.length !== 1 || !['detect', 'prepare', 'apply', 'restore', 'status', 'recover'].includes(command ?? '')) throw new Error('Expected command: detect, prepare, apply, restore, status or recover. Use --help for usage.');
+    if (command === 'apply' || command === 'restore' || command === 'status' || command === 'recover') {
       if (values['plugin-root'] !== undefined || (values.target && command !== 'status') || values['all-compatible'] || values.output !== undefined) throw new Error('Operation commands use --plan and --store selection.');
       const store = values.store;
       if (!store || !isAbsolute(store)) throw new Error('--store requires an explicit absolute operation directory.');
@@ -96,9 +100,9 @@ async function main(): Promise<CommandResult | null> {
         return await status({ store, targets: values.target });
       }
       if (!values.plan || !isAbsolute(values.plan)) throw new Error('--plan requires an explicit absolute review directory.');
-      return await (command === 'apply' ? apply : status)({ store, plan: values.plan });
+      return await ({ apply, restore, status }[command])({ store, plan: values.plan });
     }
-    if (values.plan !== undefined || values.store !== undefined) throw new Error('--plan and --store require apply, status or recover.');
+    if (values.plan !== undefined || values.store !== undefined) throw new Error('--plan and --store require apply, restore, status or recover.');
     const root = values['plugin-root'];
     if (root !== undefined && (root.length === 0 || root.startsWith('-'))) throw new Error('--plugin-root requires a directory path.');
     if (command === 'detect' && (values.target || values['all-compatible'] || values.output !== undefined)) throw new Error('Selection and output options require prepare.');
@@ -123,7 +127,7 @@ async function main(): Promise<CommandResult | null> {
   } catch (error) {
     return {
       schemaVersion: 1,
-      command: args[0] === 'detect' || args[0] === 'prepare' || args[0] === 'apply' || args[0] === 'status' || args[0] === 'recover' ? args[0] : null,
+      command: args[0] === 'detect' || args[0] === 'prepare' || args[0] === 'apply' || args[0] === 'restore' || args[0] === 'status' || args[0] === 'recover' ? args[0] : null,
       outcome: 'usage-error',
       exitCode: EXIT_CODES.usageError,
       data: null,
