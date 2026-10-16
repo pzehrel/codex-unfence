@@ -16,15 +16,24 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: npm run typecheck
-      - run: npm run lint
-      # Includes tests/package.test.mjs: offline tarball install and the full installed-bin lifecycle.
-      # Synthetic process/filesystem fixtures are external test preloads; Codex is never required.
-      - name: Source tests and installed package acceptance (no core skips)
-        run: npm test
-      - run: npm run build
+      # Includes the build, source tests and offline installed-bin lifecycle; Codex is never required.
+      - name: Shared checks against the event baseline
+        env:
+          CHECK_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$CHECK_BASE"
+          if [[ "$base" =~ ^0+$ ]]; then
+            # A new branch has no before commit: check its entire tracked tree.
+            base="$(git hash-object -w -t tree --stdin < /dev/null)"
+          elif ! git cat-file -e "${base}^{tree}"; then
+            # A force-push can leave the previous tip outside the fetched branch history.
+            git fetch --no-tags origin "$base"
+          fi
+          npm run check -- --base "$base"

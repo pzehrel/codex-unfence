@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { runCli, startCli } from './helpers/cli.mjs';
+import { packPackage, installPackage } from './helpers/npm-package.mjs';
 import { once } from 'node:events';
 import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -46,13 +47,11 @@ async function sandbox(t, installation) {
     await writeFile(path, source, { mode: 0o640 });
   }
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const env = { ...installation.env, HOME: directory, XDG_STATE_HOME: join(directory, 'unused-state') };
-  const options = (extraEnv = {}) => ({ cwd: directory, encoding: 'utf8', env: { ...env, ...extraEnv } });
-  const run = (args, { json = true, extraEnv = {} } = {}) => spawnSync(process.execPath,
-    ['--require', fixture, installation.binary, ...args, ...(json ? ['--json'] : [])], options(extraEnv));
+  const run = (args, { json = true, extraEnv = {} } = {}) => runCli(
+    [...args, ...(json ? ['--json'] : [])], { directory, fixture, binary: installation.binary, env: extraEnv });
   const plan = join(directory, 'review-plan');
   const store = join(directory, 'private-store');
-  return { directory, root, targets, plan, store, run, options, binary: installation.binary };
+  return { directory, root, targets, plan, store, run, binary: installation.binary };
 }
 
 function prepare(box) {
@@ -68,8 +67,8 @@ const operationArgs = (box, command) => command === 'recover'
 const operation = (box, command, options) => box.run(operationArgs(box, command), options);
 
 async function interrupt(t, box, command, boundary, target) {
-  const child = spawn(process.execPath, ['--require', fixture, box.binary, ...operationArgs(box, command), '--json'], {
-    ...box.options({ CODEX_TEST_PAUSE: boundary, CODEX_TEST_TARGET: target }),
+  const child = startCli([...operationArgs(box, command), '--json'], {
+    directory: box.directory, binary: box.binary, fixture, env: { CODEX_TEST_PAUSE: boundary, CODEX_TEST_TARGET: target },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
@@ -90,17 +89,11 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
   const temporary = await mkdtemp(join(tmpdir(), 'codex-package-'));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const directory = await realpath(temporary);
-  const env = {
-    ...process.env, HOME: directory, XDG_STATE_HOME: join(directory, 'store'), NODE_OPTIONS: '', NODE_PATH: '',
-    npm_config_cache: join(directory, 'npm-cache'),
-  };
   // A build directory may retain local evidence or stale build outputs. Neither belongs in delivery.
   const privateArtifact = join(repository, 'dist/package-acceptance-private-plan.json');
   await writeFile(privateArtifact, '{"syntheticLocalState":true}');
   t.after(() => rm(privateArtifact, { force: true }));
-  const pack = spawnSync('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', directory], {
-    cwd: repository, env, encoding: 'utf8',
-  });
+  const pack = packPackage(directory);
   assert.equal(pack.status, 0, pack.stderr);
   const [output] = JSON.parse(pack.stdout);
   const files = output.files.map((file) => file.path);
@@ -115,9 +108,7 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
   }
   assert.deepEqual([...dependencies].sort(), ['acorn', 'eslint-scope', 'esrecurse', 'estraverse']);
   const prefix = join(directory, 'installation');
-  const install = spawnSync('npm', [
-    'install', '--global', '--prefix', prefix, '--ignore-scripts', '--offline', '--no-audit', '--no-fund', join(directory, output.filename),
-  ], { cwd: directory, env, encoding: 'utf8' });
+  const install = installPackage(directory, prefix, join(directory, output.filename));
   assert.equal(install.status, 0, install.stderr);
   const binary = join(prefix, 'bin/codex-browser-patch');
   const installed = join(prefix, 'lib/node_modules/codex-browser-liberation-patch');
@@ -127,10 +118,10 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
   assert.deepEqual(metadata.bin, { 'codex-browser-patch': 'dist/cli.js' });
   await assert.rejects(access(join(installed, 'src')));
   await assert.rejects(access(join(installed, 'tests')));
-  const installation = { directory, env, binary };
+  const installation = { directory, binary };
 
   await t.test('installed executable documents all commands, supported platform and exit protocol', () => {
-    const help = spawnSync(binary, ['--help'], { cwd: directory, env, encoding: 'utf8' });
+    const help = runCli(['--help'], { directory, binary, direct: true });
     assert.equal(help.status, 0, help.stderr);
     assert.equal(help.stderr, '');
     assert.match(help.stdout, /macOS/);

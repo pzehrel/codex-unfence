@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { runCli } from './helpers/cli.mjs';
 import { createHash } from 'node:crypto';
 import { link, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,7 +7,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 const darwin = fileURLToPath(new URL('./fixtures/darwin.cjs', import.meta.url));
 const source = await readFile(new URL('./fixtures/site-status.js.txt', import.meta.url), 'utf8');
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -47,10 +46,7 @@ async function artifact(root, plugin = 'browser', version = 'unknown', text = so
 }
 
 function run(directory, args, fixture = darwin, extraEnv = {}) {
-  return spawnSync(process.execPath, ['--require', fixture, cli, 'prepare', '--plugin-root', join(directory, 'plugins'), ...args, '--json'], {
-    cwd: directory, encoding: 'utf8',
-    env: { ...process.env, HOME: join(directory, 'home'), XDG_STATE_HOME: join(directory, 'store'), NODE_OPTIONS: '', ...extraEnv },
-  });
+  return runCli(['prepare', '--plugin-root', join(directory, 'plugins'), ...args, '--json'], { directory, fixture, env: extraEnv });
 }
 
 test('prepare publishes a complete verifiable review plan for one explicit target without changing plugin or operation store', async (t) => {
@@ -352,8 +348,7 @@ test('UTF-8 BOM, CRLF and non-BMP artifacts survive public prepare and verified 
 test('prepare help and human output state explicit selection and unchanged files; invalid command options stay usage errors', async (t) => {
   const directory = await sandbox(t);
   const target = await artifact(join(directory, 'plugins'));
-  const env = { ...process.env, HOME: join(directory, 'home'), XDG_STATE_HOME: join(directory, 'store'), NODE_OPTIONS: '' };
-  const execute = (args) => spawnSync(process.execPath, ['--require', darwin, cli, ...args], { cwd: directory, env, encoding: 'utf8' });
+  const execute = (args) => runCli(args, { directory });
   const help = execute(['prepare', '--help']);
   assert.equal(help.status, 0);
   assert.match(help.stdout, /--all-compatible/);

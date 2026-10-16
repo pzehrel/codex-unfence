@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { spawn, spawnSync } from 'node:child_process';
+import { runCli, startCli } from './helpers/cli.mjs';
 import { once } from 'node:events';
 import { setTimeout } from 'node:timers';
 import { access, chmod, link, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
@@ -9,7 +9,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 const fixture = fileURLToPath(new URL('./fixtures/transaction-boundaries.cjs', import.meta.url));
 const source = await readFile(new URL('./fixtures/site-status.js.txt', import.meta.url), 'utf8');
 
@@ -40,15 +39,8 @@ async function groupSandbox(t) {
   return { ...box, targets, singlePlan: box.plan, plan };
 }
 
-function options(box, extraEnv = {}) {
-  return {
-    cwd: box.directory, encoding: 'utf8',
-    env: { ...process.env, HOME: join(box.directory, 'home'), NODE_OPTIONS: '', ...extraEnv },
-  };
-}
-
 function run(box, args, extraEnv = {}) {
-  return spawnSync(process.execPath, ['--require', fixture, cli, ...args, '--json'], options(box, extraEnv));
+  return runCli([...args, '--json'], { directory: box.directory, fixture, env: extraEnv });
 }
 
 function response(result, expected = 0) {
@@ -67,8 +59,8 @@ const recover = (box, extra = {}) => run(box, ['recover', '--store', box.store],
 
 async function paused(t, box, command, boundary, extraEnv = {}) {
   const args = command === 'recover' ? ['recover', '--store', box.store] : [command, '--plan', box.plan, '--store', box.store];
-  const child = spawn(process.execPath, ['--require', fixture, cli, ...args, '--json'], {
-    ...options(box, { CODEX_TEST_PAUSE: boundary, CODEX_TEST_TARGET: box.target, ...extraEnv }),
+  const child = startCli([...args, '--json'], {
+    directory: box.directory, fixture, env: { CODEX_TEST_PAUSE: boundary, CODEX_TEST_TARGET: box.target, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
@@ -227,12 +219,12 @@ test('restore CLI requires explicit single-plan selection and explains restorati
     assert.equal(invalid.command, 'restore');
     assert.equal(invalid.diagnostics[0].code, 'INVALID_ARGUMENTS');
   }
-  const help = spawnSync(process.execPath, ['--require', fixture, cli, 'restore', '--help'], options(box));
+  const help = runCli(['restore', '--help'], { directory: box.directory, fixture });
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /restore --plan <directory> --store <private-directory>/);
   assert.match(help.stdout, /restore returns a trusted target to verified original content/);
   assert.match(help.stdout, /never continues apply or restore/);
-  const human = spawnSync(process.execPath, ['--require', fixture, cli, 'restore', '--plan', box.plan, '--store', box.store], options(box));
+  const human = runCli(['restore', '--plan', box.plan, '--store', box.store], { directory: box.directory, fixture });
   assert.equal(human.status, 0, human.stdout + human.stderr);
   assert.match(human.stdout, /restore: success/);
   assert.match(human.stdout, /original \(already-original\)/);

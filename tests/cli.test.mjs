@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { runCli, startCli } from './helpers/cli.mjs';
+import { once } from 'node:events';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,17 +8,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 const darwin = fileURLToPath(new URL('./fixtures/darwin.cjs', import.meta.url));
 const home = realpathSync(mkdtempSync(join(tmpdir(), 'codex-test-home-')));
 process.on('exit', () => rmSync(home, { recursive: true, force: true }));
 
 function run(args, options = {}, fixture = darwin) {
-  return spawnSync(process.execPath, ['--require', fixture, cli, ...args], {
-    encoding: 'utf8',
-    env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, 'store'), NODE_OPTIONS: '' },
-    ...options,
-  });
+  return runCli(args, { directory: home, ...options, fixture });
 }
 
 async function sandbox(t) {
@@ -36,8 +32,7 @@ test('detect proves source compatibility, reports evidence and leaves root, home
   const path = await artifact(root, 'browser', 'unknown-future-version');
   const source = await readFile(new URL('./fixtures/site-status.js.txt', import.meta.url), 'utf8');
   await writeFile(path, source);
-  const env = { ...process.env, HOME: isolatedHome, XDG_STATE_HOME: store, NODE_OPTIONS: '' };
-  const result = run(['detect', '--plugin-root', root, '--json'], { cwd: directory, env });
+  const result = run(['detect', '--plugin-root', root, '--json'], { directory });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const output = JSON.parse(result.stdout);
   const entry = output.data.artifacts[0];
@@ -49,7 +44,7 @@ test('detect proves source compatibility, reports evidence and leaves root, home
   assert.deepEqual(await readdir(isolatedHome), []);
   assert.deepEqual(await readdir(store), []);
   assert.deepEqual(await readdir(directory), ['home', 'plugins', 'store']);
-  const human = run(['detect', '--plugin-root', root], { cwd: directory, env });
+  const human = run(['detect', '--plugin-root', root], { directory });
   assert.equal(human.status, output.exitCode);
   assert.match(human.stdout, /structural compatibility: compatible/);
   assert.match(human.stdout, /Evidence source:.*utf16/);
@@ -137,7 +132,7 @@ test('mixed compatible and incompatible sources use incompatibility 3 with per-t
   const root = join(directory, 'plugins');
   await artifact(root, 'browser', 'compatible');
   const bad = await artifact(root, 'chrome', 'unsupported', 'const similar = "feature_status.agent";');
-  const result = run(['detect', '--plugin-root', root, '--json'], { cwd: directory });
+  const result = run(['detect', '--plugin-root', root, '--json'], { directory });
   assert.equal(result.status, 3, result.stdout + result.stderr);
   const output = JSON.parse(result.stdout);
   assert.equal(output.outcome, 'incompatible');
@@ -145,7 +140,7 @@ test('mixed compatible and incompatible sources use incompatibility 3 with per-t
   assert.deepEqual(output.data.artifacts.map((entry) => entry.compatibility), ['compatible', 'incompatible']);
   assert.equal(output.data.artifacts[1].analysis.diagnostics[0].code, 'NO_TARGET');
   assert.equal(output.diagnostics[0].path, bad);
-  const human = run(['detect', '--plugin-root', root], { cwd: directory });
+  const human = run(['detect', '--plugin-root', root], { directory });
   assert.equal(human.status, 3);
   assert.match(human.stdout, /NO_TARGET/);
   assert.match(human.stdout, /structural compatibility: incompatible/);
@@ -221,7 +216,7 @@ test('missing roots are empty while files and unavailable artifacts report runti
 });
 
 test('default root uses the isolated home and never selects a running version', async () => {
-  const root = join(home, '.codex/plugins/cache/openai-bundled');
+  const root = join(home, 'home/.codex/plugins/cache/openai-bundled');
   const path = await artifact(root, 'browser', 'synthetic-default');
   const result = run(['detect', '--json']);
   assert.equal(result.status, 0, result.stderr);
@@ -229,6 +224,50 @@ test('default root uses the isolated home and never selects a running version', 
   assert.equal(output.data.pluginRoot, root);
   assert.equal(output.data.artifacts[0].path, path);
   assert.equal(output.data.runtime, 'not-verified');
+});
+
+test('CLI launcher keeps default discovery inside its sandbox after caller environment and cwd overrides', async (t) => {
+  const directory = await sandbox(t);
+  const foreign = await sandbox(t);
+  const root = join(directory, 'home/.codex/plugins/cache/openai-bundled');
+  const target = await artifact(root, 'browser', 'isolated');
+  await artifact(join(foreign, '.codex/plugins/cache/openai-bundled'), 'chrome', 'foreign');
+  const result = run(['detect', '--json'], {
+    directory, cwd: foreign,
+    env: { ...process.env, HOME: foreign, XDG_STATE_HOME: foreign, NODE_PATH: foreign },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.data.pluginRoot, root);
+  assert.deepEqual(output.data.artifacts.map(({ path }) => path), [target]);
+});
+
+test('sync and async CLI launches clear host and caller Node hooks while preserving explicit fixtures', async (t) => {
+  const directory = await sandbox(t);
+  const root = join(directory, 'home/.codex/plugins/cache/openai-bundled');
+  await artifact(root, 'browser', 'isolated');
+  const previous = process.env.CODEX_TEST_HOST_SECRET;
+  process.env.CODEX_TEST_HOST_SECRET = 'must-not-reach-child';
+  t.after(() => {
+    if (previous === undefined) delete process.env.CODEX_TEST_HOST_SECRET;
+    else process.env.CODEX_TEST_HOST_SECRET = previous;
+  });
+  const options = {
+    directory, cwd: '/', fixture: fileURLToPath(new URL('./fixtures/launcher-state.cjs', import.meta.url)),
+    env: { CODEX_TEST_SANDBOX: directory, NODE_OPTIONS: '--require=/must-not-load.cjs', NODE_PATH: '/must-not-load', HOME: '/', XDG_STATE_HOME: '/', PWD: '/', OLDPWD: '/' },
+  };
+  const sync = runCli(['detect', '--json'], options);
+  assert.equal(sync.status, 0, sync.stdout + sync.stderr);
+  assert.equal(JSON.parse(sync.stdout).data.pluginRoot, root);
+  const child = startCli(['detect', '--json'], options);
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const [code] = await once(child, 'close');
+  assert.equal(code, 0, stdout + stderr);
+  assert.equal(JSON.parse(stdout).data.pluginRoot, root);
 });
 
 test('unreadable targets retain partial discovery and a stable permission diagnostic', async (t) => {

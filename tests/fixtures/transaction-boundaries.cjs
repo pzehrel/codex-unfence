@@ -3,6 +3,7 @@
 // Loaded only by synthetic CLI tests. No production bypass flag or test-only API.
 const fs = require('node:fs');
 const promises = require('node:fs/promises');
+// eslint-disable-next-line no-restricted-syntax -- Patch only execFile's /bin/ps boundary; CLI launches use the shared isolated launcher.
 const childProcess = require('node:child_process');
 const { syncBuiltinESMExports } = require('node:module');
 const { dirname, join } = require('node:path');
