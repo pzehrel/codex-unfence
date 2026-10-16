@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { canonical, digest as hash } from './integrity.js';
 import { constants } from 'node:fs';
 import { link, lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -62,20 +63,6 @@ class PlanError extends Error {
 
 function requirePlan(condition: unknown, message: string): asserts condition {
   if (!condition) throw new PlanError('INVALID_PLAN', message);
-}
-
-function hash(value: string | Uint8Array): string {
-  return createHash('sha256').update(value).digest('hex');
-}
-
-/** Canonical object keys make integrity independent of JSON presentation. Not authentication. */
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`;
-  }
-  return JSON.stringify(value);
 }
 
 function descriptor(file: string, bytes: Buffer): PlanArtifact {
@@ -396,7 +383,8 @@ async function regularBytes(path: string): Promise<Buffer> {
 
 /**
  * Validates an untrusted review plan without touching current plugin contents.
- * Rechecks identity paths, artifact hashes and a freshly derived structural transform.
+ * Rechecks recorded identity syntax, artifact hashes and a freshly derived structural transform.
+ * Historical targets may have been removed; loading artifacts never resolves live target paths.
  * Current file/provenance validation belongs to the transaction preflight.
  */
 export async function loadPlan(directory: string): Promise<LoadedPlan> {
@@ -413,15 +401,7 @@ export async function loadPlan(directory: string): Promise<LoadedPlan> {
   const expectedFiles = ['manifest.json', ...manifest.targets.flatMap((target) => [target.original.file, target.patched.file, target.localDiff.file])].sort();
   requirePlan(canonical((await readdir(contents)).sort()) === canonical(expectedFiles), 'Unexpected or missing plan artifacts.');
   const targets: LoadedPlan['targets'] = [];
-  const actualFiles = new Set<string>();
   for (const target of manifest.targets) {
-    const identity = target.identity;
-    const actual = await realpath(identity.path);
-    const metadata = await lstat(actual, { bigint: true });
-    requirePlan(actual === identity.realPath && metadata.isFile() && !metadata.isSymbolicLink(), 'Target canonical identity mismatch.');
-    const actualKey = `${metadata.dev}:${metadata.ino}`;
-    requirePlan(!actualFiles.has(actualKey), 'Duplicate current filesystem target identity.');
-    actualFiles.add(actualKey);
     const original = await regularBytes(join(contents, target.original.file));
     const patched = await regularBytes(join(contents, target.patched.file));
     const diff = await regularBytes(join(contents, target.localDiff.file));

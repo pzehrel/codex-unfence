@@ -10,7 +10,8 @@ import { blockingProcesses, PROCESS_LIMITATION, processTable } from './processes
 import type { ProcessIdentity } from './processes.js';
 import { acquireLease, inspectLease, releaseLease, targetLock } from './transaction-locks.js';
 import type { LeaseRecord } from './transaction-locks.js';
-import { atomicJSON, canonical, canonicalDirectory, check, digest, exists, privateDirectory, readJSON, regularBytes, sign, syncDirectory, TransactionError, verify, writeExclusive } from './transaction-storage.js';
+import { canonical, digest } from './integrity.js';
+import { atomicJSON, canonicalDirectory, check, exists, privateDirectory, readJSON, regularBytes, sign, syncDirectory, TransactionError, verify, writeExclusive } from './transaction-storage.js';
 
 interface Snapshot {
   device: string;

@@ -173,6 +173,7 @@ export function analyzeSource(source: string): SourceAnalysis {
     const candidate = candidates[0];
     if (candidate && failures.length) throw new Unproven('UNPROVEN_CANDIDATE', 'Another plausible blocking consumption chain is unsupported; uniqueness cannot be proven.', failures[0]?.node);
     if (!candidate) throw failures[0] ?? new Unproven('NO_TARGET', 'No complete supported site-status consumption chain found.');
+    proof.closedEffects();
     result.evidence = candidate.evidence;
     if (candidate.patched) throw new Unproven('UNTRUSTED_PATCHED_SHAPE', 'Response-copy shape found without trusted operation provenance; this is not proof of tool application.', candidate.target);
     result.compatibility = 'compatible';
@@ -187,11 +188,16 @@ export function analyzeSource(source: string): SourceAnalysis {
 class Proof {
   private readonly bindings = new Map<E.Node, Variable>();
   private readonly nodes: E.Node[] = [];
+  private readonly provenFunctions = new Set<FunctionNode>();
+  private readonly provenCalls = new Set<E.Node>();
+  private readonly provenConstructors = new Set<E.Node>();
+  private readonly globals = new Set<E.Identifier>();
 
   constructor(private readonly program: E.Program) {
     const scopes = analyze(program, { ecmaVersion: 2022, sourceType: 'module', optimistic: false, ignoreEval: false });
     for (const scope of scopes.scopes) {
       for (const reference of scope.through) {
+        if (!reference.resolved) this.globals.add(reference.identifier);
         need(!(reference.identifier.name === 'URL' && reference.isWrite()), 'Global URL constructor is reassigned.', reference.identifier, 'REASSIGNED_BINDING');
       }
       for (const variable of scope.variables) {
@@ -217,6 +223,26 @@ class Proof {
     });
   }
 
+  /** Close effects over the entire source, including aliases outside the matched bodies. */
+  closedEffects(): void {
+    for (const fn of this.provenFunctions) walk(fn.body, (node) => {
+      if (node.type === 'ThrowStatement') need(node.argument.type === 'NewExpression' && node.argument.callee.type === 'Identifier' && node.argument.callee.name === 'Error' && !this.bindings.has(node.argument.callee) && node.argument.arguments.length === 1 && node.argument.arguments[0]?.type === 'Literal' && typeof node.argument.arguments[0].value === 'string', 'Throw effects must be a literal Error construction.', node, 'UNSUPPORTED_EFFECT');
+      if (call(node)) this.provenCalls.add(node);
+    });
+    const allowedGlobals = new Set<E.Node>();
+    for (const node of this.nodes) {
+      if (node.type === 'NewExpression' && node.callee.type === 'Identifier' && node.callee.name === 'Error' &&
+        !this.bindings.has(node.callee) && node.arguments.length === 1 && node.arguments[0]?.type === 'Literal' && typeof node.arguments[0].value === 'string') {
+        this.provenConstructors.add(node);
+      }
+      if (node.type === 'NewExpression' && this.provenConstructors.has(node)) allowedGlobals.add(node.callee);
+      need(node.type !== 'CallExpression' || this.provenCalls.has(node), 'Call effects are outside the closed structural proof.', node, 'UNSUPPORTED_EFFECT');
+      need(node.type !== 'NewExpression' || this.provenConstructors.has(node), 'Constructor effects are outside the closed structural proof.', node, 'UNSUPPORTED_EFFECT');
+      need(!['ImportDeclaration', 'ImportExpression', 'ExportAllDeclaration', 'ExportNamedDeclaration', 'ExportDefaultDeclaration', 'TaggedTemplateExpression'].includes(node.type), 'Module escapes and implicit calls are outside the closed structural proof.', node, 'UNSUPPORTED_EFFECT');
+    }
+    for (const reference of this.globals) need(allowedGlobals.has(reference), 'Ambient capabilities may escape or mutate the proven chain.', reference, 'UNSUPPORTED_EFFECT');
+  }
+
   private stable(node: E.Node | null | undefined): Variable {
     need(node?.type === 'Identifier', 'Expected a simple bound identifier.', node ?? undefined, 'UNSUPPORTED_BINDING');
     const binding = this.bindings.get(node);
@@ -236,6 +262,7 @@ class Proof {
       this.program.body.includes(definition.node), 'Only module-level function declarations are supported.', node ?? undefined, 'UNSUPPORTED_BINDING');
     need(binding.references.every((reference) => this.nodes.some((item) => call(item) && item.callee === reference.identifier)), 'Relevant function binding escapes direct calls.', node ?? undefined, 'ESCAPED_BINDING');
     const fn = definition.node as E.FunctionDeclaration;
+    this.provenFunctions.add(fn);
     this.parameters(fn, count);
     return fn;
   }
@@ -304,6 +331,7 @@ class Proof {
     const address = declaration(fn.body.body[0]);
     need(address?.init?.type === 'NewExpression' && address.init.callee.type === 'Identifier' && address.init.callee.name === 'URL' &&
       !this.bindings.has(address.init.callee) && address.init.arguments.length === 1 && literal(address.init.arguments[0], 'https://chatgpt.com/backend-api/aura/site_status'), 'Expected the exact site-status URL constructed by the unshadowed URL global.', fn, 'UNPROVEN_SOURCE');
+    this.provenConstructors.add(address.init);
     const set = fn.body.body[1];
     need(set?.type === 'ExpressionStatement' && call(set.expression) && member(set.expression.callee, 'set') &&
       member(set.expression.callee.object, 'searchParams') && this.same(set.expression.callee.object.object, address.id) &&
@@ -311,6 +339,42 @@ class Proof {
     const endpoint = objectProperty(returned(fn.body.body[2]), 'endpoint');
     need(call(endpoint) && member(endpoint.callee, 'toString') && this.same(endpoint.callee.object, address.id) && endpoint.arguments.length === 0, 'Request endpoint must come from the site-status URL.', fn, 'UNPROVEN_SOURCE');
     return fn;
+  }
+
+  /** Every class/instance reference must preserve the receiver of the proven entry method. */
+  private receivers(owner: E.ClassDeclaration, check: Method, query: Method, load: Method): void {
+    const methods = [check, query, load];
+    need(owner.body.body.length === methods.length && new Set(methods).size === methods.length, 'Only the three proven instance methods are supported.', owner, 'UNSUPPORTED_RECEIVER');
+    // A class declaration has both an enclosing and an inner class-name binding.
+    const ownerBindings = [...new Set(this.bindings.values())].filter((binding) => binding.defs.some((definition) => definition.type === 'ClassName' && definition.node === owner));
+    const entryName = property(check.key)!;
+    const entryCall = (receiver: E.Node): boolean => {
+      const access = this.nodes.find((node) => member(node, entryName) && node.object === receiver);
+      const invocation = this.nodes.find((node) => call(node) && node.callee === access);
+      if (!invocation || invocation.type !== 'CallExpression' || invocation.arguments.length !== 2 || invocation.arguments.some((argument) => argument.type === 'SpreadElement')) return false;
+      this.provenCalls.add(invocation);
+      return true;
+    };
+    for (const reference of ownerBindings.flatMap((binding) => binding.references)) {
+      const instance = this.nodes.find((node) => node.type === 'NewExpression' && node.callee === reference.identifier);
+      need(instance?.type === 'NewExpression' && instance.arguments.length === 0, 'Class binding escapes direct zero-argument construction; inheritance and borrowed dispatch are unsupported.', reference.identifier, 'UNSUPPORTED_RECEIVER');
+      this.provenConstructors.add(instance);
+      if (entryCall(instance)) continue;
+      const declarator = this.nodes.find((node) => node.type === 'VariableDeclarator' && node.init === instance);
+      need(declarator?.type === 'VariableDeclarator' && declarator.id.type === 'Identifier', 'Constructed receiver escapes a direct entry call or constant binding.', instance, 'UNSUPPORTED_RECEIVER');
+      const binding = this.stable(declarator.id);
+      const definition = binding.defs[0];
+      need(definition?.type === 'Variable' && definition.parent?.type === 'VariableDeclaration' && definition.parent.kind === 'const', 'Receiver must use a constant binding.', declarator, 'UNSUPPORTED_RECEIVER');
+      for (const use of binding.references) {
+        if (use.init) continue;
+        need(entryCall(use.identifier), 'Receiver escapes direct entry-method calls; extraction, aliases and borrowing are unsupported.', use.identifier, 'UNSUPPORTED_RECEIVER');
+      }
+    }
+    for (const method of methods) walk(method.value.body, (node) => {
+      if (node.type !== 'ThisExpression') return;
+      need(this.nodes.some((item) => item.type === 'MemberExpression' && item.object === node && this.nodes.some((invocation) => call(invocation) && invocation.callee === item &&
+        (method === check && member(item, property(query.key)!) || method === query && member(item, property(load.key)!)))), 'this escapes the proven dispatch chain.', node, 'UNSUPPORTED_RECEIVER');
+    });
   }
 
   private method(owner: E.ClassDeclaration, callNode: E.CallExpression, params: E.Pattern[]): Method {
@@ -323,12 +387,6 @@ class Proof {
     need(!method.static && method.kind === 'method' && method.value.async, 'Expected an async instance method.', method);
     this.parameters(method.value, params.length);
     need(callNode.arguments.length === params.length && params.every((parameter, index) => this.same(callNode.arguments[index], parameter)), 'Method must receive the same runtime and request bindings.', callNode, 'UNPROVEN_SOURCE');
-    for (const node of this.nodes) {
-      const target = node.type === 'AssignmentExpression' ? node.left : node.type === 'UpdateExpression' ? node.argument :
-        node.type === 'UnaryExpression' && node.operator === 'delete' ? node.argument : null;
-      need(!target || !member(target, name), 'Relevant method property is written in source.', target ?? undefined, 'REASSIGNED_BINDING');
-      need(!(call(node) && (member(node.callee, 'defineProperty') || member(node.callee, 'defineProperties') || member(node.callee, 'setPrototypeOf') || member(node.callee, 'assign'))), 'Dynamic object mutation is unsupported.', node, 'UNSUPPORTED_BINDING');
-    }
     return method;
   }
 
@@ -377,6 +435,8 @@ class Proof {
     const patched = this.patched(target, body.id);
     need(patched || this.same(target, body.id), 'Predicate must consume the parsed JSON binding unchanged.', target, 'UNPROVEN_RESPONSE');
     const wrapper = this.predicate(predicate, body.id);
+    this.receivers(owner, check, query, load);
+    for (const method of [check, query, load]) this.provenFunctions.add(method.value);
     const evidence: StructuralEvidence[] = [
       { kind: 'source', range: range(source), description: 'Site-status URL with site_url from the checked site; endpoint returned in request.' },
       { kind: 'transport', range: range(transport), description: 'Same runtime fetch receives the request endpoint and GET options.' },

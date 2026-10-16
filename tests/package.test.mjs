@@ -105,7 +105,7 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
   const [output] = JSON.parse(pack.stdout);
   const files = output.files.map((file) => file.path);
   assert.deepEqual(files.filter((path) => !path.startsWith('node_modules/')).sort(), [
-    'README.md', 'dist/analysis.js', 'dist/cli.js', 'dist/discovery.js', 'dist/plan.js', 'dist/processes.js', 'dist/result.js',
+    'README.md', 'dist/analysis.js', 'dist/cli.js', 'dist/discovery.js', 'dist/integrity.js', 'dist/plan.js', 'dist/processes.js', 'dist/result.js',
     'dist/transaction-locks.js', 'dist/transaction-storage.js', 'dist/transactions.js', 'package.json',
   ]);
   const dependencies = new Set();
@@ -231,6 +231,71 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
     assert.equal(await readFile(box.targets[1], 'utf8'), source);
     assert.equal(await readFile(box.targets[2], 'utf8'), 'external upgrade');
     assert.equal(result(operation(box, 'status'), 'status', 4).data.targets[2].state, 'conflict');
+  });
+
+  await t.test('installed detect/prepare reject reflective aliases and unsupported dynamic receivers', async (t) => {
+    const box = await sandbox(t, installation);
+    const extras = [
+      "const change = Reflect.set; change(URL.prototype, 'toString', function () { return 'https://other.invalid'; });",
+      "const change = Object.defineProperty; change(Policy.prototype, 'load', { value: async function () { return false; } });",
+      "class ActualPolicy extends Policy { async query(runtime, request) { return { blocked: true }; } }",
+      "Policy.prototype.check.call({ query: async function () { return { blocked: true }; } }, runtime, site);",
+    ];
+    for (const [index, extra] of extras.entries()) {
+      await writeFile(box.targets[0], source + '\n' + extra);
+      const detected = result(box.run(['detect', '--plugin-root', box.root]), 'detect', 3);
+      assert.equal(detected.data.artifacts[0].compatibility, 'incompatible');
+      const output = join(box.directory, `refused-${index}`);
+      const prepared = result(box.run(['prepare', '--plugin-root', box.root, '--target', box.targets[0], '--output', output]), 'prepare', 3);
+      assert.equal(prepared.data, null);
+      await assert.rejects(access(output));
+      assert.equal(await readFile(box.targets[0], 'utf8'), source + '\n' + extra);
+    }
+  });
+
+  await t.test('installed bin retries killed lease publication including successor and release links', async (t) => {
+    for (const scope of ['operation', 'target']) {
+      for (const phase of ['lock', 'successor', 'release']) {
+        const box = await sandbox(t, installation);
+        prepare(box);
+        if (phase === 'successor') result(operation(box, 'apply'), 'apply');
+        await interrupt(t, box, phase === 'successor' ? 'restore' : 'apply', `after-${scope}-${phase}-link`, box.targets[0]);
+        const state = phase === 'lock' ? 'original' : 'tool-applied';
+        assert.deepEqual(result(operation(box, 'status'), 'status').data.targets.map((target) => target.state), Array(3).fill(state));
+        assert.equal(result(operation(box, 'recover'), 'recover').diagnostics[0].code, 'NO_INCOMPLETE_TRANSACTION');
+        result(operation(box, 'apply'), 'apply');
+        result(operation(box, 'restore'), 'restore');
+        for (const path of box.targets) assert.equal(await readFile(path, 'utf8'), source);
+      }
+    }
+  });
+
+  await t.test('installed bin ignores removed terminal targets while validating live selection and recovering pending work', async (t) => {
+    for (const pending of [false, true]) {
+      const box = await sandbox(t, installation);
+      const [old, current] = box.targets;
+      const oldPlan = join(box.directory, 'old-plan');
+      result(box.run(['prepare', '--plugin-root', box.root, '--target', old, '--output', oldPlan]), 'prepare');
+      result(box.run(['apply', '--plan', oldPlan, '--store', box.store]), 'apply');
+      result(box.run(['restore', '--plan', oldPlan, '--store', box.store]), 'restore');
+      result(box.run(['prepare', '--plugin-root', box.root, '--target', current, '--output', box.plan]), 'prepare');
+      if (pending) await interrupt(t, box, 'apply', 'after-target-rename', current);
+      await rm(join(old, '../..'), { recursive: true });
+      assert.equal(result(operation(box, 'status'), 'status').data.targets[0].state, pending ? 'incomplete' : 'original');
+      if (pending) {
+        assert.equal(result(operation(box, 'apply'), 'apply', 4).diagnostics[0].code, 'INCOMPLETE_TRANSACTION');
+        result(operation(box, 'recover'), 'recover');
+        assert.equal(await readFile(current, 'utf8'), source);
+      }
+      result(operation(box, 'apply'), 'apply');
+      result(operation(box, 'restore'), 'restore');
+      assert.equal(result(operation(box, 'status'), 'status').data.targets[0].state, 'original');
+      assert.equal(result(operation(box, 'recover'), 'recover').diagnostics[0].code, 'NO_INCOMPLETE_TRANSACTION');
+      // The selected target itself must still pass current identity checks.
+      await writeFile(current, 'external current version');
+      result(operation(box, 'apply'), 'apply', 4);
+      assert.equal(await readFile(current, 'utf8'), 'external current version');
+    }
   });
 
   await t.test('installed CLI retains failed second-target rollback and explicitly recovers the group', async (t) => {

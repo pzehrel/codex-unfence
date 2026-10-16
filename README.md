@@ -21,7 +21,7 @@ codex-browser-patch --help
 
 `npm ci` 需要获取锁定的开发依赖；tarball 已包含运行依赖，后续本地安装可离线完成。本流程不需要公共 npm 发布。安装 CLI 本身不应用补丁。
 
-包使用逐文件白名单：九个 `dist/*.js` 运行文件，以及 npm 自动包含的 `package.json`、本 README 和 Acorn/eslint-scope 的依赖闭包（`acorn`、`eslint-scope`、`esrecurse`、`estraverse`）。测试、源码、研究报告、真实应用 bundle、提取工件、本机方案、备份和操作存储不进入包。构建目录中额外遗留的本机状态也不在白名单内。
+包使用逐文件白名单：十个 `dist/*.js` 运行文件，以及 npm 自动包含的 `package.json`、本 README 和 Acorn/eslint-scope 的依赖闭包（`acorn`、`eslint-scope`、`esrecurse`、`estraverse`）。测试、源码、研究报告、真实应用 bundle、提取工件、本机方案、备份和操作存储不进入包。构建目录中额外遗留的本机状态也不在白名单内。
 
 ## 工作流程
 
@@ -88,6 +88,10 @@ apply 中断通常回到 original；restore 中断通常回到 tool-applied。�
 
 事务先持久记录恢复所需的意图和私有备份，再逐文件原子替换，并校验写后内容。存储锁先于按规范路径排序的目标旁锁；跨存储操作共享目标排他。文件及父目录执行 fsync。整个多文件组**不是一次文件系统原子交换**；后续目标写入失败时回滚实际已变化的目标，回滚失败保留显式恢复证据。
 
+锁发布使用完整记录的不可覆盖硬链接。若在 link 与临时名 unlink 之间中断，读取只接受同目录、私有、同 inode 的唯一 `.publish-<UUID>` 临时名；不删除这个历史证据，仍验证 owner 生死和其事务，无法解释的硬链接继续拒绝。没有发布事务意图的死 owner 可由下一次普通写操作安全接替；recover 此时返回 `NO_INCOMPLETE_TRANSACTION`。
+
+历史方案与备份校验不要求终态目标仍存在。删除已完成或已恢复的旧版本，不会阻止另一个版本的 status/apply/recover；实际选中或待恢复的目标仍必须通过当前路径、文件身份、内容与父目录校验。损坏历史工件或认证失败仍会阻止操作。
+
 SIGKILL 恢复根据实际 before/after 内容判断，覆盖替换完成但日志尚未更新的窗口；恢复本身也可再次中断后重试。这些自动化证据不等同于断电耐久性保证，也不能阻止外部更新器。存储 HMAC 将操作来源记录与可编辑方案分开；能读取私有密钥的同用户恶意修改不在此本地信任边界内。
 
 ## 输出与自动化
@@ -149,7 +153,11 @@ status 对发现的待恢复冲突返回 4；否则所选目标不兼容返回 3
 
 参数和相关局部绑定必须是单一定义、未重赋值的简单标识符。函数和类必须是模块级声明；函数绑定只作为直接被调用者使用。类不支持继承、构造器、字段、访问器、static 或 computed 方法。读取支持点属性及静态字符串 computed 属性；对象字面量键必须为静态非 computed 字段。对象判断沿用 JavaScript 语义，包括数组，不引入更严格的响应 schema。
 
-额外语句、别名、解构、内联/拆分判定器、动态 key、嵌套或表达式类及其他控制流均不支持。两个完整链是歧义；完整链旁另有无法证明的 `.blocked` 消费也拒绝。无消费链的相似函数不会成为目标。为保守防止别名修改，源码中任意属性赋值/更新/delete、eval 或已识别的反射修改都会被拒绝，即使看似无关。
+类恰含上述三个方法。相关类的每次引用必须是无参数 `new`，所得实例只能直接调用入口方法，或存入未重赋值的 const 后直接调用入口方法；静态字符串 computed 入口读取也可使用。拒绝子类、原型读取、方法提取、`.call`/`.apply`/`.bind`、类或实例别名、对外传递及导出，避免把动态 this 当作声明类的实例。
+
+调用和环境能力采用封闭证明：源码中的调用只能来自已证明的链体或已验证的实例入口调用；构造只接受链内 URL、上述实例和单个字符串字面量参数的未遮蔽 Error。拒绝其余调用、import/export、动态 import、tagged template 和环境全局引用。这样同时拒绝反射能力的别名、解构及动态属性绕过，无需执行源码。证明假定宿主提供标准 URL/Error 和约定的 runtime fetch/JSON；不证明宿主被外部代码修改后的行为。
+
+额外链内语句、解构、内联/拆分判定器、动态 key、嵌套或表达式类及其他控制流均不支持。两个完整链是歧义；完整链旁另有无法证明的 `.blocked` 消费也拒绝。无消费链且无未知调用或环境能力的相似函数不会成为目标。源码中任意属性赋值/更新/delete、eval 或已识别的反射修改都会被拒绝，即使看似无关。
 
 解析失败、缺失证据、作用域遮蔽、绑定逃逸、语义改变和已知补丁形状均有结构诊断，例如 `PARSE_ERROR`、`NO_TARGET`、`AMBIGUOUS_TARGET`、`UNSUPPORTED_CHAIN`、`UNSUPPORTED_INITIALIZATION`、`CHANGED_SEMANTICS`、`UNTRUSTED_PATCHED_SHAPE`。无法证明时停止，不退回字符串替换。
 
@@ -175,6 +183,8 @@ npm run test:package
 `npm test` 构建并运行纯源码及真实 CLI 子进程测试。所有核心样例均为可分发合成源码，使用临时插件根目录、独立 home/store；不需要 Codex，也不因缺少 Codex 跳过。旧 Python 测试不作为正式验收。
 
 `tests/package.test.mjs` 无生产源码相对导入：实际 npm pack、在临时 prefix 离线安装、直接执行公开 bin，覆盖帮助、human/JSON、目标选择、退出码 0/1/2/3/4、多目标往返、回滚失败、SIGKILL apply/restore 及再次中断 recover。测试先在 dist 放入合成本机状态哨兵，验证它被包白名单排除。安装子进程从临时目录运行且清空 `NODE_PATH`、`NODE_OPTIONS`，运行依赖来自 tarball。
+
+安装产物回归还覆盖反射别名和动态接收者的 detect/prepare 拒绝、store/target 首次及后继/释放锁发布 link-unlink 窗口的 SIGKILL 重试，以及删除终态旧版本后另一个版本的普通操作与 pending recover。
 
 macOS 身份和可控 `ps`/文件系统边界仅通过显式外部 `node --require tests/fixtures/*.cjs` 注入测试子进程。预加载 fixture 不进入 tarball，生产 CLI 不提供平台、进程检查或故障注入绕过选项。权限测试需要非 root 执行用户。
 

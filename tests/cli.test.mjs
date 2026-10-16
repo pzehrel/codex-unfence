@@ -55,6 +55,31 @@ test('detect proves source compatibility, reports evidence and leaves root, home
   assert.match(human.stdout, /Evidence source:.*utf16/);
 });
 
+test('detect and prepare reject reflective aliases, inherited overrides and borrowed receivers without publishing plans', async (t) => {
+  const directory = await sandbox(t);
+  const root = join(directory, 'plugins');
+  const source = await readFile(new URL('./fixtures/site-status.js.txt', import.meta.url), 'utf8');
+  const extras = [
+    "const change = Reflect.set; change(URL.prototype, 'toString', function () { return 'https://other.invalid'; });",
+    "const change = Object.defineProperty; change(Policy.prototype, 'load', { value: async function () { return false; } });",
+    "class ActualPolicy extends Policy { async query(runtime, request) { return { blocked: true }; } }",
+    "Policy.prototype.check.call({ query: async function () { return { blocked: true }; } }, runtime, site);",
+  ];
+  for (const [index, extra] of extras.entries()) {
+    const text = source + '\n' + extra;
+    const path = await artifact(root, 'browser', String(index), text);
+    const output = join(directory, `rejected-${index}`);
+    const detected = run(['detect', '--plugin-root', root, '--json']);
+    assert.equal(detected.status, 3, detected.stdout + detected.stderr);
+    assert.ok(JSON.parse(detected.stdout).data.artifacts.every((entry) => entry.compatibility === 'incompatible'));
+    const prepared = run(['prepare', '--plugin-root', root, '--target', path, '--output', output, '--json']);
+    assert.equal(prepared.status, 3, prepared.stdout + prepared.stderr);
+    assert.equal(JSON.parse(prepared.stdout).data, null);
+    assert.equal(await readFile(path, 'utf8'), text);
+    assert.ok(!(await readdir(directory)).includes(`rejected-${index}`));
+  }
+});
+
 test('installed command help states macOS discovery and current limits', () => {
   const result = run(['--help']);
   assert.equal(result.status, 0, result.stderr);

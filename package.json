@@ -13,6 +13,7 @@
     "dist/analysis.js",
     "dist/cli.js",
     "dist/discovery.js",
+    "dist/integrity.js",
     "dist/plan.js",
     "dist/processes.js",
     "dist/result.js",

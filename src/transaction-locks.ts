@@ -25,7 +25,7 @@ export async function inspectLease(path: string): Promise<Lease | null> {
   if (!await exists(path)) return null;
   let current = path;
   for (let count = 0; count < 100_000; count++) {
-    const value = await readJSON(current);
+    const value = await readJSON(current, true);
     validate(value);
     const next = `${path}.${value.token}.next`;
     if (!await exists(next)) return { path: current, record: value };

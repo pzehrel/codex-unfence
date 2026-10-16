@@ -752,6 +752,80 @@ test('status accepts explicit targets, distinguishes incompatibility and untrust
   await assert.rejects(access(box.store));
 });
 
+test('SIGKILL between lease link and staging unlink permits safe dead-owner retry without an intent', async (t) => {
+  for (const scope of ['operation', 'target']) {
+    const box = await sandbox(t);
+    const root = scope === 'operation' ? join(box.store, 'operation.lock') : join(box.target, '../.codex-browser-patch.lock');
+    const holder = await paused(t, box, 'apply', `after-${scope}-lock-link`);
+    assert.equal((await stat(root)).nlink, 2);
+    const record = JSON.parse(await readFile(root, 'utf8'));
+    const live = { pid: holder.child.pid, start: record.owner.start, executable: process.execPath, command: `${process.execPath} synthetic-cli` };
+    assert.equal(response(apply(box, { CODEX_TEST_PROCESS_ROWS: JSON.stringify([live]) }), 4).diagnostics[0].code, 'LOCK_HELD');
+    await holder.kill();
+    assert.equal(response(recover(box)).diagnostics[0].code, 'NO_INCOMPLETE_TRANSACTION');
+    assert.equal(response(status(box)).data.targets[0].state, 'original');
+    assert.equal(await readFile(box.target, 'utf8'), source);
+    response(apply(box));
+    assert.equal(response(status(box)).data.targets[0].state, 'tool-applied');
+    response(restore(box));
+  }
+});
+
+test('lease successor and release link interruptions preserve terminal provenance and retry', async (t) => {
+  for (const scope of ['operation', 'target']) {
+    for (const phase of ['successor', 'release']) {
+      const box = await sandbox(t);
+      if (phase === 'successor') response(apply(box));
+      const holder = await paused(t, box, phase === 'successor' ? 'restore' : 'apply', `after-${scope}-${phase}-link`);
+      await holder.kill();
+      assert.equal(response(status(box)).data.targets[0].state, 'tool-applied');
+      assert.equal(response(recover(box)).diagnostics[0].code, 'NO_INCOMPLETE_TRANSACTION');
+      response(restore(box));
+      assert.equal(await readFile(box.target, 'utf8'), source);
+    }
+  }
+});
+
+test('unexplained hardlinked lease files remain conflicts', async (t) => {
+  const box = await sandbox(t);
+  response(apply(box));
+  const root = join(box.target, '../.codex-browser-patch.lock');
+  await link(root, join(box.directory, 'external-lease-alias'));
+  assert.equal(response(status(box), 4).diagnostics[0].code, 'PATH_ALIAS');
+  assert.equal(response(restore(box), 4).diagnostics[0].code, 'PATH_ALIAS');
+  assert.match(await readFile(box.target, 'utf8'), /agent:false/);
+});
+
+test('deleted completed versions do not block selected live versions or their pending recovery', async (t) => {
+  for (const pending of [false, true]) {
+    const old = await sandbox(t);
+    response(apply(old));
+    response(restore(old));
+    const target = join(old.directory, 'plugins/browser/new-version/scripts/browser-service.mjs');
+    await mkdir(join(target, '..'), { recursive: true });
+    await writeFile(target, source, { mode: 0o640 });
+    const box = { ...old, target, plan: join(old.directory, 'new-plan') };
+    response(run(box, ['prepare', '--plugin-root', join(box.directory, 'plugins'), '--target', target, '--output', box.plan]));
+    if (pending) {
+      const interrupted = await paused(t, box, 'apply', 'after-target-rename');
+      await interrupted.kill();
+    }
+    await rm(join(old.directory, 'plugins/browser/synthetic'), { recursive: true });
+    const state = response(status(box));
+    assert.equal(state.data.targets[0].state, pending ? 'incomplete' : 'original');
+    if (pending) {
+      assert.match(await readFile(target, 'utf8'), /agent:false/);
+      assert.equal(response(apply(box), 4).diagnostics[0].code, 'INCOMPLETE_TRANSACTION');
+      response(recover(box));
+      assert.equal(await readFile(target, 'utf8'), source);
+    }
+    response(apply(box));
+    response(restore(box));
+    assert.equal(response(status(box)).data.targets[0].state, 'original');
+    assert.equal(response(recover(box)).diagnostics[0].code, 'NO_INCOMPLETE_TRANSACTION');
+  }
+});
+
 test('held locks exclude concurrent stores; dead owners without an intent can be safely superseded', async (t) => {
   const box = await sandbox(t);
   const holder = await paused(t, box, 'apply', 'target-lock-acquired');

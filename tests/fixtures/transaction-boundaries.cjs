@@ -98,6 +98,10 @@ promises.link = async function (from, to) {
   if (String(to).includes('operation.lock') && !JSON.parse(fs.readFileSync(from, 'utf8')).released) await boundary('before-operation-lock');
   if (fault === 'release-failure' && String(to).endsWith('.next') && JSON.parse(fs.readFileSync(from, 'utf8')).released) throw ioError();
   const result = await link(from, to);
+  const record = JSON.parse(fs.readFileSync(from, 'utf8'));
+  const scope = String(to).includes('operation.lock') ? 'operation' : 'target';
+  if (record.released) await boundary(`after-${scope}-release-link`);
+  else await boundary(`after-${scope}-${String(to).endsWith('.next') ? 'successor' : 'lock'}-link`);
   if ((String(to).endsWith('.codex-browser-patch.lock') || String(to).includes('.codex-browser-patch.lock.')) && !JSON.parse(fs.readFileSync(from, 'utf8')).released) targetLeasePublished = true;
   return result;
 };

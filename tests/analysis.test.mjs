@@ -12,6 +12,45 @@ function rejects(text, code) {
   assert.equal(result.diagnostics[0].code, code, JSON.stringify(result));
 }
 
+test('rejects reflective aliases and indirect mutation capabilities without executing source', () => {
+  for (const extra of [
+    "const change = Reflect.set; change(URL.prototype, 'toString', function () { return 'https://other.invalid'; });",
+    "const change = Object.defineProperty; change(Policy.prototype, 'load', { value: async function () { return false; } });",
+    "const { set: change } = Reflect; change(URL.prototype, 'toString', replacement);",
+    "const reflection = Reflect; const change = reflection['set']; change(URL.prototype, 'toString', replacement);",
+    "const name = 's' + 'et'; Reflect[name](URL.prototype, 'toString', replacement);",
+    "unknown(URL);",
+    "import './unproven-effects.mjs';",
+    "import('./unproven-effects.mjs');",
+    "Function('return globalThis')();",
+  ]) {
+    const text = source + '\n' + extra;
+    const result = analyzeSource(text);
+    assert.equal(result.compatibility, 'incompatible', extra);
+    assert.equal(result.target, null, extra);
+  }
+});
+
+test('rejects inherited, borrowed and escaped receivers instead of assuming this dispatch', () => {
+  for (const extra of [
+    "class ActualPolicy extends Policy { async query(runtime, request) { return { blocked: true }; } }",
+    "Policy.prototype.check.call({ query: async function () { return { blocked: true }; } }, runtime, site);",
+    "const policy = new Policy(); const borrowed = policy.check; borrowed.call(other, runtime, site);",
+    "const policy = new Policy(); unknown(policy);",
+    "const Alias = Policy;",
+  ]) {
+    const result = analyzeSource(source + '\n' + extra);
+    assert.equal(result.compatibility, 'incompatible', extra);
+    assert.equal(result.target, null, extra);
+  }
+});
+
+test('accepts closed direct and constant-instance calls with static method names after renaming', () => {
+  const text = source + "\nasync function direct(runtime, site) { await new Policy()['check'](runtime, site); }\nasync function bound(runtime, site) { const policy = new Policy(); await policy.check(runtime, site); }";
+  assert.equal(analyzeSource(text).compatibility, 'compatible');
+  assert.equal(analyzeSource(text.replaceAll('Policy', 'R7').replaceAll('check', 'c4')).compatibility, 'compatible');
+});
+
 test('rejects a second plausible consumption chain that cannot be proven even alongside a complete chain', () => {
   const extra = source.slice(source.indexOf('class Policy')).replace('class Policy', 'class OtherPolicy').replace('return agentBlocked(body);', 'return agentBlocked({});');
   rejects(source + extra, 'UNPROVEN_CANDIDATE');
