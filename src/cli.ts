@@ -4,19 +4,23 @@ import { detect } from './discovery.js';
 import { EXIT_CODES, renderHuman } from './result.js';
 import type { CommandResult } from './result.js';
 
-const help = `codex-browser-patch — macOS Codex browser plugin discovery
+const help = `codex-browser-patch — macOS Codex browser plugin structural detection
 
 Usage:
   codex-browser-patch detect [--plugin-root <directory>] [--json]
   codex-browser-patch --help
 
 Default root: ~/.codex/plugins/cache/openai-bundled
-Only read-only discovery is available. Structural compatibility is not analyzed.
+Read-only discovery and finite AST structural proof are available.
+Only one proven site-status source/response/agent/blocking chain is compatible.
+Unsupported patterns, ambiguity and deferred initialization are rejected.
 Runtime loading and website operation are not verified. Version metadata does
 not identify the running version. No patch plans or backups are created.
 
 Output protocol: schemaVersion 1. Exit codes: 0 success, 1 runtime failure,
-2 invalid arguments. JSON results (including errors) go to stdout.
+2 invalid arguments, 3 incompatible (including mixed compatible/incompatible).
+Runtime failures take precedence over incompatibility; empty discovery succeeds.
+JSON results (including errors) go to stdout.
 `;
 
 const args = process.argv.slice(2);

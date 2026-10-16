@@ -1,5 +1,6 @@
 import { constants } from 'node:fs';
-import { access, readdir, realpath, stat } from 'node:fs/promises';
+import { access, readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { analyzeSource } from './analysis.js';
 import { homedir } from 'node:os';
 import { resolve, join } from 'node:path';
 import type { Artifact, CommandResult, Diagnostic } from './result.js';
@@ -63,7 +64,11 @@ export async function detect(pluginRoot?: string): Promise<CommandResult> {
         artifact.realPath = await realpath(path);
         if (!(await stat(path)).isFile()) throw Object.assign(new Error('Not a regular file'), { code: 'NOT_A_FILE' });
         await access(path, constants.R_OK);
+        const source = await readFile(path, 'utf8');
         artifact.availability = 'readable';
+        artifact.analysis = analyzeSource(source);
+        artifact.compatibility = artifact.analysis.compatibility;
+        diagnostics.push(...artifact.analysis.diagnostics.map((diagnostic) => ({ ...diagnostic, path })));
       } catch (error) {
         diagnostics.push(failure(path, error, 'ARTIFACT_UNAVAILABLE'));
       }
@@ -71,15 +76,17 @@ export async function detect(pluginRoot?: string): Promise<CommandResult> {
     }
   }
 
-  const failed = diagnostics.some((diagnostic) => diagnostic.severity === 'error');
+  const incompatible = artifacts.some((artifact) => artifact.compatibility === 'incompatible');
+  const failed = diagnostics.some((diagnostic) => diagnostic.severity === 'error' &&
+    ['ROOT_UNAVAILABLE', 'DISCOVERY_FAILED', 'ARTIFACT_UNAVAILABLE'].includes(diagnostic.code));
   if (artifacts.length === 0 && !failed) {
     diagnostics.push({ code: 'NO_ARTIFACTS', severity: 'info', message: 'No browser/chrome artifacts found.', path: root });
   }
   return {
     schemaVersion: 1,
     command: 'detect',
-    outcome: failed ? 'runtime-error' : 'success',
-    exitCode: failed ? EXIT_CODES.runtimeError : EXIT_CODES.success,
+    outcome: failed ? 'runtime-error' : incompatible ? 'incompatible' : 'success',
+    exitCode: failed ? EXIT_CODES.runtimeError : incompatible ? EXIT_CODES.incompatible : EXIT_CODES.success,
     data: { pluginRoot: root, artifacts, runtime: 'not-verified' },
     diagnostics,
   };

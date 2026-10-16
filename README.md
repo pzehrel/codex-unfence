@@ -2,11 +2,11 @@
 
 ## Node.js CLI (current implementation)
 
-The npm CLI currently provides read-only macOS plugin discovery. Structural
-compatibility is **not analyzed**; real Codex loading and website operation are
-**not verified**. Discovery does not execute plugin sources, modify targets, or
-create plans/backups. The Python tools below are historical research and are not
-used by the Node.js CLI.
+The npm CLI provides read-only macOS plugin discovery and finite AST structural
+compatibility analysis. Real Codex loading and website operation remain
+**not verified**. Detection never executes plugin sources, modifies targets, or
+creates plans/backups. The Python tools below are historical research and are not
+used by the Node.js CLI. This release implements detection only.
 
 Requires Node.js 22.13.0 or newer and npm. Build and install locally:
 
@@ -22,8 +22,9 @@ codex-browser-patch detect --plugin-root /path/to/openai-bundled --json
 
 Only the local install prefix receives CLI files. Do not run npm publish for this
 local workflow. The npm package allowlist contains `dist/`; npm also includes
-`package.json` and this README. Tests, test process fixtures, research, real
-application artifacts, local plans, and backups are excluded.
+`package.json`, this README, and the bundled Acorn/eslint-scope runtime dependency
+closure for offline local installation. Tests, test process fixtures, research,
+real application artifacts, local plans, and backups are excluded.
 
 Discovery enumerates `<root>/{browser,chrome}/<version>/scripts/browser-service.mjs`.
 Default root is `~/.codex/plugins/cache/openai-bundled`, based on the current home
@@ -47,8 +48,8 @@ reserved for unexpected process-level failures. `--help` is plain text.
 {
   "schemaVersion": 1,
   "command": "detect",
-  "outcome": "success",
-  "exitCode": 0,
+  "outcome": "incompatible",
+  "exitCode": 3,
   "data": {
     "pluginRoot": "/absolute/plugin/root",
     "artifacts": [
@@ -58,32 +59,116 @@ reserved for unexpected process-level failures. `--help` is plain text.
         "path": "/absolute/plugin/root/browser/directory-name/scripts/browser-service.mjs",
         "realPath": "/canonical/path/scripts/browser-service.mjs",
         "availability": "readable",
-        "compatibility": "not-analyzed"
+        "compatibility": "incompatible",
+        "analysis": {
+          "patternVersion": "site-status-v1",
+          "compatibility": "incompatible",
+          "runtime": "not-verified",
+          "target": null,
+          "evidence": [],
+          "diagnostics": [{"code": "NO_TARGET", "severity": "error", "message": "No complete supported site-status consumption chain found."}]
+        }
       }
     ],
     "runtime": "not-verified"
   },
-  "diagnostics": []
+  "diagnostics": [{"code": "NO_TARGET", "severity": "error", "message": "No complete supported site-status consumption chain found.", "path": "/absolute/plugin/root/browser/directory-name/scripts/browser-service.mjs"}]
 }
 ```
 
 | Exit code | Outcome | Meaning |
 | --- | --- | --- |
-| 0 | `success` | Discovery completed, including an empty installation. |
+| 0 | `success` | Every discovered readable target is compatible, or discovery is empty. |
 | 1 | `runtime-error` | Unsupported platform, unreadable root/target, or discovery failure. |
 | 2 | `usage-error` | Missing/unknown command, unknown/duplicate option, missing option value. |
+| 3 | `incompatible` | At least one analyzed target is incompatible, including mixed results. |
 
-`data` is null when discovery could not start; otherwise partial discoveries are
-retained on failure. `command` is null for unrecognized/missing commands.
-`availability` is `readable` or `unavailable`; `realPath` is null if resolution
-failed. `compatibility` remains `not-analyzed` for every artifact in this release.
-Diagnostics have `code`, `severity`, `message`, optional `path`, and optional
-`systemCode` (for example `EACCES`). Stable codes are `NO_ARTIFACTS`,
-`INVALID_ARGUMENTS`, `UNSUPPORTED_PLATFORM`, `ROOT_UNAVAILABLE`,
-`DISCOVERY_FAILED`, and `ARTIFACT_UNAVAILABLE`. Automate against codes and fields,
-not prose. New fields/diagnostic codes may be added within schema 1; incompatible
-field or meaning changes require a new schema version. Exit codes for future
-analysis/conflict results are not emitted by this discovery-only release.
+Runtime errors take precedence over incompatibility; all available per-target
+results and diagnostics remain visible. `data` is null when discovery could not
+start. `command` is null for unrecognized/missing commands. `availability` is
+`readable` or `unavailable`; `realPath` is null if resolution failed. Unavailable
+targets retain `not-analyzed` and have no analysis. Readable targets have
+`compatible` or `incompatible` plus `analysis`.
+
+Diagnostics have `code`, `severity`, `message`, optional `path`, optional
+`systemCode` (for example `EACCES`), and optional source `range`. Discovery codes
+remain `NO_ARTIFACTS`, `INVALID_ARGUMENTS`, `UNSUPPORTED_PLATFORM`,
+`ROOT_UNAVAILABLE`, `DISCOVERY_FAILED`, and `ARTIFACT_UNAVAILABLE`. Analysis codes
+are `PARSE_ERROR`, `NO_TARGET`, `AMBIGUOUS_TARGET`, `UNPROVEN_CANDIDATE`,
+`UNSUPPORTED_CHAIN`, `UNSUPPORTED_BINDING`, `REASSIGNED_BINDING`,
+`ESCAPED_BINDING`, `UNSUPPORTED_INITIALIZATION`, `UNSUPPORTED_MUTATION`,
+`UNSUPPORTED_SCOPE`, `UNPROVEN_SOURCE`, `UNPROVEN_RESPONSE`, `CHANGED_SEMANTICS`,
+and `UNTRUSTED_PATCHED_SHAPE`. The last code identifies the supported response-copy
+shape without claiming it was applied by this tool. Detection has no trusted
+operation records. Automate against codes and fields, not prose. New fields and
+codes may be added within schema 1; incompatible changes require a new schema.
+
+### Finite structural support: site-status-v1
+
+The pure boundary is `analyzeSource(source: string): SourceAnalysis` in
+`src/analysis.ts` (built as `dist/analysis.js`). It takes only source text and
+returns `patternVersion`, `compatibility`, `runtime`, `evidence`, `diagnostics`,
+and `target`. It performs no source execution or filesystem access. A compatible
+result has exactly one target: the simple parsed-response identifier passed to
+the agent-specific predicate. Target and evidence ranges are half-open JavaScript
+UTF-16 code-unit offsets (`unit: "utf16"`), suitable for `source.slice(start, end)`;
+they are not UTF-8 byte offsets. Incompatible results always have `target: null`.
+This is the handoff boundary for future local expression transformation; this
+release generates no transformed source.
+
+The supported complete chain is intentionally narrow:
+
+1. A module-level function with one simple parameter creates
+   `new URL('https://chatgpt.com/backend-api/aura/site_status')`, calls
+   `url.searchParams.set('site_url', parameter)`, and returns only
+   `{endpoint: url.toString()}`. The unshadowed global URL constructor is required.
+2. An async module-level transport function returns
+   `await runtime.fetch(endpoint, options)` with its three parameters unchanged.
+3. An async class method receives runtime/request, awaits that transport with
+   `request.endpoint` and `{method: 'GET'}`, throws on `!response.ok`, awaits
+   `response.json()`, then returns `agentPredicate(body)`.
+4. A synchronous module function returns `genericPredicate(body, agentKey)`.
+   The key is literal `'agent'` or a module-level `const` directly initialized to
+   it before the class. The generic predicate returns false for non-object input,
+   reads `feature_status`, and returns `isObject(features) ? features[key] === true : false`.
+   Both object guards resolve to the same function implementing
+   `typeof value === 'object' && value != null`. `==` for typeof, `!== null`, and
+   minified `!0`/`!1` booleans are supported. Arrays retain JavaScript object
+   semantics; no stricter schema is invented.
+5. A second async method awaits the response method and returns only `{blocked}`.
+   A third builds the request from its checked-site parameter, awaits the second
+   method with the same runtime/request bindings, and throws on `result.blocked`.
+   Both calls use the same class's `this` and static method names.
+
+All helper parameters and relevant local bindings must be simple identifiers with
+one definition and no reassignment. Functions and classes must be module-level
+declarations; function bindings may only be referenced as direct callees. The
+class has unique instance methods, no inheritance, constructor, fields, accessors,
+static or computed definitions. Reads may use dot properties or static string
+computed properties; the generic feature lookup uses its bound key. Object
+literal keys must be static noncomputed fields. Function/local/method names,
+quotes, comments and whitespace do not determine compatibility. Versions and
+whole-file hashes do not determine compatibility.
+
+Additional statements, aliases, destructuring, inline/split predicates, dynamic
+keys, nested/expression classes, or other control flow are unsupported. A complete
+chain plus any other class method containing a plausible `.blocked` consumption
+is refused if the latter cannot be proven; two complete chains are ambiguous.
+Unrelated similar predicates without a consumption chain do not create targets.
+For conservative alias protection, any property assignment/update/delete,
+`eval`, or recognized reflective object mutation anywhere in the source is
+rejected, even if apparently unrelated. This is a finite static proof under
+ordinary JavaScript built-in behavior, not a general runtime integrity guarantee.
+
+**Known real-sample bound:** the researched bundle uses uninitialized `var`
+constants assigned inside a deferred bundler initializer, URL construction split
+across helpers, and cache/inflight query control flow. None is supported by
+`site-status-v1`. A single textual assignment cannot prove initializer order.
+Deferred keys receive `UNSUPPORTED_INITIALIZATION` when the surrounding chain
+matches; more complex bundles may fail an earlier structural check. No actual
+installed bundle was analyzed for this implementation, and no real-sample
+compatibility or runtime success is claimed. Broadening these patterns requires
+new positive/negative proof fixtures.
 
 ### Development and independent verification
 
@@ -103,8 +188,8 @@ identity into test children only; the production CLI exposes no platform bypass.
 Permission tests use temporary files with denied read permissions and expect an
 unprivileged runner. GitHub Actions runs all checks on Linux and macOS with Node
 22 and 24. Source responsibilities are command entry/output (`src/cli.ts`,
-`src/result.ts`) and installation discovery (`src/discovery.ts`); source analysis
-and persistent transactions are subsequent work.
+`src/result.ts`), installation discovery (`src/discovery.ts`), and pure structural
+analysis (`src/analysis.ts`). Persistent transactions are subsequent work.
 
 ## Historical fixed-sample Python research
 

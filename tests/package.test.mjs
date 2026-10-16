@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,15 +12,19 @@ test('packed npm CLI installs offline into a temporary prefix and executes throu
   const temporary = await mkdtemp(join(tmpdir(), 'codex-package-'));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const directory = await realpath(temporary);
-  const env = { ...process.env, HOME: directory, NODE_OPTIONS: '', npm_config_cache: join(directory, 'npm-cache') };
+  const env = { ...process.env, HOME: directory, XDG_STATE_HOME: join(directory, 'store'), NODE_OPTIONS: '', npm_config_cache: join(directory, 'npm-cache') };
   const pack = spawnSync('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', directory], {
     cwd: repository, env, encoding: 'utf8',
   });
   assert.equal(pack.status, 0, pack.stderr);
   const [output] = JSON.parse(pack.stdout);
-  assert.deepEqual(output.files.map((file) => file.path).sort(), [
-    'README.md', 'dist/cli.js', 'dist/discovery.js', 'dist/result.js', 'package.json',
+  const files = output.files.map((file) => file.path);
+  assert.deepEqual(files.filter((path) => !path.startsWith('node_modules/')).sort(), [
+    'README.md', 'dist/analysis.js', 'dist/cli.js', 'dist/discovery.js', 'dist/result.js', 'package.json',
   ]);
+  for (const path of files.filter((path) => path.startsWith('node_modules/'))) {
+    assert.match(path, /^node_modules\/(acorn|eslint-scope|esrecurse|estraverse)\//);
+  }
   const prefix = join(directory, 'installation');
   const install = spawnSync('npm', [
     'install', '--global', '--prefix', prefix, '--ignore-scripts', '--offline', '--no-audit', '--no-fund', join(directory, output.filename),
@@ -40,4 +44,14 @@ test('packed npm CLI installs offline into a temporary prefix and executes throu
   });
   assert.equal(detection.status, 0, detection.stderr);
   assert.deepEqual(JSON.parse(detection.stdout).data.artifacts, []);
+  const scripts = join(root, 'browser/unknown-version/scripts');
+  await mkdir(scripts, { recursive: true });
+  const source = await readFile(new URL('./fixtures/site-status.js.txt', import.meta.url), 'utf8');
+  await writeFile(join(scripts, 'browser-service.mjs'), source);
+  const analyzed = spawnSync(process.execPath, ['--require', fixture, binary, 'detect', '--plugin-root', root, '--json'], {
+    cwd: directory, env, encoding: 'utf8',
+  });
+  assert.equal(analyzed.status, 0, analyzed.stdout + analyzed.stderr);
+  assert.equal(JSON.parse(analyzed.stdout).data.artifacts[0].compatibility, 'compatible');
+  assert.equal(await readFile(join(scripts, 'browser-service.mjs'), 'utf8'), source);
 });

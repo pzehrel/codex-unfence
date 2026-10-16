@@ -15,7 +15,7 @@ process.on('exit', () => rmSync(home, { recursive: true, force: true }));
 function run(args, options = {}, fixture = darwin) {
   return spawnSync(process.execPath, ['--require', fixture, cli, ...args], {
     encoding: 'utf8',
-    env: { ...process.env, HOME: home, NODE_OPTIONS: '' },
+    env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, 'store'), NODE_OPTIONS: '' },
     ...options,
   });
 }
@@ -26,21 +26,51 @@ async function sandbox(t) {
   return realpath(directory);
 }
 
+test('detect proves source compatibility, reports evidence and leaves root, home and operation store unchanged', async (t) => {
+  const directory = await sandbox(t);
+  const root = join(directory, 'plugins');
+  const isolatedHome = join(directory, 'home');
+  const store = join(directory, 'store');
+  await mkdir(isolatedHome);
+  await mkdir(store);
+  const path = await artifact(root, 'browser', 'unknown-future-version');
+  const source = await readFile(new URL('./fixtures/site-status.js.txt', import.meta.url), 'utf8');
+  await writeFile(path, source);
+  const env = { ...process.env, HOME: isolatedHome, XDG_STATE_HOME: store, NODE_OPTIONS: '' };
+  const result = run(['detect', '--plugin-root', root, '--json'], { cwd: directory, env });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const output = JSON.parse(result.stdout);
+  const entry = output.data.artifacts[0];
+  assert.equal(entry.compatibility, 'compatible');
+  assert.equal(entry.analysis.target.unit, 'utf16');
+  assert.equal(entry.analysis.evidence.length, 5);
+  assert.equal(output.data.runtime, 'not-verified');
+  assert.equal(await readFile(path, 'utf8'), source);
+  assert.deepEqual(await readdir(isolatedHome), []);
+  assert.deepEqual(await readdir(store), []);
+  assert.deepEqual(await readdir(directory), ['home', 'plugins', 'store']);
+  const human = run(['detect', '--plugin-root', root], { cwd: directory, env });
+  assert.equal(human.status, output.exitCode);
+  assert.match(human.stdout, /structural compatibility: compatible/);
+  assert.match(human.stdout, /Evidence source:.*utf16/);
+});
+
 test('installed command help states macOS discovery and current limits', () => {
   const result = run(['--help']);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /detect/);
   assert.match(result.stdout, /--plugin-root/);
   assert.match(result.stdout, /macOS/);
-  assert.match(result.stdout, /not analyzed/);
+  assert.match(result.stdout, /finite AST/);
+  assert.match(result.stdout, /3 incompatible/);
   assert.equal(result.stderr, '');
 });
 
-async function artifact(root, plugin, version) {
+async function artifact(root, plugin, version, source) {
   const path = join(root, plugin, version, 'scripts/browser-service.mjs');
   await mkdir(join(root, plugin, version, 'scripts'), { recursive: true });
   // This is synthetic data, never imported or executed by discovery.
-  await writeFile(path, 'throw new Error("Discovery must never execute this bundle");\n');
+  await writeFile(path, source ?? await readFile(new URL('./fixtures/site-status.js.txt', import.meta.url), 'utf8'));
   return path;
 }
 
@@ -55,23 +85,70 @@ test('enumerates every browser/chrome version and actual symlink paths without e
   const result = run(['detect', '--plugin-root', root, '--json']);
   assert.equal(result.status, 0, result.stderr);
   const output = JSON.parse(result.stdout);
-  assert.deepEqual(output.data.artifacts, [
-    { plugin: 'browser', version: '10.0', path: second, realPath: second, availability: 'readable', compatibility: 'not-analyzed' },
-    { plugin: 'browser', version: '9.0', path: first, realPath: first, availability: 'readable', compatibility: 'not-analyzed' },
-    { plugin: 'browser', version: 'linked', path: join(root, 'browser/linked/scripts/browser-service.mjs'), realPath: first, availability: 'readable', compatibility: 'not-analyzed' },
-    { plugin: 'chrome', version: 'unlisted-version', path: third, realPath: third, availability: 'readable', compatibility: 'not-analyzed' },
+  assert.deepEqual(output.data.artifacts.map(({ analysis, ...entry }) => {
+    assert.equal(analysis.compatibility, 'compatible');
+    return entry;
+  }), [
+    { plugin: 'browser', version: '10.0', path: second, realPath: second, availability: 'readable', compatibility: 'compatible' },
+    { plugin: 'browser', version: '9.0', path: first, realPath: first, availability: 'readable', compatibility: 'compatible' },
+    { plugin: 'browser', version: 'linked', path: join(root, 'browser/linked/scripts/browser-service.mjs'), realPath: first, availability: 'readable', compatibility: 'compatible' },
+    { plugin: 'chrome', version: 'unlisted-version', path: third, realPath: third, availability: 'readable', compatibility: 'compatible' },
   ]);
   assert.deepEqual(output.diagnostics, []);
   assert.equal(output.data.runtime, 'not-verified');
-  assert.equal(await readFile(first, 'utf8'), 'throw new Error("Discovery must never execute this bundle");\n');
+  assert.equal(await readFile(first, 'utf8'), await readFile(new URL('./fixtures/site-status.js.txt', import.meta.url), 'utf8'));
   assert.deepEqual(await readdir(directory), ['plugins']);
   const human = run(['detect', '--plugin-root', root]);
   assert.equal(human.status, output.exitCode);
   for (const entry of output.data.artifacts) {
     assert.ok(human.stdout.includes(`${entry.plugin} ${entry.version}: ${entry.realPath}`));
   }
-  assert.match(human.stdout, /not-analyzed/);
+  assert.match(human.stdout, /compatible/);
   assert.match(human.stdout, /Versions do not identify the running installation/);
+});
+
+test('mixed compatible and incompatible sources use incompatibility 3 with per-target diagnostics in JSON and human output', async (t) => {
+  const directory = await sandbox(t);
+  const root = join(directory, 'plugins');
+  await artifact(root, 'browser', 'compatible');
+  const bad = await artifact(root, 'chrome', 'unsupported', 'const similar = "feature_status.agent";');
+  const result = run(['detect', '--plugin-root', root, '--json'], { cwd: directory });
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.outcome, 'incompatible');
+  assert.equal(output.exitCode, 3);
+  assert.deepEqual(output.data.artifacts.map((entry) => entry.compatibility), ['compatible', 'incompatible']);
+  assert.equal(output.data.artifacts[1].analysis.diagnostics[0].code, 'NO_TARGET');
+  assert.equal(output.diagnostics[0].path, bad);
+  const human = run(['detect', '--plugin-root', root], { cwd: directory });
+  assert.equal(human.status, 3);
+  assert.match(human.stdout, /NO_TARGET/);
+  assert.match(human.stdout, /structural compatibility: incompatible/);
+  assert.equal(result.stderr, '');
+  assert.deepEqual(await readdir(directory), ['plugins']);
+});
+
+test('parse failure and untrusted patched shape retain separate incompatibility diagnostics', async (t) => {
+  const root = await sandbox(t);
+  await artifact(root, 'browser', 'broken', 'function {');
+  const source = await readFile(new URL('./fixtures/site-status.js.txt', import.meta.url), 'utf8');
+  await artifact(root, 'chrome', 'copied', source.replace('agentBlocked(body);', 'agentBlocked({...body,feature_status:{...body?.feature_status,agent:false}});'));
+  const result = run(['detect', '--plugin-root', root, '--json']);
+  assert.equal(result.status, 3);
+  const output = JSON.parse(result.stdout);
+  assert.deepEqual(output.diagnostics.map((entry) => entry.code), ['PARSE_ERROR', 'UNTRUSTED_PATCHED_SHAPE']);
+  assert.ok(output.data.artifacts.every((entry) => entry.compatibility === 'incompatible'));
+});
+
+test('runtime failures take precedence over incompatibility without dropping either diagnostic', async (t) => {
+  const root = await sandbox(t);
+  await artifact(root, 'browser', 'unsupported', 'const absent = true;');
+  await mkdir(join(root, 'chrome/missing/scripts'), { recursive: true });
+  const result = run(['detect', '--plugin-root', root, '--json']);
+  assert.equal(result.status, 1);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.outcome, 'runtime-error');
+  assert.deepEqual(output.diagnostics.map((entry) => entry.code), ['NO_TARGET', 'ARTIFACT_UNAVAILABLE']);
 });
 
 test('invalid CLI input uses usage-error 2 and a single JSON diagnostic', () => {
