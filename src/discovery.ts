@@ -3,7 +3,7 @@ import { access, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { analyzeSource } from './analysis.js';
 import { homedir } from 'node:os';
 import { resolve, join } from 'node:path';
-import type { Artifact, CommandResult, Diagnostic } from './result.js';
+import type { Artifact, DetectionResult, Diagnostic } from './result.js';
 import { EXIT_CODES } from './result.js';
 
 function systemCode(error: unknown): string {
@@ -14,7 +14,7 @@ function failure(path: string, error: unknown, code: string): Diagnostic {
   return { code, severity: 'error', message: 'Cannot inspect path.', path, systemCode: systemCode(error) };
 }
 
-export async function detect(pluginRoot?: string): Promise<CommandResult> {
+export async function detect(pluginRoot?: string): Promise<DetectionResult> {
   if (process.platform !== 'darwin') {
     return {
       schemaVersion: 1, command: 'detect', outcome: 'runtime-error', exitCode: EXIT_CODES.runtimeError, data: null,

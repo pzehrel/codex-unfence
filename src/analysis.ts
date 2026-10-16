@@ -31,6 +31,37 @@ export interface SourceAnalysis {
   target: SourceRange | null;
 }
 
+export interface SourceTransformation {
+  range: SourceRange;
+  before: string;
+  after: string;
+  patchedSource: string;
+  localDiff: string;
+}
+
+export interface SourceTransformResult {
+  analysis: SourceAnalysis;
+  transformation: SourceTransformation | null;
+}
+
+/** Pure local transformation; only a proven simple response argument is copied. */
+export function transformSource(source: string): SourceTransformResult {
+  const analysis = analyzeSource(source);
+  if (!analysis.target) return { analysis, transformation: null };
+  const target = analysis.target;
+  const before = source.slice(target.start, target.end);
+  const after = `({...${before},feature_status:{...${before}?.feature_status,agent:false}})`;
+  const prefix = source.slice(0, target.start);
+  const suffix = source.slice(target.end);
+  const patchedSource = prefix + after + suffix;
+  // Reparse instead of printing the AST: all surrounding source stays verbatim.
+  parse(patchedSource, { ecmaVersion: 2022, sourceType: 'module' });
+  const contextBefore = prefix.slice(Math.max(0, prefix.length - 80));
+  const contextAfter = suffix.slice(0, 80);
+  const localDiff = `Expression UTF-16 [${target.start}, ${target.end})\nContext before: ${JSON.stringify(contextBefore)}\n- ${before}\n+ ${after}\nContext after: ${JSON.stringify(contextAfter)}\n`;
+  return { analysis, transformation: { range: target, before, after, patchedSource, localDiff } };
+}
+
 type FunctionNode = E.FunctionDeclaration | E.FunctionExpression;
 type Method = E.MethodDefinition & { value: E.FunctionExpression };
 

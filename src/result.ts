@@ -32,20 +32,37 @@ export interface Detection {
   runtime: 'not-verified';
 }
 
-export interface CommandResult {
+export interface Preparation {
+  pluginRoot: string;
+  plan: { id: string; directory: string; manifestPath: string; targetCount: number };
+  pluginFiles: 'unchanged';
+  runtime: 'not-verified';
+}
+
+interface ResultBase {
   schemaVersion: 1;
-  command: 'detect' | null;
   outcome: 'success' | 'usage-error' | 'runtime-error' | 'incompatible';
   exitCode: number;
-  data: Detection | null;
   diagnostics: Diagnostic[];
 }
+
+export interface DetectionResult extends ResultBase {
+  command: 'detect';
+  data: Detection | null;
+}
+
+export interface PreparationResult extends ResultBase {
+  command: 'prepare';
+  data: Preparation | null;
+}
+
+export type CommandResult = DetectionResult | PreparationResult | (ResultBase & { command: null; data: null });
 
 export function renderHuman(result: CommandResult): string {
   const lines = [`${result.command ?? 'CLI'}: ${result.outcome}`];
   if (result.data) {
     lines.push(`Plugin root: ${result.data.pluginRoot}`);
-    for (const artifact of result.data.artifacts) {
+    for (const artifact of result.command === 'detect' ? result.data.artifacts : []) {
       lines.push(
         `${artifact.plugin} ${artifact.version}: ${artifact.realPath ?? artifact.path}`,
         `  Availability: ${artifact.availability}; structural compatibility: ${artifact.compatibility}`,
@@ -53,6 +70,9 @@ export function renderHuman(result: CommandResult): string {
       for (const evidence of artifact.analysis?.evidence ?? []) {
         lines.push(`  Evidence ${evidence.kind}: ${evidence.range.start}..${evidence.range.end} ${evidence.range.unit}. ${evidence.description}`);
       }
+    }
+    if (result.command === 'prepare') {
+      lines.push(`Review plan: ${result.data.plan.directory}`, `Manifest: ${result.data.plan.manifestPath}`, `Targets: ${result.data.plan.targetCount}; plugin files unchanged.`);
     }
     lines.push('Runtime: not-verified. Versions do not identify the running installation.');
   }
