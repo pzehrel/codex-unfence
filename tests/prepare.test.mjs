@@ -378,8 +378,3 @@ test('prepare help and human output state explicit selection and unchanged files
     assert.equal(result.stderr, '');
   }
 });
-
-
-
-
-
