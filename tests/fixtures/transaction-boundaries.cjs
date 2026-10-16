@@ -29,6 +29,7 @@ const target = process.env.CODEX_TEST_TARGET;
 let paused = false;
 let replacements = 0;
 const fault = process.env.CODEX_TEST_FAULT;
+let recoveryIntentPaused = false;
 const ioError = () => Object.assign(new Error('synthetic filesystem failure'), { code: 'EIO' });
 async function boundary(name) {
   if (!paused && process.env.CODEX_TEST_PAUSE === name) {
@@ -53,6 +54,7 @@ promises.rename = async function (from, to) {
       if (fault === 'rollback-journal-failure') throw ioError();
     }
     if (record.phase === 'rolling-back' && fault === 'recovery-backup-change') fs.writeFileSync(process.env.CODEX_TEST_BACKUP, 'external backup change');
+    if (record.phase === 'writing') await boundary('before-writing-journal');
     if (record.phase === 'verifying') await boundary('after-postverification');
     if (record.phase === 'committed') {
       await boundary('before-commit');
@@ -61,7 +63,14 @@ promises.rename = async function (from, to) {
   }
   const result = await rename(from, to);
   if (String(from).includes('/transactions/.staging-')) await boundary('after-intent-publication');
-  if (String(to).endsWith('/journal.json') && JSON.parse(fs.readFileSync(to, 'utf8')).record.phase === 'rolling-back') await boundary('after-rollback-intent');
+  if (String(to).endsWith('/journal.json') && JSON.parse(fs.readFileSync(to, 'utf8')).record.phase === 'verifying') await boundary('after-progress-journal');
+  if (String(to).endsWith('/journal.json') && JSON.parse(fs.readFileSync(to, 'utf8')).record.phase === 'rolling-back') {
+    await boundary('after-rollback-intent');
+    if (!recoveryIntentPaused) {
+      recoveryIntentPaused = true;
+      if (fault === 'recovery-later-backup-change') fs.writeFileSync(process.env.CODEX_TEST_BACKUP, 'external backup change');
+    }
+  }
   if (String(to).endsWith('/journal.json') && fault === 'commit-journal-renamed-error' && JSON.parse(fs.readFileSync(to, 'utf8')).record.phase === 'committed') throw ioError();
   if (to === target) {
     if (fault === 'postwrite-change' && replacements === 1) fs.writeFileSync(target, 'external boundary change');
@@ -72,7 +81,7 @@ promises.rename = async function (from, to) {
 };
 promises.open = async function (path, ...args) {
   if (String(path).includes('.codex-browser-patch-') && String(path).endsWith('.tmp') && args[0] === 'wx') {
-    if (fault === 'write-failure') throw ioError();
+    if (fault === 'write-failure' && dirname(String(path)) === dirname(target ?? '')) throw ioError();
     if (fault === 'prewrite-change') fs.writeFileSync(target, 'external boundary change');
     if (fault === 'parent-replaced') {
       const parent = dirname(target);
@@ -86,6 +95,7 @@ promises.open = async function (path, ...args) {
   return open(path, ...args);
 };
 promises.link = async function (from, to) {
+  if (String(to).includes('operation.lock') && !JSON.parse(fs.readFileSync(from, 'utf8')).released) await boundary('before-operation-lock');
   if (fault === 'release-failure' && String(to).endsWith('.next') && JSON.parse(fs.readFileSync(from, 'utf8')).released) throw ioError();
   const result = await link(from, to);
   if ((String(to).endsWith('.codex-browser-patch.lock') || String(to).includes('.codex-browser-patch.lock.')) && !JSON.parse(fs.readFileSync(from, 'utf8')).released) targetLeasePublished = true;

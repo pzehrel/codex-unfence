@@ -2,11 +2,12 @@
 
 ## Node.js CLI (current implementation)
 
-The npm CLI provides read-only macOS plugin discovery and finite AST structural
-compatibility analysis. Real Codex loading and website operation remain
+The npm CLI provides macOS plugin discovery, finite AST structural compatibility
+analysis, review plans, and durable apply/status/restore/recover transactions for
+selected browser/chrome versions. Real Codex loading and website operation remain
 **not verified**. Detection never executes plugin sources, modifies targets, or
 creates plans/backups. The Python tools below are historical research and are not
-used by the Node.js CLI. This release implements detection only.
+used by the Node.js CLI.
 
 Requires Node.js 22.13.0 or newer and npm. Build and install locally:
 
@@ -103,6 +104,82 @@ shape without claiming it was applied by this tool. Detection has no trusted
 operation records. Automate against codes and fields, not prose. New fields and
 codes may be added within schema 1; incompatible changes require a new schema.
 
+### Selected multi-target transactions
+
+Prepare selects exact paths reported by detect, or explicitly filters all
+compatible artifacts. A plan can contain browser/chrome and multiple versions;
+apply and restore operate on that exact selection and never infer a running
+version. For example, using synthetic or explicitly authorized plugin roots:
+
+```bash
+codex-browser-patch prepare --plugin-root /absolute/plugins --all-compatible --output /absolute/new-plan
+codex-browser-patch apply --plan /absolute/new-plan --store /absolute/private-store --json
+codex-browser-patch status --plan /absolute/new-plan --store /absolute/private-store --json
+codex-browser-patch status --target /absolute/plugins/browser/version/scripts/browser-service.mjs --target /absolute/plugins/chrome/version/scripts/browser-service.mjs --store /absolute/private-store --json
+codex-browser-patch restore --plan /absolute/new-plan --store /absolute/private-store --json
+codex-browser-patch recover --store /absolute/private-store --json
+```
+
+Before any target write, apply/restore validate every selected target, all plan
+artifacts, authenticated store records and backups, process checks, and unfinished
+transactions. An unknown state causes zero target writes. The store lock comes
+first, followed by canonical, lexically sorted, deduplicated sibling target locks.
+These target locks exclude operations using another store. Keep the private store
+(mode 0700) and sibling `.codex-browser-patch.lock` successor history. A dead owner
+alone never permits bypassing a published incomplete transaction.
+
+Each target retains its actual before snapshot and bytes, desired after identity,
+final snapshot, and previous provenance. Known original/applied mixtures and no-op
+entries remain distinct; no-op targets are not renamed. Provenance follows each
+path across plans with the same verified original/patched artifacts. Patch-shaped
+contents alone never prove tool application. New authenticated journals use
+`formatVersion: 2` with `targets[]`; existing v1 journals are authenticated in their
+original representation before in-memory normalization. Reading never rewrites
+v1 records, and recovering a pending v1 transaction retains its v1 representation.
+
+Each replacement is atomic and fsyncs its file and parent directory. The group is
+not a filesystem-wide atomic exchange. A later write failure rolls back targets
+whose actual contents changed, including rename-then-error failures. Failed
+rollback or journal persistence retains recovery evidence and does not report
+success. SIGKILL recovery uses actual current before/after contents, rather than a
+progress counter; recover can itself be interrupted and repeated. Recovery always
+returns each target to this transaction's actual before state. An interrupted
+restore normally returns to tool-applied content; an interrupted mixed operation
+returns to its individual mixture. Recovery preflights the entire group: unknown
+external contents anywhere preserve every target and the journal. Each backup is
+also revalidated immediately before its rollback replacement. Locks cannot exclude
+external updaters; changed identities or unknown contents are conflicts.
+
+`schemaVersion: 1` remains stable. Transaction outcomes use exit 0 for success,
+1 for runtime failure, 2 for usage errors, 3 for incompatibility and 4 for conflict.
+Successful apply/restore/recover include per-target `state` and `action`. Status is
+read-only and returns these additive group fields:
+
+| Field | Meaning |
+| --- | --- |
+| `data.targets` | Exactly the selected paths, in plan or repeated `--target` order. States are `original`, `tool-applied`, `incompatible`, `conflict`, or `incomplete`. |
+| `data.groupState` | `complete`, `incomplete`, `conflict`, or `incompatible`. Pending-group conflicts take precedence, then incompleteness, then incompatibility. |
+| `data.pendingTransactions` | All incomplete groups in the selected store, plus groups found through selected target locks in other stores. Each includes owning `store`, `transaction`, `operation`, `state`, and every group target, including unselected members. |
+| `targets[].pending` | Present for pending members. Includes owning `store`, `transaction`, `operation`, actual `before` state, `desired` state and `current`: `before`, `after`, `before-and-after` (no-op), or `unknown`. An unknown current state reports target/group conflict. |
+| `data.transaction`, `data.operation` | Compatibility shorthand for exactly one pending group; null when no group or multiple groups exist. Use `pendingTransactions` for complete information. |
+
+A pending group remains incomplete even when every target currently equals its
+before state; only an authenticated terminal journal completes recovery. A
+selected target can report `incomplete` while its group reports `conflict` because
+another member has unknown contents. Status exits 4 for any discovered pending
+conflict, 3 for selected incompatibility otherwise, and 0 for known states including
+incomplete groups. Ordinary apply/restore remain blocked until explicit recovery.
+Use the pending group's owning store for `recover`; another store cannot recover
+its records. Human output displays the same state and recovery location.
+
+Process checks fail closed, cover Codex/ChatGPT and browser-service executable
+identities, and never terminate processes. They are `ps` snapshots, so new
+processes may start afterward. Directory fsync and synthetic SIGKILL tests do not
+establish power-loss durability. Same-user hostile edits able to read the private
+HMAC key remain outside the local provenance trust boundary. File changes do not
+establish runtime loading, cache refresh, host integrity acceptance or website
+operation.
+
 ### Finite structural support: site-status-v1
 
 The pure boundary is `analyzeSource(source: string): SourceAnalysis` in
@@ -113,8 +190,9 @@ result has exactly one target: the simple parsed-response identifier passed to
 the agent-specific predicate. Target and evidence ranges are half-open JavaScript
 UTF-16 code-unit offsets (`unit: "utf16"`), suitable for `source.slice(start, end)`;
 they are not UTF-8 byte offsets. Incompatible results always have `target: null`.
-This is the handoff boundary for future local expression transformation; this
-release generates no transformed source.
+`transformSource(source)` uses that boundary to generate a local response-copy
+expression and reparse the output; prepare retains the original and transformed
+artifacts for review and verified transactions.
 
 The supported complete chain is intentionally narrow:
 
@@ -189,7 +267,13 @@ Permission tests use temporary files with denied read permissions and expect an
 unprivileged runner. GitHub Actions runs all checks on Linux and macOS with Node
 22 and 24. Source responsibilities are command entry/output (`src/cli.ts`,
 `src/result.ts`), installation discovery (`src/discovery.ts`), and pure structural
-analysis (`src/analysis.ts`). Persistent transactions are subsequent work.
+analysis (`src/analysis.ts`), review plans (`src/plan.ts`), and persistent
+transactions (`src/transactions.ts`, `src/transaction-storage.ts`, and
+`src/transaction-locks.ts`). Transaction tests inject filesystem/process boundaries
+only through an explicit test-child `--require` fixture. They cover group preflight,
+mixed provenance, cross-store locks, later-target failures, rollback failure,
+authenticated v1 compatibility, real child SIGKILL windows, repeated interrupted
+recovery and external modifications. Production exposes no guard bypass.
 
 ## Historical fixed-sample Python research
 

@@ -59,13 +59,28 @@ export interface PreparationResult extends ResultBase {
 
 export type TransactionCommand = 'apply' | 'restore' | 'status' | 'recover';
 export type TargetState = 'original' | 'tool-applied' | 'incompatible' | 'conflict' | 'incomplete';
+export interface OperationTarget {
+  path: string;
+  state: TargetState;
+  action?: 'applied' | 'already-applied' | 'restored' | 'already-original' | 'rolled-back';
+  pending?: { store: string; transaction: string; operation: 'apply' | 'restore'; current: 'before' | 'after' | 'before-and-after' | 'unknown'; before: 'original' | 'tool-applied'; desired: 'original' | 'tool-applied' };
+}
+export interface PendingTransaction {
+  store: string;
+  transaction: string;
+  operation: 'apply' | 'restore';
+  state: 'incomplete' | 'conflict';
+  targets: OperationTarget[];
+}
 export interface OperationResult extends ResultBase {
   command: TransactionCommand;
   data: {
     store: string;
     transaction: string | null;
     operation: 'apply' | 'restore' | null;
-    targets: { path: string; state: TargetState; action?: 'applied' | 'already-applied' | 'restored' | 'already-original' | 'rolled-back' }[];
+    targets: OperationTarget[];
+    groupState?: 'complete' | 'incomplete' | 'conflict' | 'incompatible';
+    pendingTransactions?: PendingTransaction[];
     runtime: 'not-verified';
   } | null;
 }
@@ -78,8 +93,10 @@ export function renderHuman(result: CommandResult): string {
     if ('pluginRoot' in result.data) lines.push(`Plugin root: ${result.data.pluginRoot}`);
     if ('store' in result.data) {
       lines.push(`Operation store: ${result.data.store}`, `Transaction: ${result.data.transaction ?? 'none'}`, `Operation: ${result.data.operation ?? 'none'}`);
-      if (result.data.targets.some((target) => target.state === 'incomplete')) lines.push('Explicit recover rolls back to the preoperation state; it does not continue apply or restore.');
-      for (const target of result.data.targets) lines.push(`${target.path}: ${target.state}${target.action ? ` (${target.action})` : ''}`);
+      if (result.data.groupState) lines.push(`Group: ${result.data.groupState}`);
+      if (result.data.targets.some((target) => target.state === 'incomplete') || result.data.pendingTransactions?.length) lines.push('Explicit recover rolls back to the preoperation state; it does not continue apply or restore.');
+      for (const target of result.data.targets) lines.push(`${target.path}: ${target.state}${target.action ? ` (${target.action})` : ''}${target.pending ? ` [pending ${target.pending.transaction}; current ${target.pending.current}; before ${target.pending.before}]` : ''}`);
+      for (const pending of result.data.pendingTransactions ?? []) lines.push(`Pending group: ${pending.transaction} (${pending.operation}, ${pending.state}, ${pending.targets.length} targets); recover --store ${pending.store}`);
     }
     for (const artifact of result.command === 'detect' ? result.data.artifacts : []) {
       lines.push(

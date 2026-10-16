@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout } from 'node:timers';
@@ -23,6 +24,20 @@ async function sandbox(t) {
   const prepared = run(box, ['prepare', '--plugin-root', join(directory, 'plugins'), '--target', target, '--output', box.plan]);
   assert.equal(prepared.status, 0, prepared.stdout + prepared.stderr);
   return box;
+}
+
+async function groupSandbox(t) {
+  const box = await sandbox(t);
+  const targets = [box.target,
+    join(box.directory, 'plugins/browser/version-two/scripts/browser-service.mjs'),
+    join(box.directory, 'plugins/chrome/other/scripts/browser-service.mjs')];
+  for (const path of targets.slice(1)) {
+    await mkdir(join(path, '..'), { recursive: true });
+    await writeFile(path, source, { mode: 0o640 });
+  }
+  const plan = join(box.directory, 'group-plan');
+  response(run(box, ['prepare', '--plugin-root', join(box.directory, 'plugins'), '--all-compatible', '--output', plan]));
+  return { ...box, targets, singlePlan: box.plan, plan };
 }
 
 function options(box, extraEnv = {}) {
@@ -322,20 +337,345 @@ test('apply preflights current identity and every plan artifact before target or
   }
 });
 
-test('multi-target plans reject entirely and operation commands require explicit plan/store selection', async (t) => {
+test('selected browser/chrome versions apply and restore together while leaving unselected versions unchanged', async (t) => {
   const box = await sandbox(t);
   const second = join(box.directory, 'plugins/chrome/other/scripts/browser-service.mjs');
-  await mkdir(join(box.directory, 'plugins/chrome/other/scripts'), { recursive: true });
-  await writeFile(second, source);
+  const unselected = join(box.directory, 'plugins/browser/unselected/scripts/browser-service.mjs');
+  for (const path of [second, unselected]) {
+    await mkdir(join(path, '..'), { recursive: true });
+    await writeFile(path, source, { mode: 0o640 });
+  }
+  const plan = join(box.directory, 'selected');
+  response(run(box, ['prepare', '--plugin-root', join(box.directory, 'plugins'), '--target', second, '--target', box.target, '--output', plan]));
+  const selected = { ...box, plan };
+  const applied = response(apply(selected));
+  assert.deepEqual(applied.data.targets.map(({ path, action }) => ({ path, action })), [
+    { path: second, action: 'applied' }, { path: box.target, action: 'applied' },
+  ]);
+  for (const path of [box.target, second]) {
+    assert.match(await readFile(path, 'utf8'), /agent:false/);
+    assert.equal((await stat(path)).mode & 0o7777, 0o640);
+  }
+  assert.equal(await readFile(unselected, 'utf8'), source);
+  assert.deepEqual(response(status(selected)).data.targets.map((target) => target.state), ['tool-applied', 'tool-applied']);
+  assert.deepEqual(response(apply(selected)).data.targets.map((target) => target.action), ['already-applied', 'already-applied']);
+  assert.deepEqual(response(restore(selected)).data.targets.map((target) => target.action), ['restored', 'restored']);
+  assert.deepEqual(response(restore(selected)).data.targets.map((target) => target.action), ['already-original', 'already-original']);
+  for (const path of [box.target, second, unselected]) assert.equal(await readFile(path, 'utf8'), source);
+});
+
+test('mixed states retain each target provenance across single and group plans without replacing no-op entries', async (t) => {
+  const box = await sandbox(t);
+  const second = join(box.directory, 'plugins/chrome/other/scripts/browser-service.mjs');
+  await mkdir(join(second, '..'), { recursive: true });
+  await writeFile(second, source, { mode: 0o600 });
   const plan = join(box.directory, 'multi');
   response(run(box, ['prepare', '--plugin-root', join(box.directory, 'plugins'), '--all-compatible', '--output', plan]));
-  for (const operation of [apply, restore]) {
-    const output = response(operation({ ...box, plan }), 2);
-    assert.equal(output.diagnostics[0].code, 'MULTI_TARGET_UNSUPPORTED');
-  }
-  assert.equal(await readFile(box.target, 'utf8'), source);
+  response(apply(box));
+  const inode = (await stat(box.target)).ino;
+  const group = { ...box, plan };
+  assert.deepEqual(response(status(group)).data.targets.map((target) => target.state), ['tool-applied', 'original']);
+  const applied = response(apply(group));
+  assert.deepEqual(applied.data.targets.map((target) => target.action), ['already-applied', 'applied']);
+  assert.equal((await stat(box.target)).ino, inode);
+  response(restore(box));
+  const originalInode = (await stat(box.target)).ino;
+  const restored = response(restore(group));
+  assert.deepEqual(restored.data.targets.map((target) => target.action), ['already-original', 'restored']);
+  assert.equal((await stat(box.target)).ino, originalInode);
+  assert.equal((await stat(second)).mode & 0o7777, 0o600);
   assert.equal(await readFile(second, 'utf8'), source);
+  assert.equal(response(status(box)).data.targets[0].state, 'original');
+});
+
+test('every selected target, artifact and backup is preflighted before the group writes any target', async (t) => {
+  for (const mutation of ['external', 'artifact', 'backup', 'untrusted-patch', 'process']) {
+    const box = await groupSandbox(t);
+    if (mutation === 'external') await writeFile(box.targets[1], 'external second target');
+    if (mutation === 'artifact') await writeFile(join(box.plan, 'contents/0001.patched.mjs'), 'changed second artifact');
+    if (mutation === 'untrusted-patch') await writeFile(box.targets[1], await readFile(join(box.plan, 'contents/0001.patched.mjs')));
+    let operation = apply;
+    if (mutation === 'backup') {
+      const applied = response(apply(box));
+      await writeFile(join(box.store, 'transactions', applied.data.transaction, 'before.0001.mjs'), 'changed second backup');
+      operation = restore;
+    }
+    const bytes = await Promise.all(box.targets.map((path) => readFile(path)));
+    const inodes = await Promise.all(box.targets.map(async (path) => (await stat(path)).ino));
+    const row = { pid: 4301, executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' };
+    const output = response(operation(box, mutation === 'process' ? { CODEX_TEST_PROCESS_ROWS: JSON.stringify([row]) } : {}), 4);
+    assert.equal(output.outcome, 'conflict');
+    for (const [index, path] of box.targets.entries()) {
+      assert.deepEqual(await readFile(path), bytes[index], mutation);
+      assert.equal((await stat(path)).ino, inodes[index], mutation);
+    }
+    if (mutation !== 'backup') await assert.rejects(access(box.store));
+  }
+});
+
+test('second-target failures roll back actual changed targets including rename-then-error and keep failed rollbacks recoverable', async (t) => {
+  for (const operation of [apply, restore]) {
+    for (const fault of ['write-failure', 'rename-then-error', 'rollback-failure']) {
+      const box = await groupSandbox(t);
+      if (operation === restore) response(apply(box));
+      const bytes = await Promise.all(box.targets.map((path) => readFile(path)));
+      const output = response(operation(box, { CODEX_TEST_TARGET: box.targets[1], CODEX_TEST_FAULT: fault }), 1);
+      if (fault === 'rollback-failure') {
+        assert.equal(output.diagnostics[0].code, 'ROLLBACK_FAILED');
+        assert.deepEqual(response(status(box)).data.targets.map((target) => target.state), ['incomplete', 'incomplete', 'incomplete']);
+        response(recover(box));
+      }
+      for (const [index, path] of box.targets.entries()) assert.deepEqual(await readFile(path), bytes[index]);
+      assert.deepEqual(response(status(box)).data.targets.map((target) => target.state), Array(3).fill(operation === apply ? 'original' : 'tool-applied'));
+    }
+  }
+});
+
+test('status reports whole pending groups across stores while preserving explicit per-target selection', async (t) => {
+  const box = await groupSandbox(t);
+  const interrupted = await paused(t, box, 'apply', 'after-target-rename', { CODEX_TEST_TARGET: box.targets[1] });
+  await interrupted.kill();
+  const other = { ...box, store: join(box.directory, 'other-store') };
+  const output = response(status(other));
+  assert.equal(output.data.groupState, 'incomplete');
+  assert.equal(output.data.pendingTransactions.length, 1);
+  const pending = output.data.pendingTransactions[0];
+  assert.equal(pending.store, box.store);
+  assert.equal(pending.transaction, output.data.transaction);
+  assert.deepEqual(pending.targets.map((target) => target.pending.current), ['after', 'after', 'before']);
+  assert.deepEqual(output.data.targets.map((target) => target.state), ['incomplete', 'incomplete', 'incomplete']);
+  const selected = response(run(other, ['status', '--target', box.targets[1], '--target', box.target, '--store', other.store]));
+  assert.deepEqual(selected.data.targets.map((target) => target.path), [box.targets[1], box.target]);
+  assert.equal(selected.data.pendingTransactions[0].targets.length, 3);
+  const one = response(run(box, ['status', '--target', box.target, '--store', box.store]));
+  assert.equal(one.data.targets.length, 1);
+  assert.equal(one.data.pendingTransactions[0].targets.length, 3);
+  assert.equal(response(apply(other), 4).diagnostics[0].code, 'INCOMPLETE_TRANSACTION');
+  assert.equal(response(restore(other), 4).diagnostics[0].code, 'INCOMPLETE_TRANSACTION');
+  await assert.rejects(access(other.store));
+  response(recover(box));
+});
+
+test('mixed group interruptions and two killed recovery windows always converge to each actual before state', async (t) => {
+  for (const operation of ['apply', 'restore']) {
+    const box = await groupSandbox(t);
+    response(apply({ ...box, plan: box.singlePlan }));
+    const before = await Promise.all(box.targets.map((path) => readFile(path)));
+    const beforeInode = (await stat(operation === 'apply' ? box.target : box.targets[1])).ino;
+    const interrupted = await paused(t, box, operation, 'after-target-rename', { CODEX_TEST_TARGET: operation === 'apply' ? box.targets[2] : box.target });
+    await interrupted.kill();
+    const pending = response(status(box));
+    assert.equal(pending.data.groupState, 'incomplete');
+    assert.deepEqual(pending.data.targets.map((target) => target.pending.before), ['tool-applied', 'original', 'original']);
+    assert.equal((await stat(operation === 'apply' ? box.target : box.targets[1])).ino, beforeInode);
+    const recovering = await paused(t, box, 'recover', 'after-target-rename', { CODEX_TEST_TARGET: operation === 'apply' ? box.targets[1] : box.target });
+    await recovering.kill();
+    assert.equal(response(status(box)).data.groupState, 'incomplete');
+    const finalizing = await paused(t, box, 'recover', 'before-rollback-commit');
+    await finalizing.kill();
+    for (const [index, path] of box.targets.entries()) assert.deepEqual(await readFile(path), before[index]);
+    const recovered = response(recover(box));
+    assert.deepEqual(recovered.data.targets.map((target) => target.state), ['tool-applied', 'original', 'original']);
+    assert.deepEqual(response(status(box)).data.targets.map((target) => target.state), ['tool-applied', 'original', 'original']);
+    assert.equal(response(recover(box)).diagnostics[0].code, 'NO_INCOMPLETE_TRANSACTION');
+  }
+});
+
+test('unknown contents anywhere in a pending group cause zero recovery target writes and preserve the full journal', async (t) => {
+  const box = await groupSandbox(t);
+  const interrupted = await paused(t, box, 'apply', 'after-target-rename', { CODEX_TEST_TARGET: box.targets[1] });
+  await interrupted.kill();
+  const id = response(status(box)).data.transaction;
+  const journal = join(box.store, 'transactions', id, 'journal.json');
+  const beforeJournal = await readFile(journal);
+  await writeFile(box.targets[2], 'external third target');
+  const before = await Promise.all(box.targets.map((path) => readFile(path)));
+  const inodes = await Promise.all(box.targets.map(async (path) => (await stat(path)).ino));
+  const rejected = response(recover(box), 4);
+  assert.equal(rejected.diagnostics[0].code, 'RECOVERY_CONFLICT');
+  for (const [index, path] of box.targets.entries()) {
+    assert.deepEqual(await readFile(path), before[index]);
+    assert.equal((await stat(path)).ino, inodes[index]);
+  }
+  assert.deepEqual(await readFile(journal), beforeJournal);
+  const statusOutput = response(status(box), 4);
+  assert.equal(statusOutput.data.groupState, 'conflict');
+  assert.deepEqual(statusOutput.data.targets.map((target) => target.state), ['incomplete', 'incomplete', 'conflict']);
+  const selected = response(run(box, ['status', '--target', box.target, '--store', box.store]), 4);
+  assert.equal(selected.data.targets[0].state, 'incomplete');
+  assert.equal(selected.data.pendingTransactions[0].state, 'conflict');
+});
+
+test('group target locks use canonical order independent of plan order, exclude other stores, and survive dead pre-intent owners', async (t) => {
+  const box = await groupSandbox(t);
+  const reversePlan = join(box.directory, 'reverse-plan');
+  response(run(box, ['prepare', '--plugin-root', join(box.directory, 'plugins'), ...[...box.targets].reverse().flatMap((path) => ['--target', path]), '--output', reversePlan]));
+  const holder = await paused(t, { ...box, plan: reversePlan }, 'apply', 'target-lock-acquired');
+  const firstLock = join(box.target, '../.codex-browser-patch.lock');
+  const lock = JSON.parse(await readFile(firstLock, 'utf8'));
+  const live = { pid: holder.child.pid, start: lock.owner.start, executable: process.execPath, command: `${process.execPath} synthetic-cli` };
+  const other = { ...box, store: join(box.directory, 'other-store') };
+  assert.equal(response(apply(other, { CODEX_TEST_PROCESS_ROWS: JSON.stringify([live]) }), 4).diagnostics[0].code, 'LOCK_HELD');
+  for (const path of box.targets) assert.equal(await readFile(path, 'utf8'), source);
+  await holder.kill();
+  response(apply(other));
+  assert.deepEqual(response(status(other)).data.targets.map((target) => target.state), ['tool-applied', 'tool-applied', 'tool-applied']);
+});
+
+test('verified v1 records remain readable with original authentication and pending v1 recovery keeps its wire format', async (t) => {
+  for (const pending of [false, true]) {
+    const box = await sandbox(t);
+    let id;
+    if (pending) {
+      const interrupted = await paused(t, box, 'apply', 'after-target-rename');
+      await interrupted.kill();
+      id = response(status(box)).data.transaction;
+    } else id = response(apply(box)).data.transaction;
+    const journal = join(box.store, 'transactions', id, 'journal.json');
+    const envelope = JSON.parse(await readFile(journal, 'utf8'));
+    const { targets, ...base } = envelope.record;
+    const legacy = { ...base, formatVersion: 1, target: targets[0] };
+    // A wire-format fixture signed independently, before any production normalization.
+    function canonical(value) {
+      if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+      if (value !== null && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
+      return JSON.stringify(value);
+    }
+    const mac = createHmac('sha256', await readFile(join(box.store, 'key'))).update(canonical(legacy)).digest('hex');
+    await writeFile(journal, JSON.stringify({ record: legacy, mac }));
+    const originalEnvelope = await readFile(journal);
+    assert.equal(response(status(box)).data.targets[0].state, pending ? 'incomplete' : 'tool-applied');
+    assert.deepEqual(await readFile(journal), originalEnvelope);
+    if (pending) {
+      response(recover(box));
+      const recovered = JSON.parse(await readFile(journal, 'utf8')).record;
+      assert.equal(recovered.formatVersion, 1);
+      assert.equal(recovered.target.path, box.target);
+      assert.equal(recovered.targets, undefined);
+      assert.equal(await readFile(box.target, 'utf8'), source);
+    } else {
+      response(restore(box));
+      assert.deepEqual(await readFile(journal), originalEnvelope);
+    }
+    const changed = JSON.parse(await readFile(journal, 'utf8'));
+    changed.record.target.before.sha256 = '0'.repeat(64);
+    await writeFile(journal, JSON.stringify(changed));
+    assert.equal(response(status(box), 4).diagnostics[0].code, 'UNTRUSTED_RECORD');
+  }
+});
+
+test('multi-target apply/restore SIGKILL windows before writes, after renames and before commit recover the full group', async (t) => {
+  for (const operation of ['apply', 'restore']) {
+    for (const boundary of ['after-intent-publication', 'before-target-rename', 'after-target-rename', 'after-postverification', 'before-commit']) {
+      const box = await groupSandbox(t);
+      if (operation === 'restore') response(apply(box));
+      const before = await Promise.all(box.targets.map((path) => readFile(path)));
+      const interrupted = await paused(t, box, operation, boundary, { CODEX_TEST_TARGET: box.targets[1] });
+      await interrupted.kill();
+      const output = response(status(box));
+      assert.equal(output.data.operation, operation);
+      assert.equal(output.data.groupState, 'incomplete');
+      assert.equal(output.data.pendingTransactions[0].targets.length, 3);
+      response(recover(box));
+      for (const [index, path] of box.targets.entries()) assert.deepEqual(await readFile(path), before[index]);
+      assert.equal(response(status(box)).data.groupState, 'complete');
+    }
+  }
+});
+
+test('status can report distinct pending groups from multiple stores without choosing one legacy transaction', async (t) => {
+  const box = await groupSandbox(t);
+  const secondPlan = join(box.directory, 'second-plan');
+  response(run(box, ['prepare', '--plugin-root', join(box.directory, 'plugins'), '--target', box.targets[1], '--output', secondPlan]));
+  const first = await paused(t, { ...box, plan: box.singlePlan }, 'apply', 'after-target-rename');
+  await first.kill();
+  const other = { ...box, plan: secondPlan, store: join(box.directory, 'second-store'), target: box.targets[1] };
+  const second = await paused(t, other, 'apply', 'after-target-rename');
+  await second.kill();
+  const output = response(status({ ...box, store: join(box.directory, 'read-only-store') }));
+  assert.equal(output.data.transaction, null);
+  assert.equal(output.data.operation, null);
+  assert.equal(output.data.groupState, 'incomplete');
+  assert.equal(output.data.pendingTransactions.length, 2);
+  assert.deepEqual(output.data.targets.map((target) => target.state), ['incomplete', 'incomplete', 'original']);
+  assert.deepEqual(new Set(output.data.pendingTransactions.map((pending) => pending.store)), new Set([box.store, other.store]));
+  response(recover(box));
+  response(recover(other));
+});
+
+test('group rechecks all targets after writing-intent journal I/O before replacing the first target', async (t) => {
+  const box = await groupSandbox(t);
+  const changing = await paused(t, box, 'apply', 'before-writing-journal');
+  await writeFile(box.targets[2], 'external edit while writing intent');
+  const inodes = await Promise.all(box.targets.map(async (path) => (await stat(path)).ino));
+  response(await changing.finish(), 1);
+  assert.equal(await readFile(box.targets[2], 'utf8'), 'external edit while writing intent');
+  for (const [index, path] of box.targets.entries()) assert.equal((await stat(path)).ino, inodes[index]);
+});
+
+test('recovery rechecks every backup after journal I/O before restoring the first changed target', async (t) => {
+  const box = await groupSandbox(t);
+  const interrupted = await paused(t, box, 'apply', 'before-commit');
+  await interrupted.kill();
+  const id = response(status(box)).data.transaction;
+  const backup = join(box.store, 'transactions', id, 'before.0002.mjs');
+  const before = await Promise.all(box.targets.map((path) => readFile(path)));
+  const inodes = await Promise.all(box.targets.map(async (path) => (await stat(path)).ino));
+  const output = response(recover(box, { CODEX_TEST_BACKUP: backup, CODEX_TEST_FAULT: 'recovery-later-backup-change' }), 4);
+  assert.equal(output.diagnostics[0].code, 'BACKUP_CHANGED');
+  for (const [index, path] of box.targets.entries()) {
+    assert.deepEqual(await readFile(path), before[index]);
+    assert.equal((await stat(path)).ino, inodes[index]);
+  }
+});
+
+test('failure recovery refuses an unknown later target even when earlier target progress is already journaled', async (t) => {
+  const box = await groupSandbox(t);
+  const changing = await paused(t, box, 'apply', 'after-progress-journal');
+  await writeFile(box.targets[2], 'external later target after first write');
+  const output = response(await changing.finish(), 1);
+  assert.equal(output.diagnostics[0].code, 'ROLLBACK_FAILED');
+  assert.match(await readFile(box.target, 'utf8'), /agent:false/);
+  assert.equal(await readFile(box.targets[2], 'utf8'), 'external later target after first write');
+  const before = await Promise.all(box.targets.map((path) => readFile(path)));
+  response(recover(box), 4);
+  for (const [index, path] of box.targets.entries()) assert.deepEqual(await readFile(path), before[index]);
+});
+
+test('a group blocked by a later target held in another store writes nothing and keeps that owners incomplete transaction visible', async (t) => {
+  const box = await groupSandbox(t);
+  const single = join(box.directory, 'later-only');
+  response(run(box, ['prepare', '--plugin-root', join(box.directory, 'plugins'), '--target', box.targets[2], '--output', single]));
+  const owner = { ...box, plan: single, target: box.targets[2], store: join(box.directory, 'owner-store') };
+  const holder = await paused(t, owner, 'restore', 'after-intent-publication');
+  const rejected = response(apply(box), 4);
+  assert.equal(rejected.diagnostics[0].code, 'INCOMPLETE_TRANSACTION');
   await assert.rejects(access(box.store));
+  for (const path of box.targets) assert.equal(await readFile(path, 'utf8'), source);
+  await holder.kill();
+  const state = response(status(box));
+  assert.equal(state.data.pendingTransactions[0].store, owner.store);
+  assert.deepEqual(state.data.targets.map((target) => target.state), ['original', 'original', 'incomplete']);
+  response(recover(owner));
+  response(apply(box));
+});
+
+test('a delayed recover rechecks history under locks and cannot undo a later committed group operation', async (t) => {
+  const box = await groupSandbox(t);
+  const interrupted = await paused(t, box, 'apply', 'after-target-rename');
+  await interrupted.kill();
+  const delayed = await paused(t, box, 'recover', 'before-operation-lock');
+  response(recover(box));
+  response(apply(box));
+  const before = await Promise.all(box.targets.map((path) => readFile(path)));
+  const output = response(await delayed.finish());
+  assert.equal(output.diagnostics[0].code, 'NO_INCOMPLETE_TRANSACTION');
+  for (const [index, path] of box.targets.entries()) assert.deepEqual(await readFile(path), before[index]);
+  assert.deepEqual(response(status(box)).data.targets.map((target) => target.state), ['tool-applied', 'tool-applied', 'tool-applied']);
+});
+
+test('operation commands require explicit plan/store selection', async (t) => {
+  const box = await sandbox(t);
   for (const args of [['apply'], ['apply', '--plan', box.plan], ['apply', '--store', box.store], ['recover'], ['recover', '--store', box.store, '--plan', box.plan], ['status', '--store', box.store]]) {
     response(run(box, args), 2);
   }
@@ -695,7 +1035,7 @@ test('status and ordinary writes reject changed committed provenance rather than
     if (mutation === 'journal') {
       const path = join(directory, 'journal.json');
       const value = JSON.parse(await readFile(path, 'utf8'));
-      value.record.target.final.sha256 = '0'.repeat(64);
+      value.record.targets[0].final.sha256 = '0'.repeat(64);
       await writeFile(path, JSON.stringify(value));
     }
     if (mutation === 'key') await writeFile(join(box.store, 'key'), Buffer.alloc(32));

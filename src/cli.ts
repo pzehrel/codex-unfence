@@ -16,7 +16,7 @@ Usage:
   codex-browser-patch apply --plan <directory> --store <private-directory> [--json]
   codex-browser-patch restore --plan <directory> --store <private-directory> [--json]
   codex-browser-patch status --plan <directory> --store <private-directory> [--json]
-  codex-browser-patch status --target <absolute-artifact-path> --store <private-directory> [--json]
+  codex-browser-patch status --target <absolute-artifact-path> [--target <path> ...] --store <private-directory> [--json]
   codex-browser-patch recover --store <private-directory> [--json]
   codex-browser-patch --help
 
@@ -29,7 +29,13 @@ Exact paths come from detect. --all-compatible filters compatible artifacts expl
 Aliases to the same file are rejected. Existing output paths are never overwritten.
 Plans retain UTF-8 originals, patched artifacts, UTF-16 evidence, local diffs and hashes.
 Plan integrity is consistency, not authentication or proof of tool application.
-apply and restore accept a single-target plan; multi-target writing is rejected entirely.
+apply and restore operate on exactly the selected browser/chrome versions in a plan.
+All targets, plans, backups, processes and unfinished transactions preflight before target writes.
+Target sibling locks are sorted and deduplicated after the store lock, including across stores.
+Each target keeps its actual before state, including mixed original/applied and no-op entries.
+Later write failure rolls back actual changed targets; failed rollback requires explicit recover.
+Individual replacements are atomic; the whole group is not an atomic filesystem exchange.
+status reports selected targets and whole pending groups, including their owning stores.
 All operation commands require explicit --store. status is read-only.
 The store must be private (0700), owned by this user, and use canonical paths.
 apply and restore record durable intent and a private authenticated backup before atomic rename.
@@ -96,7 +102,7 @@ async function main(): Promise<CommandResult | null> {
         return await recover({ store });
       }
       if (command === 'status' && values.target) {
-        if (values.plan || values.target.length !== 1 || !isAbsolute(values.target[0] ?? '')) throw new Error('status requires one explicit --target or --plan selection.');
+        if (values.plan || values.target.some((path) => !isAbsolute(path)) || new Set(values.target).size !== values.target.length) throw new Error('status requires unique absolute --target paths or a --plan selection.');
         return await status({ store, targets: values.target });
       }
       if (!values.plan || !isAbsolute(values.plan)) throw new Error('--plan requires an explicit absolute review directory.');
