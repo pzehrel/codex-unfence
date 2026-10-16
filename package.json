@@ -1,7 +1,7 @@
 {
   "name": "codex-browser-liberation-patch",
   "version": "0.1.0",
-  "description": "Read-only structural detection of Codex browser plugin artifacts on macOS",
+  "description": "Structural review plans and recoverable transactions for Codex browser plugins on macOS",
   "type": "module",
   "bin": {
     "codex-browser-patch": "dist/cli.js"
@@ -10,13 +10,22 @@
     "node": ">=22.13.0"
   },
   "files": [
-    "dist/"
+    "dist/analysis.js",
+    "dist/cli.js",
+    "dist/discovery.js",
+    "dist/plan.js",
+    "dist/processes.js",
+    "dist/result.js",
+    "dist/transaction-locks.js",
+    "dist/transaction-storage.js",
+    "dist/transactions.js"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "npm run build && node --test tests/*.test.mjs",
+    "test:package": "npm run build && node --test tests/package.test.mjs",
     "prepack": "npm run build"
   },
   "devDependencies": {

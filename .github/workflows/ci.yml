@@ -12,7 +12,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        node: [22, 24]
+        node: ['22.13.0', 24]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -23,5 +23,8 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm run lint
-      - run: npm test
+      # Includes tests/package.test.mjs: offline tarball install and the full installed-bin lifecycle.
+      # Synthetic process/filesystem fixtures are external test preloads; Codex is never required.
+      - name: Source tests and installed package acceptance (no core skips)
+        run: npm test
       - run: npm run build
