@@ -120,21 +120,40 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
   await assert.rejects(access(join(installed, 'tests')));
   const installation = { directory, binary };
 
-  await t.test('installed CLI retains deferred stage evidence and refuses plan publication', async t => {
+  await t.test('installed CLI proves deferred sources and rederives mixed mode plans offline', async t => {
     const box = await sandbox(t, installation);
     const deferred = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url), 'utf8');
-    for (const target of box.targets) await writeFile(target, deferred);
-    const detected = result(box.run(['detect', '--plugin-root', box.root]), 'detect', 3);
-    for (const artifact of detected.data.artifacts) {
+    const unicode = '﻿/* 中文 😀 */\r\n' + deferred.replaceAll('\n', '\r\n');
+    await writeFile(box.targets[0], unicode);
+    await writeFile(box.targets[2], deferred);
+    const detected = result(box.run(['detect', '--plugin-root', box.root]), 'detect');
+    for (const artifact of detected.data.artifacts.filter(entry => entry.version !== '9')) {
       assert.equal(artifact.analysis.patternVersion, 'site-status-deferred-v1');
       assert.deepEqual(artifact.analysis.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption']);
-      assert.equal(artifact.analysis.target, null);
-      assert.deepEqual(artifact.analysis.diagnostics.map(entry => entry.code), ['DEFERRED_TRANSFORM_DISABLED']);
+      assert.equal((artifact.plugin === 'browser' ? unicode : deferred).slice(artifact.analysis.target.start, artifact.analysis.target.end), 'body');
+      assert.deepEqual(artifact.analysis.diagnostics, []);
     }
-    const prepared = result(box.run(['prepare', '--plugin-root', box.root, '--target', box.targets[0], '--output', box.plan]), 'prepare', 3);
-    assert.equal(prepared.data, null);
-    await assert.rejects(access(box.plan));
-    for (const target of box.targets) assert.equal(await readFile(target, 'utf8'), deferred);
+    const human = box.run(['detect', '--plugin-root', box.root], {json: false});
+    assert.equal(human.status, 0, human.stdout + human.stderr);
+    assert.match(human.stdout, /Evidence cache:.*same current promise/);
+    const prepared = prepare(box);
+    const manifest = JSON.parse(await readFile(prepared.data.plan.manifestPath, 'utf8'));
+    assert.equal(manifest.formatVersion, 2);
+    assert.equal(manifest.patternVersion, 'site-status-selection-v1');
+    assert.deepEqual(manifest.targets.map(entry => entry.patternVersion), ['site-status-deferred-v1', 'site-status-v1', 'site-status-deferred-v1']);
+    const entry = manifest.targets[0], patched = await readFile(join(box.plan, 'contents', entry.patched.file));
+    const prefix = Buffer.from(unicode.slice(0, entry.expression.range.start)), suffix = Buffer.from(unicode.slice(entry.expression.range.end));
+    assert.deepEqual(patched.subarray(0, prefix.length), prefix);
+    assert.deepEqual(patched.subarray(patched.length - suffix.length), suffix);
+    assert.equal(entry.original.size, Buffer.byteLength(unicode));
+    assert.deepEqual(result(operation(box, 'status'), 'status').data.targets.map(entry => entry.state), ['original', 'original', 'original']);
+    assert.equal(await readFile(box.targets[0], 'utf8'), unicode);
+    assert.equal(await readFile(box.targets[1], 'utf8'), source);
+    assert.equal(await readFile(box.targets[2], 'utf8'), deferred);
+    result(box.run(['prepare', '--plugin-root', box.root, '--all-compatible', '--output', box.plan]), 'prepare', 1);
+    const selected = join(box.directory, 'deferred-only');
+    result(box.run(['prepare', '--plugin-root', box.root, '--target', box.targets[2], '--output', selected]), 'prepare');
+    assert.deepEqual(result(box.run(['status', '--plan', selected, '--store', box.store]), 'status').data.targets.map(entry => entry.state), ['original']);
   });
 
   await t.test('installed executable documents all commands, supported platform and exit protocol', () => {

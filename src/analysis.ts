@@ -23,8 +23,10 @@ export interface StructuralEvidence {
   description: string;
 }
 
+export type PatternVersion = 'site-status-v1' | 'site-status-deferred-v1';
+
 export interface SourceAnalysis {
-  patternVersion: 'site-status-v1' | 'site-status-deferred-v1';
+  patternVersion: PatternVersion;
   compatibility: 'compatible' | 'incompatible';
   runtime: 'not-verified';
   evidence: StructuralEvidence[];
@@ -148,7 +150,22 @@ export function analyzeSource(source: string): SourceAnalysis {
     return result;
   }
   const deferredStage = analyzeDeferredStage(program);
-  if (deferredStage) return deferredStage;
+  if (deferredStage) {
+    if (deferredStage.compatibility === 'compatible') {
+      // A deferred candidate must not hide another legacy or unknown blocking
+      // class. The deferred receiver and actual policy ranges cover its own reads.
+      const proven = deferredStage.evidence.filter(entry => entry.kind === 'receiver' || entry.kind === 'consumption');
+      let other: E.Node | undefined;
+      walk(program, node => {
+        if (node.type !== 'ClassDeclaration' && node.type !== 'ClassExpression') return;
+        walk(node.body, item => {
+          if (member(item, 'blocked') && !proven.some(entry => range(item).start >= entry.range.start && range(item).end <= entry.range.end)) other ??= item;
+        });
+      });
+      if (other) return { ...deferredStage, compatibility: 'incompatible', target: null, evidence: [], diagnostics: [{ code: 'AMBIGUOUS_PATTERN', severity: 'error', message: 'Another legacy or unknown blocking class lies outside the complete deferred proof; unique pattern selection is unproven.', range: range(other) }] };
+    }
+    return deferredStage;
+  }
   try {
     const proof = new Proof(program);
     const candidates: { target: E.Node; evidence: StructuralEvidence[]; patched: boolean }[] = [];

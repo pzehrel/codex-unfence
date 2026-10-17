@@ -24,8 +24,9 @@ Default root: ~/.codex/plugins/cache/openai-bundled
 Read-only discovery and finite AST structural proof are available.
 Only one proven site-status source/response/agent/blocking chain is compatible.
 Unsupported patterns and ambiguity are rejected. Complete finite deferred initialization,
-request/response, receiver, cache/inflight and actual policy proofs report evidence only.
-Deferred targets, transforms and new-pattern plans remain disabled.
+request/response, receiver, cache/inflight and actual policy proofs enable one local response-copy
+transform and rederivable plans. Partial proofs never grant a target.
+Legacy-only plans retain v1; selections containing deferred targets use v2 per-target patterns.
 Standard host capabilities, runtime.fetch/JSON and Node standard modules are trusted interfaces;
 current-file relevant mutation or unknown escape still rejects. Runtime remains not-verified.
 Changing disk source does not immediately clear an already cached blocked result.

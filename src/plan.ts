@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { parse } from 'acorn';
 import type * as E from 'estree';
 import { transformSource } from './analysis.js';
-import type { SourceRange, StructuralEvidence } from './analysis.js';
+import type { PatternVersion, SourceRange, StructuralEvidence } from './analysis.js';
 import { detect } from './discovery.js';
 import { EXIT_CODES } from './result.js';
 import type { Artifact, Diagnostic, PreparationResult } from './result.js';
@@ -38,16 +38,19 @@ export interface PlanTarget {
   expression: { range: SourceRange; before: string; after: string };
 }
 
-export interface PlanManifest {
-  formatVersion: 1;
-  patternVersion: 'site-status-v1';
+interface ManifestFields {
   id: string;
   pluginRoot: string;
   runtime: 'not-verified';
   pluginFiles: 'unchanged';
-  targets: PlanTarget[];
   contentHash: string;
 }
+
+/** Retain the exact historical v1 shape; v2 selections identify every target. */
+export type PlanManifest = ManifestFields & (
+  { formatVersion: 1; patternVersion: 'site-status-v1'; targets: PlanTarget[] } |
+  { formatVersion: 2; patternVersion: 'site-status-selection-v1'; targets: (PlanTarget & { patternVersion: PatternVersion })[] }
+);
 
 export interface LoadedPlan {
   directory: string;
@@ -155,7 +158,7 @@ export async function prepare(options: PrepareOptions): Promise<PreparationResul
     if (!selected.length) throw new PlanError('NO_COMPATIBLE_TARGETS', 'No compatible targets were selected.', 'incompatible');
     const paths = new Set<string>();
     const files = new Set<string>();
-    const snapshots: { target: PlanTarget; original: Buffer; patched: Buffer; diff: Buffer }[] = [];
+    const snapshots: { target: PlanTarget; patternVersion: PatternVersion; original: Buffer; patched: Buffer; diff: Buffer }[] = [];
     for (const entry of selected) {
       if (entry.compatibility !== 'compatible') {
         diagnostics.push(...(entry.analysis?.diagnostics ?? []).map((item) => ({ ...item, path: entry.path })));
@@ -183,12 +186,14 @@ export async function prepare(options: PrepareOptions): Promise<PreparationResul
         original: descriptor(fileNames.original, original), patched: descriptor(fileNames.patched, patched), localDiff: descriptor(fileNames.localDiff, diff),
         evidence: transformed.analysis.evidence,
         expression: { range: change.range, before: change.before, after: change.after },
-      }, original, patched, diff });
+      }, patternVersion: transformed.analysis.patternVersion, original, patched, diff });
     }
-    const manifestBase = {
-      formatVersion: 1 as const, patternVersion: 'site-status-v1' as const, id: randomUUID(), pluginRoot,
-      runtime: 'not-verified' as const, pluginFiles: 'unchanged' as const, targets: snapshots.map((entry) => entry.target),
-    };
+    const fields = { id: randomUUID(), pluginRoot, runtime: 'not-verified' as const, pluginFiles: 'unchanged' as const };
+    // Legacy-only selections keep the historical representation byte-for-schema.
+    // Any deferred target uses v2, including mixed selections, with explicit per-target identity.
+    const manifestBase = snapshots.every(entry => entry.patternVersion === 'site-status-v1')
+      ? { ...fields, formatVersion: 1 as const, patternVersion: 'site-status-v1' as const, targets: snapshots.map(entry => entry.target) }
+      : { ...fields, formatVersion: 2 as const, patternVersion: 'site-status-selection-v1' as const, targets: snapshots.map(entry => ({ ...entry.target, patternVersion: entry.patternVersion })) };
     const manifest: PlanManifest = { ...manifestBase, contentHash: hash(canonical(manifestBase)) };
     validateManifest(manifest);
     const directory = resolve(options.output);
@@ -293,7 +298,9 @@ function artifactDescriptor(value: unknown, file: string): void {
 
 function validateManifest(value: unknown): asserts value is PlanManifest {
   const manifest = object(value, ['formatVersion', 'patternVersion', 'id', 'pluginRoot', 'runtime', 'pluginFiles', 'targets', 'contentHash']);
-  requirePlan(manifest.formatVersion === 1 && manifest.patternVersion === 'site-status-v1', 'Unsupported plan format or pattern version.');
+  const legacy = manifest.formatVersion === 1 && manifest.patternVersion === 'site-status-v1';
+  const selection = manifest.formatVersion === 2 && manifest.patternVersion === 'site-status-selection-v1';
+  requirePlan(legacy || selection, 'Unsupported plan format or pattern version.');
   requirePlan(typeof manifest.id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(manifest.id), 'Invalid plan identity.');
   requirePlan(typeof manifest.contentHash === 'string' && /^[0-9a-f]{64}$/.test(manifest.contentHash), 'Invalid manifest digest.');
   absolute(manifest.pluginRoot);
@@ -304,7 +311,9 @@ function validateManifest(value: unknown): asserts value is PlanManifest {
   const realPaths = new Set<string>();
   const files = new Set<string>();
   for (const [index, item] of manifest.targets.entries()) {
-    const target = object(item, ['id', 'identity', 'original', 'patched', 'localDiff', 'evidence', 'expression']);
+    const target = object(item, ['id', 'identity', 'original', 'patched', 'localDiff', 'evidence', 'expression', ...(selection ? ['patternVersion'] : [])]);
+    const pattern = legacy ? 'site-status-v1' : target.patternVersion;
+    requirePlan(pattern === 'site-status-v1' || pattern === 'site-status-deferred-v1', 'Unsupported target pattern version.');
     const identity = object(target.identity, ['pluginRoot', 'plugin', 'version', 'path', 'realPath', 'device', 'inode', 'mode']);
     requirePlan(identity.pluginRoot === manifest.pluginRoot, 'Target root identity mismatch.');
     requirePlan(identity.plugin === 'browser' || identity.plugin === 'chrome', 'Invalid plugin identity.');
@@ -332,10 +341,11 @@ function validateManifest(value: unknown): asserts value is PlanManifest {
     sourceRange(expression.range);
     text(expression.before);
     text(expression.after);
-    requirePlan(Array.isArray(target.evidence) && target.evidence.length === 5, 'Invalid structural evidence.');
-    for (const entry of target.evidence) {
+    const kinds = pattern === 'site-status-v1' ? ['source', 'transport', 'response', 'predicate', 'consumption'] : ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption'];
+    requirePlan(Array.isArray(target.evidence) && target.evidence.length === kinds.length, 'Invalid structural evidence.');
+    for (const [evidenceIndex, entry] of target.evidence.entries()) {
       const evidence = object(entry, ['kind', 'range', 'description']);
-      requirePlan(['source', 'transport', 'response', 'predicate', 'consumption'].includes(String(evidence.kind)), 'Invalid evidence kind.');
+      requirePlan(evidence.kind === kinds[evidenceIndex], 'Invalid evidence kind or order for target pattern.');
       sourceRange(evidence.range);
       text(evidence.description);
     }
@@ -410,6 +420,8 @@ export async function loadPlan(directory: string): Promise<LoadedPlan> {
     }
     const transformed = transformSource(decode(original));
     requirePlan(transformed.transformation, 'Original no longer satisfies supported structural transformation.');
+    const pattern = manifest.formatVersion === 1 ? 'site-status-v1' : (target as PlanTarget & { patternVersion: PatternVersion }).patternVersion;
+    requirePlan(transformed.analysis.patternVersion === pattern, 'Target pattern differs from rederived transformation.');
     const change = transformed.transformation;
     requirePlan(patched.equals(Buffer.from(change.patchedSource, 'utf8')), 'Patched artifact differs from rederived transformation.');
     requirePlan(diff.equals(Buffer.from(change.localDiff, 'utf8')), 'Localized diff differs from rederived transformation.');

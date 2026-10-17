@@ -163,7 +163,9 @@ status 对发现的待恢复冲突返回 4；否则所选目标不兼容返回 3
 
 纯源码边界 `analyzeSource(source)` 返回兼容性、证据、诊断及唯一 target；`transformSource(source)` 局部变换后重新解析。区间单位为 JavaScript UTF-16 code units，半开区间，可用于 `source.slice(start, end)`，不是 UTF-8 字节偏移。变换保留原响应及其他 feature，只改变此处 agent 消费。用户授权、企业策略、协议检查、侧栏评论模式等不在作用范围内。
 
-**延迟模式阶段证明：** `site-status-deferred-v1` 独立验证有限一次性初始化、拆分请求来源、同一 HTTP/JSON 响应、严格 agent 判定、构造器默认时钟与 metadata accessor、类/实例 receiver、缓存/inflight 及实际 policy 的 `result.blocked` 消费。detect 输出八类 UTF-16 证据；完整证明后仍返回 incompatible、target null 和 `DEFERRED_TRANSFORM_DISABLED`，不生成变换或 prepare 方案。新模式方案支持尚未启用；旧 `site-status-v1` 与五项方案证据契约保持原样。
+**延迟模式完整证明：** `site-status-deferred-v1` 独立验证有限一次性初始化、拆分请求来源、同一 HTTP/JSON 响应、严格 agent 判定、构造器默认时钟与 metadata accessor、类/实例 receiver、缓存/inflight 及实际 policy 的 `result.blocked` 消费。只有八类 UTF-16 证据和相关影响检查全部通过、目标唯一时，detect 才报告 compatible；transform/prepare 仅替换该 JSON 响应实参，构造局部浅副本并固定嵌套 agent 为 false。部分链、未知形态及歧义继续拒绝；同文件出现另一个旧模式或未知 blocking 类也拒绝。
+
+纯旧模式选择继续生成原格式 `formatVersion: 1` / `patternVersion: site-status-v1`，保留历史五项证据契约。任何含 deferred 的选择（包括混合旧/新目标）使用 `formatVersion: 2` / `patternVersion: site-status-selection-v1`，每个目标明确记录自己的 `patternVersion` 和相应有序证据。加载时重新分析原文并核对逐目标模式、证据、区间、补丁及局部差异；未知或不匹配的身份拒绝，重算哈希不能代替结构重推导。状态诊断沿用可信事务记录；单有响应副本形状不证明工具应用。
 
 该证明信任标准宿主 URL、Map、Date、Promise、JSON 等内建能力、约定 runtime.fetch/response.json 接口及 Node 标准模块按约定工作，不递归审计所有依赖。当前文件中可能影响相关链的修改、反射、原型/别名写入及未知逃逸仍须拒绝，外围代码位置不构成无关性证明。相关类只接受唯一直接构造的本地实例、已证明的方法和状态字段；继承覆盖、方法借用/提取和未知接收者拒绝。
 

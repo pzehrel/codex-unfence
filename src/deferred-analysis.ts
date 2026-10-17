@@ -66,10 +66,10 @@ function properties(node: E.Node | null | undefined, names: string[]): E.Propert
   return items.every((item, index) => item.type === 'Property' && !item.computed && !item.method && item.kind === 'init' && (item.key.type === 'Identifier' ? item.key.name : item.key.type === 'Literal' ? item.key.value : null) === names[index]) ? items as E.Property[] : null;
 }
 
-interface Candidate { wrapper: Fn; generic: Fn; key: E.Identifier; consumption: E.CallExpression; owner: E.ClassExpression }
+interface Candidate { wrapper: Fn; generic: Fn; key: E.Identifier; consumption: E.CallExpression; owner: E.ClassExpression; patched?: boolean }
 interface Initializer { binding: Variable; declaration: E.VariableDeclarator; callback: Fn; dependencies: Initializer[] }
 
-/** A separate finite stage proof. It never grants a target or relaxes the legacy proof. */
+/** A separate finite proof; compatibility requires every stage and relevant effect gate. */
 export function analyzeDeferredStage(program: E.Program): SourceAnalysis | null {
   const proof = new DeferredProof(program);
   const candidates = proof.candidates();
@@ -92,11 +92,11 @@ export function analyzeDeferredStage(program: E.Program): SourceAnalysis | null 
     proof.closeRelevantEffects();
     result.evidence.push(initialization, {
       kind: 'predicate', range: range(candidate.wrapper),
-      description: 'Object guards protect feature_status; the initialized agent key blocks only on strict equality to true. Stage evidence only.',
+      description: 'Object guards protect feature_status; the initialized agent key blocks only on strict equality to true.',
     }, ...request, receiver, cache, consumption);
-    result.diagnostics.push(
-      { code: 'DEFERRED_TRANSFORM_DISABLED', severity: 'error', message: 'Complete finite deferred proof is available; target, transformation and plan publication remain disabled until coordinated plan support.', range: range(candidate.consumption) },
-    );
+    requireStage(!candidate.patched, 'UNTRUSTED_PATCHED_SHAPE', 'Response-copy shape found without trusted operation provenance; this is not proof of tool application.', candidate.consumption.arguments[0]!);
+    result.compatibility = 'compatible';
+    result.target = range(candidate.consumption.arguments[0]!);
   } catch (error) {
     if (!(error instanceof UnprovenStage)) throw error;
     result.diagnostics.push({ code: error.code, severity: 'error', message: error.message, range: range(error.node) });
@@ -537,6 +537,14 @@ class DeferredProof {
     return call(node) && member(node.callee, name) && this.same(node.callee.object, receiver) && node.arguments.length === args.length && node.arguments.every((argument, index) => this.same(argument, args[index]));
   }
 
+  private responseCopy(node: E.Node | null | undefined, body: E.Node): boolean {
+    if (node?.type !== 'ObjectExpression' || node.properties.length !== 2) return false;
+    const [spread, flags] = node.properties;
+    if (spread?.type !== 'SpreadElement' || !this.same(spread.argument, body) || flags?.type !== 'Property' || flags.computed || flags.method || flags.kind !== 'init' || (flags.key.type === 'Identifier' ? flags.key.name : flags.key.type === 'Literal' ? flags.key.value : null) !== 'feature_status' || flags.value.type !== 'ObjectExpression' || flags.value.properties.length !== 2) return false;
+    const [previous, override] = flags.value.properties;
+    return previous?.type === 'SpreadElement' && previous.argument.type === 'ChainExpression' && previous.argument.expression.type === 'MemberExpression' && previous.argument.expression.optional && key(previous.argument.expression) === 'feature_status' && this.same(previous.argument.expression.object, body) && override?.type === 'Property' && !override.computed && !override.method && override.kind === 'init' && (override.key.type === 'Identifier' ? override.key.name : override.key.type === 'Literal' ? override.key.value : null) === 'agent' && bool(override.value, false);
+  }
+
   private urlNew(node: E.Node | null | undefined, input: E.Node, field?: string): boolean {
     return node?.type === 'NewExpression' && node.callee.type === 'Identifier' && node.callee.name === 'URL' && !this.binding(node.callee) && node.arguments.length === 1 && (field ? member(node.arguments[0], field) && this.same(node.arguments[0].object, input) : this.same(node.arguments[0], input));
   }
@@ -585,7 +593,8 @@ class DeferredProof {
     this.requestNeed(options && literal(options[0]?.value, 'GET'), 'REQUEST_GET', 'Site-status transport must receive exactly the GET request options.', transport);
     this.requestNeed(success?.type === 'IfStatement' && !success.alternate && success.test.type === 'UnaryExpression' && success.test.operator === '!' && member(success.test.argument, 'ok') && this.same(success.test.argument.object, http.id) && this.throws(success.consequent), 'HTTP_SUCCESS', 'Failure of this HTTP response.ok must throw before JSON parsing.', success ?? fetch);
     const parse = awaited(json?.init);
-    this.requestNeed(json && this.invoke(parse, http.id, 'json', []) && consumption?.type === 'ReturnStatement' && consumption.argument === candidate.consumption && this.same(candidate.consumption.arguments[0], json.id), 'RESPONSE_BINDING', 'The same HTTP object must supply JSON; its unchanged local binding must reach the proven agent predicate.', jsonStatement ?? fetch);
+    candidate.patched = !!json && this.responseCopy(candidate.consumption.arguments[0], json.id);
+    this.requestNeed(json && this.invoke(parse, http.id, 'json', []) && consumption?.type === 'ReturnStatement' && consumption.argument === candidate.consumption && (candidate.patched || this.same(candidate.consumption.arguments[0], json.id)), 'RESPONSE_BINDING', 'The same HTTP object must supply JSON; its unchanged local binding must reach the proven agent predicate.', jsonStatement ?? fetch);
     const wrapper = this.definition(transport.callee);
     this.requestNeed(wrapper && wrapper.async && !wrapper.generator, 'TRANSPORT_RECEIVER', 'Transport must resolve to a local async receiver-preserving wrapper.', transport.callee);
     this.read(transport.callee);
