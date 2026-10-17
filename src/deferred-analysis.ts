@@ -119,6 +119,7 @@ class DeferredProof {
   private readonly guards = new Set<Fn>();
   private readonly initializedData = new Set<Variable>();
   private readonly plainData = new Set<Variable>();
+  private readonly literalEnums = new Set<Variable>();
   private readonly provenMethods = new Set<Fn>();
   private readonly hostDefaults = new Set<E.Node>();
   private readonly stateNames: Record<StateRole, string> = { now: 'now', getTurnMetadata: 'getTurnMetadata', cache: 'cache', inflightRequests: 'inflightRequests' };
@@ -256,8 +257,8 @@ class DeferredProof {
           initializer.dependencies.push(this.initializer(dependency, active));
         } else {
           requireStage(expression.type === 'AssignmentExpression' && expression.operator === '=' && expression.left.type === 'Identifier', 'DEFERRED_CONDITIONAL_INITIALIZATION', 'Initializer supports direct dependencies followed by simple assignments only.', expression);
-          this.initialValue(expression.right, expression.left);
           const dataBinding = this.binding(expression.left);
+          this.initialValue(expression.right, expression.left);
           if (dataBinding) {
             this.initializedData.add(dataBinding);
             if (expression.right.type === 'ObjectExpression' || expression.right.type === 'ArrayExpression') this.plainData.add(dataBinding);
@@ -313,6 +314,12 @@ class DeferredProof {
     if (call(node) && member(node.callee, 'freeze') && node.callee.object.type === 'Identifier' && node.callee.object.name === 'Object' && !this.binding(node.callee.object) && node.arguments.length === 1) {
       this.initialValue(node.arguments[0]!, assigned); return;
     }
+    if (call(node) && member(node.callee, 'values') && this.standard(node.callee.object, 'Object') && node.arguments.length === 1 && node.arguments[0]?.type === 'Identifier') {
+      const argument = node.arguments[0], binding = this.binding(argument);
+      // Enumeration can invoke own getters or Proxy traps. Only the closed fresh
+      // scalar enum below supplies own data fields, with no foreign object input.
+      if (binding && this.literalEnums.has(binding)) { this.read(argument); return; }
+    }
     if (node.type === 'NewExpression' && node.callee.type === 'Identifier' && !this.binding(node.callee) && ['Set', 'TextEncoder'].includes(node.callee.name) && node.arguments.length <= 1) {
       for (const argument of node.arguments) this.initialValue(argument, assigned);
       return;
@@ -326,7 +333,14 @@ class DeferredProof {
       const writes = items.slice(0, -1).every(item => item.type === 'AssignmentExpression' && item.operator === '=' && item.left.type === 'MemberExpression' && key(item.left) !== null && !['__proto__', 'constructor', 'prototype'].includes(key(item.left)!) && this.same(item.left.object, parameter) && item.right.type === 'Literal');
       const binding = this.binding(assigned);
       const writeCount = binding?.references.filter(reference => reference.isWrite()).length;
-      if (prior && writes && writeCount === 1 && this.same(items.at(-1), parameter)) return;
+      if (prior && writes && writeCount === 1 && this.same(items.at(-1), parameter)) {
+        const parameterBinding = this.track(parameter);
+        const stores = items.slice(0, -1) as E.AssignmentExpression[];
+        requireStage(parameterBinding.references.every(reference => !reference.isWrite() && (reference.identifier === items.at(-1) || stores.some(store => store.left.type === 'MemberExpression' && store.left.object === reference.identifier))), 'DEFERRED_INITIALIZER_EFFECT', 'Literal enum parameter must only receive literal own fields and be returned unchanged.', node);
+        for (const reference of parameterBinding.references) this.allowedReads.add(reference.identifier);
+        if (binding) { this.literalEnums.add(binding); this.read(argument.left); }
+        return;
+      }
     }
     reject();
   }
@@ -386,6 +400,20 @@ class DeferredProof {
     requireStage(roots.length > 0, 'DEFERRED_MISSING_INITIALIZATION', 'No unconditional module initialization path reaches the site configuration.', candidate.owner);
     const root = roots[0]!;
     requireStage(range(root.call).start < range(this.top(candidate.owner)).start, 'DEFERRED_INITIALIZATION_ORDER', 'A proven initializer must complete before the relevant class is evaluated.', candidate.owner);
+    // Discover callers before symbolic execution, so their earlier module calls
+    // contribute only after every dependency and immediate RHS has been proved.
+    // Map iteration includes newly admitted callers and their dependencies.
+    for (const initializer of this.initializers.values()) for (const reference of initializer.binding.references) {
+      if (reference.isWrite()) continue;
+      let enclosing: E.Node | undefined = reference.identifier;
+      while (enclosing && !fn(enclosing)) enclosing = this.parents.get(enclosing);
+      if (!enclosing || range(this.top(enclosing)).start >= range(root.call).start) continue;
+      const factory = this.parents.get(enclosing), declaration = factory && this.parents.get(factory);
+      const knownFactory = initializer.declaration.init;
+      if (!call(factory) || declaration?.type !== 'VariableDeclarator' || !call(knownFactory) || !this.same(factory.callee, knownFactory.callee)) continue;
+      const caller = this.binding(declaration.id);
+      if (caller) this.initializer(caller);
+    }
     const completed = new Set<Variable>();
     const available = new Set<Variable>();
     const complete = (initializer: Initializer, activation: E.CallExpression): void => {
@@ -1180,6 +1208,15 @@ class DeferredProof {
     }
     for (const binding of this.tracked) for (const reference of binding.references) {
       requireStage(reference.isWrite() ? reference.init || this.allowedWrites.has(reference.identifier) : this.allowedReads.has(reference.identifier), reference.isWrite() ? 'DEFERRED_REASSIGNED_BINDING' : 'DEFERRED_ESCAPED_BINDING', reference.isWrite() ? 'Relevant function, initializer or configuration binding is reassigned.' : 'Relevant function, initializer or configuration escapes its proven use.', reference.identifier);
+    }
+    // Keep established binding diagnostics first, then close every admitted
+    // callback's assignment effects, including otherwise unused local settings.
+    for (const initializer of this.initializers.values()) for (const statement of statements(initializer.callback)) {
+      if (statement.type !== 'ExpressionStatement') continue;
+      for (const expression of expressions(statement.expression)) if (expression.type === 'AssignmentExpression' && expression.left.type === 'Identifier') {
+        const binding = this.binding(expression.left), declaration = binding?.defs[0]?.node;
+        requireStage(binding?.defs.length === 1 && declaration?.type === 'VariableDeclarator' && this.parents.get(this.parents.get(declaration)!) === this.program, 'DEFERRED_INITIALIZER_EFFECT', 'Initializer assignments require a module-local data binding; unresolved global writes may invoke setters.', expression.left);
+      }
     }
     // Lexically unrelated bundle calls/imports/writes are permitted. Dynamic scope
     // capabilities can access otherwise private bindings and are never unrelated.

@@ -174,6 +174,43 @@ test('review counterexamples cannot publish plans while equivalent safe controls
   }
 });
 
+test('upward once initialization is rederivable through CLI while caught paths and enum mutation publish no plan', async t => {
+  const box = await sandbox(t);
+  const upward = `var choices, initChoices = once(() => {
+    choices = (entry => (entry.First = 'first', entry.Second = 'second', entry))(choices || {});
+  });
+  var values, initSettings = once(() => { initProtocols(); initChoices(); values = Object.values(choices); });
+  initSettings();
+  `;
+  const safe = source.replace('var initErrors =', upward + 'var initErrors =');
+  await writeFile(box.targets[0], safe);
+  const detected = box.run(['detect', '--plugin-root', box.root, '--json']);
+  assert.equal(detected.status, 0, detected.stdout + detected.stderr);
+  assert.equal(JSON.parse(detected.stdout).data.artifacts[0].analysis.compatibility, 'compatible');
+  const plan = join(box.directory, 'upward-plan');
+  const prepared = box.run(['prepare', '--plugin-root', box.root, '--target', box.targets[0], '--output', plan, '--json']);
+  assert.equal(prepared.status, 0, prepared.stdout + prepared.stderr);
+  const status = box.run(['status', '--plan', plan, '--store', join(box.directory, 'store'), '--json']);
+  assert.equal(status.status, 0, status.stdout + status.stderr);
+  assert.equal(JSON.parse(status.stdout).data.targets[0].state, 'original');
+  assert.equal(await readFile(box.targets[0], 'utf8'), safe);
+  for (const [index, [text, code]] of [
+    [safe.replace('initSettings();\n', 'try { initSettings(); } catch {}\n'), 'DEFERRED_INITIALIZATION_ORDER'],
+    [safe + '\nObject.defineProperty(choices, "First", {get: replacement});', 'DEFERRED_ESCAPED_BINDING'],
+    [safe.replace('values = Object.values(choices)', 'values = unknown()'), 'DEFERRED_INITIALIZER_EFFECT'],
+  ].entries()) {
+    await writeFile(box.targets[0], text);
+    const output = join(box.directory, `upward-refused-${index}`);
+    const result = box.run(['prepare', '--plugin-root', box.root, '--target', box.targets[0], '--output', output, '--json']);
+    assert.equal(result.status, 3, result.stdout + result.stderr);
+    const body = JSON.parse(result.stdout);
+    assert.equal(body.data, null);
+    assert.ok(result.stdout.includes(code), result.stdout);
+    assert.ok(!(await readdir(box.directory)).includes(`upward-refused-${index}`));
+    assert.equal(await readFile(box.targets[0], 'utf8'), text);
+  }
+});
+
 test('prepare publishes rederivable deferred plans for either plugin and all-compatible without overwriting', async t => {
   const box = await sandbox(t);
   for (const [index, selection] of [ ['--target', box.targets[0]], ['--target', box.targets[1]], ['--all-compatible'] ].entries()) {

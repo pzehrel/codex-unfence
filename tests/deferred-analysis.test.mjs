@@ -894,6 +894,133 @@ test('rejects premature once activation inside an unknown callback factory even 
   assert.equal(result.transformation, null);
 });
 
+test('proves an independent upward once caller and its dependencies before permitting early activation', async () => {
+  const upward = `var label, initLabel = once(() => { initMetadata(); label = 'upward'; });
+var callerValue, upward = once(() => { 'use strict'; initProtocols(); initLabel(); callerValue = 7; });
+upward();
+`;
+  const text = source.replace('var initErrors =', upward + 'var initErrors =');
+  const result = transformSource(text);
+  assert.equal(result.analysis.compatibility, 'compatible', JSON.stringify(result.analysis.diagnostics));
+  assert.ok(result.transformation);
+  for (const [program, expected] of [[text, true], [result.transformation.patchedSource, false]]) {
+    const box = fixtureRuntime(program), checking = box.check('https://upward.test/');
+    assert.equal(box.requests.length, 1);
+    box.requests[0].resolve(true);
+    assert.equal((await checking).result.blocked, expected);
+  }
+});
+
+test('proves upward enumeration of a closed literal enum without invoking callbacks or getters', async () => {
+  const declarations = `var choices, initChoices = once(() => {
+  choices = (entry => (entry.Default = '', entry.Test = 'test', entry))(choices || {});
+});
+var values, setting, initSettings = once(() => {
+  'use strict'; initProtocols(); initChoices(); values = Object.values(choices); setting = 'window';
+});
+initSettings();
+`;
+  const text = source.replace('var initErrors =', declarations + 'var initErrors =');
+  const result = transformSource(text);
+  assert.equal(result.analysis.compatibility, 'compatible', JSON.stringify(result.analysis.diagnostics));
+  assert.ok(result.transformation);
+  for (const [program, expected] of [[text, true], [result.transformation.patchedSource, false]]) {
+    const box = fixtureRuntime(program), checking = box.check('https://enum.test/');
+    box.requests[0].resolve(true);
+    assert.equal((await checking).result.blocked, expected);
+  }
+});
+
+test('rejects upward callers with unproved helpers, dependency effects, closure or activation order', () => {
+  const upward = `var label, initLabel = once(() => { initMetadata(); label = 'upward'; });
+var callerValue, upward = once(() => { initProtocols(); initLabel(); callerValue = 7; });
+upward();
+`;
+  const control = source.replace('var initErrors =', upward + 'var initErrors =');
+  assert.equal(analyzeSource(control).compatibility, 'compatible');
+  for (const [text, code] of [
+    [control.replace('upward = once', 'upward = unknown'), 'DEFERRED_INITIALIZATION_ORDER'],
+    [control.replace("label = 'upward'", 'label = unknown()'), 'DEFERRED_INITIALIZER_EFFECT'],
+    [control.replace('callerValue = 7', 'callerValue = unknown()'), 'DEFERRED_INITIALIZER_EFFECT'],
+    [control.replace('callerValue = 7', 'callerValue = agentKey'), 'DEFERRED_INITIALIZATION_ORDER'],
+    [control.replace('initLabel(); callerValue', 'if (ready) initLabel(); callerValue'), 'DEFERRED_CONDITIONAL_INITIALIZATION'],
+    [control.replace("label = 'upward'", "upward(); label = 'upward'"), 'DEFERRED_INITIALIZATION_CYCLE'],
+    [control.replace('upward();\nvar initErrors', 'try { upward(); } catch {}\nvar initErrors'), 'DEFERRED_INITIALIZATION_ORDER'],
+    [control.replace('upward();\nvar initErrors', 'if (ready) upward();\nvar initErrors'), 'DEFERRED_INITIALIZATION_ORDER'],
+    [control.replace('var label,', 'try { upward(); } catch {}\nvar label,'), 'DEFERRED_INITIALIZATION_ORDER'],
+    [control + '\nunknown(upward);', 'DEFERRED_ESCAPED_BINDING'],
+    [control + '\nupward = replacement;', 'DEFERRED_REASSIGNED_BINDING'],
+    [control + '\nconst alias = initLabel; alias();', 'DEFERRED_ESCAPED_BINDING'],
+    [control.replace('initLabel = once(() =>', 'initLabel = once(async () =>'), 'DEFERRED_INITIALIZER_SHAPE'],
+  ]) {
+    const result = transformSource(text);
+    assert.equal(result.analysis.compatibility, 'incompatible', text);
+    assert.equal(result.analysis.target, null);
+    assert.equal(result.transformation, null);
+    if (code) assert.equal(result.analysis.diagnostics[0].code, code, JSON.stringify(result.analysis.diagnostics));
+  }
+});
+
+test('rejects an upward initializer assignment to an unresolved global setter', () => {
+  const text = source.replace('var initErrors =', `var upward = once(() => { initProtocols(); globalSetting = 7; });
+upward();
+var initErrors =`);
+  const result = transformSource(text);
+  assert.equal(result.analysis.compatibility, 'incompatible');
+  assert.equal(result.analysis.diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+  assert.equal(result.analysis.target, null);
+  assert.equal(result.transformation, null);
+});
+
+test('rejects swallowed failure reached through multiple proven upward once callers', async () => {
+  const declaration = "var metadata, initMetadata = once(() => { metadata = { name: 'synthetic' }; });";
+  const upward = `var first = once(() => { initSiteStatus(); });
+var second = once(() => { first(); });
+try { second(); } catch {}
+`;
+  const text = source.replace(declaration, '').replace('var initErrors =', upward + declaration + '\nvar initErrors =');
+  const box = fixtureRuntime(text);
+  await assert.rejects(box.check('https://caught-upward.test/'), /Invalid URL/);
+  assert.equal(box.requests.length, 0);
+  const result = transformSource(text);
+  assert.equal(result.analysis.diagnostics[0].code, 'DEFERRED_INITIALIZATION_ORDER');
+  assert.equal(result.analysis.target, null);
+  assert.equal(result.transformation, null);
+});
+
+test('rejects upward enum getters, aliases, replacements, unknown sources and host mutation', () => {
+  const upward = `var choices, initChoices = once(() => {
+  choices = (entry => (entry.Default = '', entry.Test = 'test', entry))(choices || {});
+});
+var values, initSettings = once(() => { initProtocols(); initChoices(); values = Object.values(choices); });
+initSettings();
+`;
+  const control = source.replace('var initErrors =', upward + 'var initErrors =');
+  assert.equal(analyzeSource(control).compatibility, 'compatible');
+  for (const text of [
+    control.replace("choices = (entry => (entry.Default = '', entry.Test = 'test', entry))(choices || {})", 'choices = {get value() { initSiteStatus(); return 1; }}'),
+    control.replace("entry.Test = 'test'", 'entry.Test = unknown()'),
+    control.replace("entry.Test = 'test'", "entry.__proto__ = 'test'"),
+    control.replace("entry.Test = 'test'", "entry[unknown()] = 'test'"),
+    control.replace('Object.values(choices)', 'Object.values(foreign)'),
+    control.replace('initChoices(); values', 'values'),
+    control.replace('initChoices(); values', 'values = Object.values(choices); initChoices(); values'),
+    control.replace('var choices,', 'var choices = foreign,'),
+    control + '\nchoices.Test = replacement;',
+    control + '\nObject.defineProperty(choices, "Test", {get: replacement});',
+    control + '\nunknown(choices);',
+    control + '\nconst alias = choices;',
+    control + '\nchoices = {};',
+    control + '\nObject.values = replacement;',
+    control + '\nconst alias = Object; unknown?.(alias);',
+  ]) {
+    const result = transformSource(text);
+    assert.equal(result.analysis.compatibility, 'incompatible', text);
+    assert.equal(result.analysis.target, null);
+    assert.equal(result.transformation, null);
+  }
+});
+
 test('permits unknown callback creation after normal initialization and unrelated earlier callback work', () => {
   const after = source.replace('initialize();\nasync function transport', 'initialize();\nvar later = unknown(() => { initSiteStatus(); });\nasync function transport');
   const unrelated = source.replace('var initErrors =', 'var earlier = unknown(() => { unrelated.count++; });\nvar initErrors =');
