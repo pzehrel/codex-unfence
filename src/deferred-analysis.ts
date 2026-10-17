@@ -56,6 +56,16 @@ function statements(node: Fn): E.Statement[] {
   return node.body.type === 'BlockStatement' ? node.body.body : [];
 }
 
+function literal(node: E.Node | null | undefined, value: string | number | null): boolean { return node?.type === 'Literal' && node.value === value; }
+function returned(node: E.Node | null | undefined): E.Expression | null { return node?.type === 'ReturnStatement' ? node.argument ?? null : null; }
+function declared(node: E.Node | null | undefined): E.VariableDeclarator | null { return node?.type === 'VariableDeclaration' && node.declarations.length === 1 && node.declarations[0]?.id.type === 'Identifier' ? node.declarations[0] : null; }
+function awaited(node: E.Node | null | undefined): E.Expression | null { return node?.type === 'AwaitExpression' ? node.argument : null; }
+function properties(node: E.Node | null | undefined, names: string[]): E.Property[] | null {
+  if (node?.type !== 'ObjectExpression' && node?.type !== 'ObjectPattern' || node.properties.length !== names.length) return null;
+  const items = node.properties;
+  return items.every((item, index) => item.type === 'Property' && !item.computed && !item.method && item.kind === 'init' && (item.key.type === 'Identifier' ? item.key.name : item.key.type === 'Literal' ? item.key.value : null) === names[index]) ? items as E.Property[] : null;
+}
+
 interface Candidate { wrapper: Fn; generic: Fn; key: E.Identifier; consumption: E.CallExpression; owner: E.ClassExpression }
 interface Initializer { binding: Variable; declaration: E.VariableDeclarator; callback: Fn; dependencies: Initializer[] }
 
@@ -72,13 +82,13 @@ export function analyzeDeferredStage(program: E.Program): SourceAnalysis | null 
     const candidate = candidates[0]!;
     const initialization = proof.initialization(candidate);
     proof.predicate(candidate);
+    const request = proof.request(candidate);
     proof.closeRelevantEffects();
     result.evidence.push(initialization, {
       kind: 'predicate', range: range(candidate.wrapper),
       description: 'Object guards protect feature_status; the initialized agent key blocks only on strict equality to true. Stage evidence only.',
-    });
+    }, ...request);
     result.diagnostics.push(
-      { code: 'UNPROVEN_REQUEST_CHAIN', severity: 'error', message: 'Request URL builder, runtime transport, HTTP success and JSON response binding remain unproven.', range: range(candidate.consumption) },
       { code: 'UNPROVEN_CACHE_POLICY', severity: 'error', message: 'Cache/inflight control flow, receiver identity and actual checkUrl to policy consumption remain unproven.', range: range(candidate.owner) },
       { code: 'DEFERRED_TRANSFORM_DISABLED', severity: 'error', message: 'Deferred stages do not establish structural compatibility; target, transformation and plan publication remain disabled.', range: range(candidate.consumption) },
     );
@@ -468,8 +478,290 @@ class DeferredProof {
     for (const reference of binding.references) this.allowedReads.add(reference.identifier);
   }
 
+  private requestNeed(condition: unknown, code: string, message: string, node: E.Node): asserts condition {
+    requireStage(condition, `DEFERRED_${code}`, message, node);
+  }
+
+  /** Mark a fully matched function's local inputs and values, never arbitrary call sites. */
+  private matchedFunction(node: Fn): void {
+    walk(node, item => {
+      if (item.type !== 'Identifier') return;
+      const binding = this.binding(item);
+      if (!binding || !binding.defs.every(def => range(def.node).start >= range(node).start && range(def.node).end <= range(node).end)) return;
+      this.track(item);
+      const reference = binding.references.find(reference => reference.identifier === item);
+      if (reference?.isWrite()) this.allowedWrites.add(item);
+      else this.allowedReads.add(item);
+    });
+  }
+
+  private directFunction(identifier: E.Node, code: string): Fn {
+    const value = this.definition(identifier);
+    this.requestNeed(value && !value.async && !value.generator, code, 'Request helper must resolve to a synchronous local function.', identifier);
+    this.read(identifier);
+    return value;
+  }
+
+  private params(node: Fn, count: number, code: string): E.Identifier[] {
+    this.requestNeed(node.params.length === count && node.params.every(parameter => parameter.type === 'Identifier'), code, 'Request helper parameters are outside the finite binding pattern.', node);
+    return node.params as E.Identifier[];
+  }
+
+  private invoke(node: E.Node | null | undefined, receiver: E.Node, name: string, args: (E.Node | null | undefined)[]): node is E.CallExpression {
+    return call(node) && member(node.callee, name) && this.same(node.callee.object, receiver) && node.arguments.length === args.length && node.arguments.every((argument, index) => this.same(argument, args[index]));
+  }
+
+  private urlNew(node: E.Node | null | undefined, input: E.Node, field?: string): boolean {
+    return node?.type === 'NewExpression' && node.callee.type === 'Identifier' && node.callee.name === 'URL' && !this.binding(node.callee) && node.arguments.length === 1 && (field ? member(node.arguments[0], field) && this.same(node.arguments[0].object, input) : this.same(node.arguments[0], input));
+  }
+
+  private throws(node: E.Node | null | undefined): boolean {
+    if (node?.type !== 'ThrowStatement' || node.argument.type !== 'NewExpression' || node.argument.callee.type !== 'Identifier' || node.argument.callee.name !== 'Error' || this.binding(node.argument.callee) || node.argument.arguments.length !== 1) return false;
+    const message = node.argument.arguments[0];
+    return message?.type === 'Literal' && typeof message.value === 'string' || call(message) && message.callee.type === 'Identifier' && !!this.definition(message.callee) && message.arguments.every(argument => argument.type === 'Literal' && typeof argument.value === 'string');
+  }
+
+  private context(node: E.Node | null | undefined, defaults: boolean): E.Identifier[] {
+    const pattern = defaults && node?.type === 'AssignmentPattern' && node.right.type === 'ObjectExpression' && node.right.properties.length === 0 ? node.left : node;
+    const items = properties(pattern, ['conversationId', 'turnId', 'urlRequestSource']);
+    this.requestNeed(items, 'REQUEST_CONTEXT', 'Request context must destructure conversationId, turnId and urlRequestSource without rest or replacement.', node ?? this.program);
+    const values = items.map(item => item.value);
+    if (defaults) {
+      const source = values[2];
+      this.requestNeed(source?.type === 'AssignmentPattern' && source.left.type === 'Identifier', 'REQUEST_CONTEXT', 'Request source must default to the initialized source binding.', pattern!);
+      this.configuration(source.right, 'codex_browser_use');
+      values[2] = source.left;
+    }
+    this.requestNeed(values.every(value => value.type === 'Identifier'), 'REQUEST_CONTEXT', 'Context fields must retain their own local bindings.', pattern!);
+    return values as E.Identifier[];
+  }
+
+  private configuration(node: E.Node, value: string): void {
+    const binding = this.binding(node), writes = binding?.references.filter(reference => reference.isWrite());
+    const assignment = writes?.length === 1 ? this.parents.get(writes[0]!.identifier) : null;
+    this.requestNeed(binding && this.tracked.has(binding) && assignment?.type === 'AssignmentExpression' && literal(assignment.right, value), 'REQUEST_CONFIGURATION', `Request configuration must be the proven initialized ${value} binding.`, node);
+    this.read(node);
+  }
+
+  request(candidate: Candidate): StructuralEvidence[] {
+    const method = this.parents.get(this.parents.get(candidate.consumption)!);
+    this.requestNeed(method?.type === 'BlockStatement' && this.parents.get(method)?.type === 'FunctionExpression', 'RESPONSE_BINDING', 'Predicate consumption must be the direct return of the HTTP method.', candidate.consumption);
+    const fetch = this.parents.get(method) as E.FunctionExpression;
+    const definition = this.parents.get(fetch);
+    this.requestNeed(definition?.type === 'MethodDefinition' && !definition.static && !definition.computed && fetch.async && !fetch.generator, 'RESPONSE_BINDING', 'HTTP response method must be a direct async instance method.', fetch);
+    const [runtime, request] = this.params(fetch, 2, 'RESPONSE_BINDING');
+    const [httpStatement, success, jsonStatement, consumption] = statements(fetch);
+    const http = declared(httpStatement), json = declared(jsonStatement), transport = awaited(http?.init);
+    this.requestNeed(statements(fetch).length === 4, 'RESPONSE_BINDING', 'HTTP/JSON method has extra statements or unknown control flow around the response binding.', fetch);
+    this.requestNeed(http && call(transport) && transport.callee.type === 'Identifier' && transport.arguments.length === 3 && this.same(transport.arguments[0], runtime) && member(transport.arguments[1], 'endpoint') && this.same(transport.arguments[1].object, request), 'REQUEST_ENDPOINT', 'HTTP method must await the transport with its runtime and the corresponding request.endpoint.', fetch);
+    const options = properties(transport.arguments[2], ['method']);
+    this.requestNeed(options && literal(options[0]?.value, 'GET'), 'REQUEST_GET', 'Site-status transport must receive exactly the GET request options.', transport);
+    this.requestNeed(success?.type === 'IfStatement' && !success.alternate && success.test.type === 'UnaryExpression' && success.test.operator === '!' && member(success.test.argument, 'ok') && this.same(success.test.argument.object, http.id) && this.throws(success.consequent), 'HTTP_SUCCESS', 'Failure of this HTTP response.ok must throw before JSON parsing.', success ?? fetch);
+    const parse = awaited(json?.init);
+    this.requestNeed(json && this.invoke(parse, http.id, 'json', []) && consumption?.type === 'ReturnStatement' && consumption.argument === candidate.consumption && this.same(candidate.consumption.arguments[0], json.id), 'RESPONSE_BINDING', 'The same HTTP object must supply JSON; its unchanged local binding must reach the proven agent predicate.', jsonStatement ?? fetch);
+    const wrapper = this.definition(transport.callee);
+    this.requestNeed(wrapper && wrapper.async && !wrapper.generator, 'TRANSPORT_RECEIVER', 'Transport must resolve to a local async receiver-preserving wrapper.', transport.callee);
+    this.read(transport.callee);
+    const [host, endpoint, settings] = this.params(wrapper, 3, 'TRANSPORT_RECEIVER');
+    const [guard, result] = statements(wrapper), invoked = awaited(returned(result));
+    const test = guard?.type === 'IfStatement' ? guard.test : null;
+    this.requestNeed(statements(wrapper).length === 2 && guard?.type === 'IfStatement' && !guard.alternate && test?.type === 'BinaryExpression' && ['!=', '!=='].includes(test.operator) && test.left.type === 'UnaryExpression' && test.left.operator === 'typeof' && member(test.left.argument, 'fetch') && this.same(test.left.argument.object, host) && literal(test.right, 'function') && this.throws(guard.consequent) && this.invoke(invoked, host!, 'fetch', [endpoint, settings]), 'TRANSPORT_RECEIVER', 'Transport must guard runtime.fetch and invoke that same member with its receiver, endpoint and options.', wrapper);
+    // Error message construction is deliberately opaque only when it cannot see a
+    // tracked input or capability. The request path has no other opaque effects.
+    this.matchedFunction(wrapper);
+    this.matchedFunction(fetch);
+    const builder = this.requestEntry(candidate, definition, runtime!, request!);
+    this.requestBuilder(builder);
+    this.requestReceiverEffects(candidate.owner);
+    return [
+      { kind: 'source', range: range(builder), description: 'Finite input URL proof preserves http/https and localhost filtering, normalized cache key, origin/pathname/search without fragment or credentials, initialized site-status endpoint and source, and conversation_id/turn_id metadata field provenance. Class receiver and cache/policy connection remain a later obligation.' },
+      { kind: 'transport', range: range(wrapper), description: 'Guarded runtime.fetch keeps its receiver and passes the corresponding endpoint and GET options unchanged under the runtime interface assumption.' },
+      { kind: 'response', range: range(definition), description: 'The same HTTP object is checked for ok before JSON parsing; the unchanged JSON binding reaches the proven strict agent predicate.' },
+    ];
+  }
+
+  /** Only request forwarding is checked here; cache behavior and class identity are ticket 12. */
+  private requestEntry(candidate: Candidate, fetchMethod: E.MethodDefinition, runtime: E.Identifier, request: E.Identifier): Fn {
+    const fetchName = fetchMethod.key.type === 'Identifier' ? fetchMethod.key.name : null;
+    const forwards = this.nodes.filter((node): node is E.CallExpression => call(node) && node.callee.type === 'MemberExpression' && node.callee.object.type === 'ThisExpression' && key(node.callee) === fetchName && range(node).start >= range(candidate.owner).start && range(node).end <= range(candidate.owner).end);
+    this.requestNeed(forwards.length === 1, 'REQUEST_CONNECTION', 'HTTP method needs one corresponding direct request forwarding call.', fetchMethod);
+    const forward = forwards[0]!;
+    let blocking: E.Node | undefined = forward;
+    while (blocking && blocking.type !== 'MethodDefinition') blocking = this.parents.get(blocking);
+    this.requestNeed(blocking?.type === 'MethodDefinition' && blocking.key.type === 'Identifier' && !blocking.static && !blocking.computed, 'REQUEST_CONNECTION', 'Request forwarding must belong to an instance method.', forward);
+    const [blockingRuntime, blockingRequest] = this.params(blocking.value, 2, 'REQUEST_CONNECTION');
+    this.requestNeed(forward.arguments.length === 2 && this.same(forward.arguments[0], blockingRuntime) && this.same(forward.arguments[1], blockingRequest), 'REQUEST_CONNECTION', 'Forwarding must retain runtime and request parameters.', forward);
+    const startup = statements(blocking.value)[0];
+    this.requestNeed(blocking.value.async && startup?.type === 'VariableDeclaration' && startup.declarations[0]?.id.type === 'Identifier' && startup.declarations[0].init === forward, 'REQUEST_CONNECTION', 'Request startup must be the first unconditional local declaration before the unproven cache suffix.', forward);
+    const entries = candidate.owner.body.body.filter((node): node is E.MethodDefinition => node.type === 'MethodDefinition' && node.value.params.length === 3 && statements(node.value).some(statement => statement.type === 'VariableDeclaration' && statement.declarations.some(declaration => call(declaration.init) && declaration.init.arguments[1]?.type === 'ObjectExpression')));
+    this.requestNeed(entries.length === 1, 'REQUEST_CONNECTION', 'Request construction needs one finite three-input entry method.', candidate.owner);
+    const entry = entries[0]!, [entryRuntime, site, backend] = this.params(entry.value, 3, 'REQUEST_CONNECTION');
+    const first = statements(entry.value)[0];
+    this.requestNeed(first?.type === 'VariableDeclaration' && first.declarations.length === 2, 'REQUEST_CONTEXT', 'Entry must bind metadata before building its request.', entry);
+    const [metadata, built] = first.declarations;
+    this.requestNeed(metadata?.id.type === 'Identifier' && call(metadata.init) && member(metadata.init.callee, 'getTurnMetadata') && metadata.init.callee.object.type === 'ThisExpression' && metadata.init.arguments.length === 1 && this.same(metadata.init.arguments[0], entryRuntime) && built?.id.type === 'Identifier' && call(built.init) && built.init.arguments.length === 2 && this.same(built.init.arguments[0], site), 'REQUEST_CONTEXT', 'Entry metadata must come from this.getTurnMetadata with the same runtime; builder must use the site input.', first);
+    const context = properties(built.init.arguments[1], ['conversationId', 'turnId', 'urlRequestSource']);
+    const optional = (node: E.Node | undefined, name: string): boolean => node?.type === 'ChainExpression' && node.expression.type === 'MemberExpression' && node.expression.optional && key(node.expression) === name && this.same(node.expression.object, metadata.id);
+    this.requestNeed(context && optional(context[0]?.value, 'session_id') && optional(context[1]?.value, 'turn_id'), 'REQUEST_CONTEXT', 'Conversation and turn parameters must retain their corresponding metadata fields.', built);
+    const source = context[2]!.value;
+    this.requestNeed(source.type === 'ConditionalExpression' && source.test.type === 'BinaryExpression' && source.test.operator === '==' && this.same(source.test.left, backend) && literal(source.test.right, null), 'REQUEST_CONTEXT', 'Request source must distinguish a missing backend from the same backend input.', source);
+    this.configuration(source.consequent, 'codex_browser_use');
+    this.requestNeed(source.alternate.type === 'TemplateLiteral' && source.alternate.expressions.length === 2 && this.same(source.alternate.expressions[0], source.consequent) && this.same(source.alternate.expressions[1], backend) && source.alternate.quasis.map(item => item.value.cooked).join('|') === '|:|', 'REQUEST_CONTEXT', 'Backend-qualified source must retain the initialized source and backend.', source);
+    this.allowedReads.add(source.alternate.expressions[1]!);
+    const builder = this.directFunction(built.init.callee, 'REQUEST_CONNECTION');
+    const second = statements(entry.value)[1];
+    this.requestNeed(second?.type === 'IfStatement' && !second.alternate && second.test.type === 'BinaryExpression' && second.test.operator === '==' && this.same(second.test.left, built.id) && literal(second.test.right, null) && second.consequent.type === 'ReturnStatement' && !second.consequent.argument, 'REQUEST_CONNECTION', 'Null requests must return before forwarding.', second ?? entry);
+    const sends: E.CallExpression[] = [];
+    walk(entry.value, node => { if (call(node) && member(node.callee, blocking.key.type === 'Identifier' ? blocking.key.name : '') && node.callee.object.type === 'ThisExpression') sends.push(node); });
+    this.requestNeed(sends.length === 1 && sends[0]!.arguments.length === 2 && this.same(sends[0]!.arguments[0], entryRuntime) && this.same(sends[0]!.arguments[1], built.id), 'REQUEST_CONNECTION', 'Entry must forward the same runtime and constructed request.', entry);
+    const entryBody = statements(entry.value), empty = declared(entryBody[2]), guarded = entryBody[3], output = properties(returned(entryBody[4]), ['request', 'result']);
+    const attempt = guarded?.type === 'TryStatement' && guarded.block.body.length === 1 ? guarded.block.body[0] : null;
+    const assigned = attempt?.type === 'ExpressionStatement' ? attempt.expression : null;
+    this.requestNeed(entryBody.length === 5 && entry.value.async && empty && !empty.init && guarded?.type === 'TryStatement' && !guarded.finalizer && guarded.handler && !guarded.handler.param && guarded.handler.body.body.length === 1 && guarded.handler.body.body[0]?.type === 'ReturnStatement' && !guarded.handler.body.body[0].argument && assigned?.type === 'AssignmentExpression' && assigned.operator === '=' && this.same(assigned.left, empty.id) && awaited(assigned.right) === sends[0] && output && this.same(output[0]?.value, built.id) && this.same(output[1]?.value, empty.id), 'REQUEST_CONNECTION', 'Entry request construction must lead directly through the single awaited forwarding call with its existing catch-return and request/result return; unknown control flow is unproven.', entry);
+    // Restrict only values needed for request provenance; later cache/result state
+    // remains unproven and cannot grant compatibility or a transformation.
+    for (const identifier of [runtime, request, blockingRuntime!, blockingRequest!, entryRuntime!, site!, backend!, metadata.id, built.id]) this.requestValue(identifier, new Set([forward, sends[0]!, built.init, metadata.init]), new Set([built.id]));
+    return builder;
+  }
+
+  /** Negative impact check only. Full constructor/state/receiver proof stays in ticket 12. */
+  private requestReceiverEffects(owner: E.ClassExpression): void {
+    this.requestNeed(!owner.superClass && owner.body.body.every(item => item.type !== 'StaticBlock' && !item.static && !item.computed), 'REQUEST_RECEIVER', 'Inherited, static or computed class effects can replace the request methods.', owner);
+    const methods = owner.body.body.flatMap(item => item.type === 'MethodDefinition' && item.key.type === 'Identifier' ? [item.key.name] : []);
+    const methodNames = new Set(methods);
+    this.requestNeed(methodNames.size === methods.length && owner.body.body.every(item => item.type !== 'PropertyDefinition' || item.key.type !== 'Identifier' || !methodNames.has(item.key.name)), 'REQUEST_RECEIVER', 'Duplicate methods or instance fields can shadow the proven request method.', owner);
+    walk(owner, node => {
+      if (node.type !== 'ThisExpression') return;
+      const use = this.parents.get(node);
+      this.requestNeed(use?.type === 'MemberExpression' && use.object === node && !use.optional && key(use) !== null && !['__proto__', 'prototype', 'constructor'].includes(key(use)!), 'REQUEST_RECEIVER', 'Instance self escape or dynamic property access can change request methods.', node);
+      const parent = this.parents.get(use);
+      if (methodNames.has(key(use)!)) this.requestNeed(call(parent) && parent.callee === use, 'REQUEST_RECEIVER', 'Request method mutation, alias or extraction is unproven.', use);
+      if (key(use) === 'getTurnMetadata') {
+        let enclosing: E.Node | undefined = use;
+        while (enclosing && enclosing.type !== 'MethodDefinition') enclosing = this.parents.get(enclosing);
+        const constructorAssignment = enclosing?.type === 'MethodDefinition' && enclosing.kind === 'constructor' && parent?.type === 'AssignmentExpression' && parent.operator === '=' && parent.left === use && parent.right.type === 'Identifier';
+        this.requestNeed(constructorAssignment || call(parent) && parent.callee === use, 'REQUEST_RECEIVER', 'Request metadata accessor is replaced, extracted or escaped outside construction.', use);
+      }
+    });
+    const declaration = this.parents.get(owner);
+    this.requestNeed(declaration?.type === 'VariableDeclarator' && declaration.id.type === 'Identifier', 'REQUEST_RECEIVER', 'Request class needs a local binding for current-file impact checks.', owner);
+    const binding = this.binding(declaration.id);
+    this.requestNeed(binding, 'REQUEST_RECEIVER', 'Request class binding is ambiguous.', declaration);
+    for (const reference of binding.references) {
+      const node = reference.identifier, parent = this.parents.get(node);
+      if (reference.isWrite()) { this.requestNeed(reference.init, 'REQUEST_RECEIVER', 'Request class binding is replaced.', node); continue; }
+      this.requestNeed(parent?.type === 'NewExpression' && parent.callee === node && parent.arguments.length === 0, 'REQUEST_RECEIVER', 'Request class prototype mutation, alias, subclass or external escape is unproven.', node);
+      const instance = this.parents.get(parent);
+      this.requestNeed(instance?.type === 'VariableDeclarator' && instance.id.type === 'Identifier', 'REQUEST_RECEIVER', 'Constructed request receiver escapes its local binding.', parent);
+      const receiver = this.binding(instance.id);
+      this.requestNeed(receiver, 'REQUEST_RECEIVER', 'Request receiver binding is ambiguous.', instance);
+      for (const use of receiver.references) {
+        if (use.isWrite()) { this.requestNeed(use.init, 'REQUEST_RECEIVER', 'Request receiver binding is replaced.', use.identifier); continue; }
+        const memberUse = this.parents.get(use.identifier), invocation = memberUse && this.parents.get(memberUse);
+        this.requestNeed(memberUse?.type === 'MemberExpression' && memberUse.object === use.identifier && !memberUse.optional && key(memberUse) !== null && call(invocation) && invocation.callee === memberUse, 'REQUEST_RECEIVER', 'Request receiver alias, method extraction, mutation or unknown escape is unproven.', use.identifier);
+        const methodName = key(memberUse);
+        this.requestNeed(owner.body.body.some(item => item.type === 'MethodDefinition' && !item.static && !item.computed && item.key.type === 'Identifier' && item.key.name === methodName), 'REQUEST_RECEIVER', 'Request receiver invokes an unknown instance method.', invocation);
+      }
+    }
+  }
+
+  private requestValue(identifier: E.Identifier, calls: Set<E.Node>, returns: Set<E.Node>): void {
+    const binding = this.track(identifier);
+    for (const reference of binding.references) {
+      const node = reference.identifier, parent = this.parents.get(node);
+      if (reference.isWrite()) {
+        this.requestNeed(reference.init, 'REQUEST_MUTATION', 'Request-chain values cannot be reassigned.', node);
+        continue;
+      }
+      let allowed = false;
+      if (call(parent) && calls.has(parent)) allowed = true;
+      if (parent?.type === 'MemberExpression' && parent.object === node) {
+        const name = key(parent);
+        const read = name === 'cacheKey' || name === 'endpoint' || name === 'session_id' || name === 'turn_id';
+        let target: E.Node = parent, outer = this.parents.get(target);
+        while (outer && (outer.type === 'Property' && outer.value === target || outer.type === 'ObjectPattern' || outer.type === 'ArrayPattern' || outer.type === 'RestElement' || outer.type === 'AssignmentPattern' && outer.left === target)) { target = outer; outer = this.parents.get(target); }
+        allowed = read && !(outer?.type === 'AssignmentExpression' && outer.left === target) && outer?.type !== 'UpdateExpression' && !(outer?.type === 'UnaryExpression' && outer.operator === 'delete') && !(outer?.type === 'ForOfStatement' && outer.left === target) && !(outer?.type === 'ForInStatement' && outer.left === target);
+      }
+      if (parent?.type === 'BinaryExpression' && ['==', '!='].includes(parent.operator) && literal(parent.right, null)) allowed = true;
+      if (parent?.type === 'Property' && parent.value === node && returns.has(identifier) && parent.key.type === 'Identifier' && parent.key.name === 'request') allowed = true;
+      // The HTTP method and transport have already had every statement matched.
+      if (this.allowedReads.has(node)) allowed = true;
+      this.requestNeed(allowed, 'REQUEST_ESCAPE', 'Request-chain value escapes its proven forwarding, field read or metadata use.', node);
+      this.allowedReads.add(node);
+    }
+  }
+
+  private requestBuilder(builder: Fn): void {
+    this.requestNeed(builder.params.length === 2 && builder.params[0]?.type === 'Identifier', 'REQUEST_INPUT', 'Input builder must take site and optional request context.', builder);
+    const site = builder.params[0], context = this.context(builder.params[1], true);
+    const body = statements(builder), [empty, parse, protocol, hostStatement, missing, result] = body;
+    const url = declared(empty), host = declared(hostStatement);
+    this.requestNeed(body.length === 6 && url && !url.init && parse?.type === 'TryStatement' && !parse.finalizer && parse.handler && parse.block.body.length === 1 && parse.block.body[0]?.type === 'ExpressionStatement', 'REQUEST_INPUT', 'Input URL parsing must have one assignment and an error-only catch.', builder);
+    const assignment = parse.block.body[0].expression;
+    this.requestNeed(assignment.type === 'AssignmentExpression' && assignment.operator === '=' && this.same(assignment.left, url.id) && this.urlNew(assignment.right, site) && parse.handler.body.body.length === 1 && this.throws(parse.handler.body.body[0]), 'REQUEST_INPUT', 'The same site input must be parsed with standard URL; invalid input must throw.', parse);
+    const protocolTest = protocol?.type === 'IfStatement' ? protocol.test : null;
+    const scheme = (node: E.Node, value: string): boolean => node.type === 'BinaryExpression' && node.operator === '!==' && member(node.left, 'protocol') && this.same(node.left.object, url.id) && literal(node.right, value);
+    this.requestNeed(protocol?.type === 'IfStatement' && !protocol.alternate && protocolTest?.type === 'LogicalExpression' && protocolTest.operator === '&&' && scheme(protocolTest.left, 'http:') && scheme(protocolTest.right, 'https:') && literal(returned(protocol.consequent), null), 'REQUEST_PROTOCOL', 'Input URL must reject protocols other than http and https.', protocol ?? builder);
+    const lower = host?.init;
+    const trim = call(lower) && member(lower.callee, 'toLowerCase') && lower.arguments.length === 0 ? lower.callee.object : null;
+    this.requestNeed(host && call(trim) && member(trim.callee, 'trim') && trim.arguments.length === 0 && member(trim.callee.object, 'hostname') && this.same(trim.callee.object.object, url.id), 'REQUEST_HOST', 'Cache host must be trimmed lowercase hostname of the same input URL.', hostStatement ?? builder);
+    this.requestNeed(missing?.type === 'IfStatement' && !missing.alternate && missing.test.type === 'BinaryExpression' && missing.test.operator === '===' && member(missing.test.left, 'length') && this.same(missing.test.left.object, host.id) && literal(missing.test.right, 0) && this.throws(missing.consequent), 'REQUEST_HOST', 'Empty normalized host must throw.', missing ?? builder);
+    const conditional = returned(result);
+    this.requestNeed(conditional?.type === 'ConditionalExpression' && call(conditional.test) && conditional.test.arguments.length === 1 && this.same(conditional.test.arguments[0], host.id) && literal(conditional.consequent, null), 'REQUEST_LOCALHOST', 'Local hosts must be excluded before building a request.', result ?? builder);
+    this.localHost(this.directFunction(conditional.test.callee, 'REQUEST_LOCALHOST'));
+    const fields = properties(conditional.alternate, ['cacheKey', 'displayUrl', 'endpoint']);
+    this.requestNeed(fields, 'REQUEST_ENDPOINT', 'Request must contain exactly cacheKey, displayUrl and endpoint.', conditional.alternate);
+    const cache = fields[0]!.value;
+    this.requestNeed(cache.type === 'ConditionalExpression' && call(cache.test) && member(cache.test.callee, 'startsWith') && this.same(cache.test.callee.object, host.id) && cache.test.arguments.length === 1 && literal(cache.test.arguments[0], 'www.') && call(cache.consequent) && member(cache.consequent.callee, 'slice') && this.same(cache.consequent.callee.object, host.id) && cache.consequent.arguments.length === 1 && literal(cache.consequent.arguments[0], 4) && this.same(cache.alternate, host.id), 'REQUEST_CACHE_KEY', 'Cache key must remove only a leading www. from the normalized hostname.', cache);
+    const display = fields[1]!.value, endpoint = fields[2]!.value;
+    this.requestNeed(call(display) && display.arguments.length === 1 && this.same(display.arguments[0], url.id), 'REQUEST_DISPLAY', 'Display URL must be derived from the same parsed input.', display);
+    this.display(this.directFunction(display.callee, 'REQUEST_DISPLAY'));
+    this.requestNeed(call(endpoint) && endpoint.arguments.length === 2 && this.same(endpoint.arguments[0], url.id), 'REQUEST_ENDPOINT', 'Endpoint builder must receive the same parsed input URL.', endpoint);
+    const passed = properties(endpoint.arguments[1], ['conversationId', 'turnId', 'urlRequestSource']);
+    this.requestNeed(passed && passed.every((item, index) => this.same(item.value, context[index])), 'REQUEST_CONTEXT', 'Split builder must receive the unchanged corresponding context fields.', endpoint);
+    this.endpoint(this.directFunction(endpoint.callee, 'REQUEST_ENDPOINT'));
+    this.matchedFunction(builder);
+  }
+
+  private localHost(helper: Fn): void {
+    const [host] = this.params(helper, 1, 'REQUEST_LOCALHOST');
+    const flatten = (node: E.Node): E.Node[] => node.type === 'LogicalExpression' && node.operator === '||' ? [...flatten(node.left), ...flatten(node.right)] : [node];
+    const value = returned(statements(helper)[0]);
+    this.requestNeed(statements(helper).length === 1 && value, 'REQUEST_LOCALHOST', 'Local-host predicate must be one finite disjunction.', helper);
+    const tests = flatten(value);
+    const equals = (node: E.Node | undefined, value: string): boolean => node?.type === 'BinaryExpression' && node.operator === '===' && this.same(node.left, host) && literal(node.right, value);
+    const suffix = tests[1];
+    this.requestNeed(tests.length === 5 && equals(tests[0], 'localhost') && call(suffix) && member(suffix.callee, 'endsWith') && this.same(suffix.callee.object, host) && suffix.arguments.length === 1 && literal(suffix.arguments[0], '.localhost') && equals(tests[2], '127.0.0.1') && equals(tests[3], '[::1]') && equals(tests[4], '::1'), 'REQUEST_LOCALHOST', 'Localhost, its subdomains and IPv4/IPv6 loopback must retain the finite exclusion semantics.', helper);
+    this.matchedFunction(helper);
+  }
+
+  private display(helper: Fn): void {
+    const [url] = this.params(helper, 1, 'REQUEST_DISPLAY');
+    const body = statements(helper), copy = declared(body[0]), text = declared(body[2]);
+    const assignment = body[1]?.type === 'ExpressionStatement' ? body[1].expression : null;
+    const value = returned(body[3]);
+    this.requestNeed(body.length === 4 && copy && this.urlNew(copy.init, url!, 'origin') && assignment?.type === 'AssignmentExpression' && assignment.operator === '=' && member(assignment.left, 'pathname') && this.same(assignment.left.object, copy.id) && member(assignment.right, 'pathname') && this.same(assignment.right.object, url) && text && this.invoke(text.init, copy.id, 'toString', []) && value?.type === 'ConditionalExpression' && value.test.type === 'BinaryExpression' && value.test.operator === '===' && member(value.test.left, 'pathname') && this.same(value.test.left.object, copy.id) && literal(value.test.right, '/') && call(value.consequent) && member(value.consequent.callee, 'slice') && this.same(value.consequent.callee.object, text.id) && value.consequent.arguments.length === 2 && literal(value.consequent.arguments[0], 0) && value.consequent.arguments[1]?.type === 'UnaryExpression' && value.consequent.arguments[1].operator === '-' && literal(value.consequent.arguments[1].argument, 1) && this.same(value.alternate, text.id), 'REQUEST_DISPLAY', 'Display helper must copy origin/pathname and strip only the root trailing slash.', helper);
+    this.matchedFunction(helper);
+  }
+
+  private endpoint(helper: Fn): void {
+    this.requestNeed(helper.params.length === 2 && helper.params[0]?.type === 'Identifier', 'REQUEST_ENDPOINT', 'Endpoint helper needs URL and request context inputs.', helper);
+    const url = helper.params[0], context = this.context(helper.params[1], false), body = statements(helper);
+    const copy = declared(body[0]), endpoint = declared(body[2]);
+    const assigns = body[1]?.type === 'ExpressionStatement' ? expressions(body[1].expression) : [];
+    this.requestNeed(body.length === 4 && copy && this.urlNew(copy.init, url, 'origin') && assigns.length === 2 && assigns.every((item, index) => item.type === 'AssignmentExpression' && item.operator === '=' && member(item.left, index === 0 ? 'pathname' : 'search') && this.same(item.left.object, copy.id) && member(item.right, index === 0 ? 'pathname' : 'search') && this.same(item.right.object, url)), 'REQUEST_SITE_URL', 'site_url must copy origin, pathname and search of the same URL, excluding credentials and fragment.', helper);
+    const address = endpoint?.init;
+    this.requestNeed(endpoint && address?.type === 'NewExpression' && address.callee.type === 'Identifier' && address.callee.name === 'URL' && !this.binding(address.callee) && address.arguments.length === 1 && address.arguments[0]?.type === 'TemplateLiteral' && address.arguments[0].expressions.length === 1 && address.arguments[0].quasis.map(item => item.value.cooked).join('|') === '|/aura/site_status', 'REQUEST_ENDPOINT', 'Endpoint must use standard URL and initialized backend plus /aura/site_status.', endpoint ?? helper);
+    this.configuration(address.arguments[0].expressions[0]!, 'https://chatgpt.com/backend-api');
+    const value = returned(body[3]), sequence = value ? expressions(value) : [];
+    const set = (node: E.Node | undefined, name: string, input: E.Node | undefined, stringified = false): boolean => call(node) && member(node.callee, 'set') && member(node.callee.object, 'searchParams') && this.same(node.callee.object.object, endpoint.id) && node.arguments.length === 2 && literal(node.arguments[0], name) && (stringified ? this.invoke(node.arguments[1], copy.id, 'toString', []) : this.same(node.arguments[1], input));
+    const optional = (node: E.Node | undefined, name: string, input: E.Node | undefined): boolean => node?.type === 'LogicalExpression' && node.operator === '&&' && node.left.type === 'BinaryExpression' && node.left.operator === '!=' && this.same(node.left.left, input) && literal(node.left.right, null) && set(node.right, name, input);
+    this.requestNeed(sequence.length === 5 && set(sequence[0], 'site_url', copy.id, true) && set(sequence[1], 'url_request_source', context[2]) && optional(sequence[2], 'conversation_id', context[0]) && optional(sequence[3], 'turn_id', context[1]) && this.invoke(sequence[4], endpoint.id, 'toString', []), 'REQUEST_CONTEXT', 'Endpoint parameters must keep site_url, source and null-guarded conversation/turn values and return that endpoint.', helper);
+    this.matchedFunction(helper);
+  }
+
   private closeHostEffects(): void {
-    const capabilities = new Set(['Object', 'Set', 'TextEncoder', 'Error']);
+    const capabilities = new Set(['Object', 'Function', 'Set', 'TextEncoder', 'Error', 'URL', 'URLSearchParams', 'String']);
     const aliases = new Set<Variable>();
     const globalAliases = new Set<Variable>();
     const globalObject = (node: E.Node | null | undefined): boolean => node?.type === 'Identifier' && (!this.binding(node) && ['globalThis', 'global'].includes(node.name) || globalAliases.has(this.binding(node)!));
@@ -478,6 +770,16 @@ class DeferredProof {
       if (direct !== null) return direct;
       const property = node.property;
       return property.type === 'BinaryExpression' && property.operator === '+' && property.left.type === 'Literal' && typeof property.left.value === 'string' && property.right.type === 'Literal' && typeof property.right.value === 'string' ? property.left.value + property.right.value : null;
+    };
+    const finiteKeys = (node: E.Node): string[] | null => {
+      if (node.type === 'Literal' && typeof node.value === 'string') return [node.value];
+      if (node.type === 'ConditionalExpression') { const yes = finiteKeys(node.consequent), no = finiteKeys(node.alternate); return yes && no ? [...yes, ...no] : null; }
+      if (node.type === 'BinaryExpression' && node.operator === '+' && node.left.type === 'Literal' && typeof node.left.value === 'string' && node.right.type === 'Literal' && typeof node.right.value === 'string') return [node.left.value + node.right.value];
+      return null;
+    };
+    const unrelatedGlobalKey = (node: E.MemberExpression): boolean => {
+      const names = key(node) !== null ? [key(node)!] : node.computed ? finiteKeys(node.property) : null;
+      return !!names && names.every(name => !capabilities.has(name) && !['__proto__', 'prototype', 'constructor'].includes(name));
     };
     const host = (node: E.Node | null | undefined): boolean => {
       if (!node) return false;
@@ -494,19 +796,26 @@ class DeferredProof {
         const targets = left.type === 'Identifier' ? [left] : left.type === 'ObjectPattern' ? left.properties.flatMap(item => item.type === 'Property' && item.value.type === 'Identifier' ? [item.value] : []) : [];
         for (const target of targets) {
           const binding = this.binding(target);
-          if (binding && host(right) && !aliases.has(binding)) { aliases.add(binding); changed = true; }
+          const globalDestructure = globalObject(right) && left.type === 'ObjectPattern' && left.properties.some(item => item.type === 'Property' && item.value === target && !item.computed && capabilities.has(item.key.type === 'Identifier' ? item.key.name : item.key.type === 'Literal' ? String(item.key.value) : ''));
+          if (binding && (host(right) || globalDestructure) && !aliases.has(binding)) { aliases.add(binding); changed = true; }
           if (binding && globalObject(right) && !globalAliases.has(binding)) { globalAliases.add(binding); changed = true; }
         }
       }
     }
     for (const node of this.nodes) {
       const written = node.type === 'AssignmentExpression' ? node.left : node.type === 'UpdateExpression' ? node.argument : node.type === 'UnaryExpression' && node.operator === 'delete' ? node.argument : node.type === 'ForInStatement' || node.type === 'ForOfStatement' ? node.left : null;
-      if (written) walk(written, target => {
+      const checkWrite = (target: E.Node): void => {
         const aliasSetup = target === written && node.type === 'AssignmentExpression' && node.operator === '=' && (host(node.right) || globalObject(node.right));
-        requireStage(!(target.type === 'MemberExpression' && (host(target) || host(target.object))) && !(target.type === 'Identifier' && host(target) && !aliasSetup), 'DEFERRED_HOST_MUTATION', 'Current-file mutation of a relevant standard capability or its alias is unproven.', target);
-      });
+        requireStage(!(target.type === 'MemberExpression' && (host(target) || host(target.object) || globalObject(target.object) && !unrelatedGlobalKey(target))) && !(target.type === 'Identifier' && host(target) && !aliasSetup), 'DEFERRED_HOST_MUTATION', 'Current-file mutation of a relevant standard capability or its alias is unproven.', target);
+        // A member's computed key is evaluated, not assigned. Its calls are
+        // inspected separately; String(key) does not mutate the String binding.
+        if (target.type === 'ArrayPattern') for (const item of target.elements) if (item) checkWrite(item);
+        if (target.type === 'ObjectPattern') for (const item of target.properties) checkWrite(item.type === 'RestElement' ? item.argument : item.value);
+        if (target.type === 'AssignmentPattern') checkWrite(target.left);
+      };
+      if (written) checkWrite(written);
       if (call(node)) {
-        for (const [index, argument] of node.arguments.entries()) if (host(argument)) {
+        for (const [index, argument] of node.arguments.entries()) if (host(argument) || globalObject(argument)) {
           const target = this.definition(node.callee), parameter = target?.params[index];
           const reads = parameter?.type === 'Identifier' ? this.binding(parameter)?.references : null;
           const observesType = !!target && !target.async && !!reads?.length && reads.every(reference => {

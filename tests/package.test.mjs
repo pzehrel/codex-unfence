@@ -127,9 +127,9 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
     const detected = result(box.run(['detect', '--plugin-root', box.root]), 'detect', 3);
     for (const artifact of detected.data.artifacts) {
       assert.equal(artifact.analysis.patternVersion, 'site-status-deferred-v1');
-      assert.deepEqual(artifact.analysis.evidence.map(entry => entry.kind), ['initialization', 'predicate']);
+      assert.deepEqual(artifact.analysis.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response']);
       assert.equal(artifact.analysis.target, null);
-      assert.equal(artifact.analysis.diagnostics[0].code, 'UNPROVEN_REQUEST_CHAIN');
+      assert.equal(artifact.analysis.diagnostics[0].code, 'UNPROVEN_CACHE_POLICY');
     }
     const prepared = result(box.run(['prepare', '--plugin-root', box.root, '--target', box.targets[0], '--output', box.plan]), 'prepare', 3);
     assert.equal(prepared.data, null);

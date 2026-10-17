@@ -31,8 +31,8 @@ test('detect human/JSON exposes deferred stage evidence and remaining proof obli
     assert.equal(artifact.analysis.patternVersion, 'site-status-deferred-v1');
     assert.equal(artifact.analysis.compatibility, 'incompatible');
     assert.equal(artifact.analysis.target, null);
-    assert.deepEqual(artifact.analysis.evidence.map(entry => entry.kind), ['initialization', 'predicate']);
-    assert.deepEqual(artifact.analysis.diagnostics.map(entry => entry.code), ['UNPROVEN_REQUEST_CHAIN', 'UNPROVEN_CACHE_POLICY', 'DEFERRED_TRANSFORM_DISABLED']);
+    assert.deepEqual(artifact.analysis.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response']);
+    assert.deepEqual(artifact.analysis.diagnostics.map(entry => entry.code), ['UNPROVEN_CACHE_POLICY', 'DEFERRED_TRANSFORM_DISABLED']);
     for (const entry of artifact.analysis.evidence) {
       assert.equal(entry.range.unit, 'utf16');
       assert.ok(source.slice(entry.range.start, entry.range.end).length > 0);
@@ -42,11 +42,39 @@ test('detect human/JSON exposes deferred stage evidence and remaining proof obli
   assert.equal(human.status, 3);
   assert.match(human.stdout, /Evidence initialization:.*utf16.*normal completion/);
   assert.match(human.stdout, /Evidence predicate:.*strict equality to true/);
-  assert.match(human.stdout, /UNPROVEN_REQUEST_CHAIN/);
+  assert.match(human.stdout, /Evidence source:.*origin\/pathname\/search/);
+  assert.match(human.stdout, /Evidence transport:.*receiver.*GET/);
+  assert.match(human.stdout, /Evidence response:.*same HTTP.*JSON.*binding/);
+  assert.doesNotMatch(human.stdout, /UNPROVEN_REQUEST_CHAIN/);
   assert.match(human.stdout, /UNPROVEN_CACHE_POLICY/);
   assert.match(human.stdout, /target, transformation and plan publication remain disabled/);
   for (const target of box.targets) assert.equal(await readFile(target, 'utf8'), source);
   assert.deepEqual(await readdir(box.directory), ['plugins']);
+});
+
+test('detect human/JSON pinpoints request provenance failures and prepare keeps the installation unchanged', async t => {
+  const box = await sandbox(t);
+  for (const [text, code] of [
+    [source.replace('copy.search = url.search', 'copy.search = url.hash'), 'DEFERRED_REQUEST_SITE_URL'],
+    [source.replace('metadata?.session_id', 'metadata?.turn_id'), 'DEFERRED_REQUEST_CONTEXT'],
+    [source.replace("method: 'GET'", "method: 'POST'"), 'DEFERRED_REQUEST_GET'],
+    [source.replace('await response.json()', 'await other.json()'), 'DEFERRED_RESPONSE_BINDING'],
+    [source.replace('runtime.fetch(endpoint, options)', 'runtime.fetch.call(other, endpoint, options)'), 'DEFERRED_TRANSPORT_RECEIVER'],
+    [source + '\nconst alias = endpointFor; unknown(alias);', 'DEFERRED_ESCAPED_BINDING'],
+  ]) {
+    await writeFile(box.targets[0], text);
+    const detected = box.run(['detect', '--plugin-root', box.root, '--json']);
+    assert.equal(detected.status, 3);
+    const analysis = JSON.parse(detected.stdout).data.artifacts[0].analysis;
+    assert.equal(analysis.diagnostics[0].code, code);
+    assert.ok(text.slice(analysis.diagnostics[0].range.start, analysis.diagnostics[0].range.end).length > 0);
+    assert.deepEqual(analysis.evidence, []);
+    assert.equal(analysis.target, null);
+    const human = box.run(['detect', '--plugin-root', box.root]);
+    assert.equal(human.status, 3);
+    assert.ok(human.stdout.includes(`[${code}]`));
+    assert.equal(await readFile(box.targets[0], 'utf8'), text);
+  }
 });
 
 test('prepare publishes nothing for explicit deferred targets or all-compatible selection', async t => {
