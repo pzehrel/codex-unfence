@@ -123,6 +123,57 @@ test('partial, unknown and ambiguous deferred chains publish no plan for explici
   }
 });
 
+test('review counterexamples cannot publish plans while equivalent safe controls remain rederivable', async t => {
+  const box = await sandbox(t);
+  const declaration = "var metadata, initMetadata = once(() => { metadata = { name: 'synthetic' }; });";
+  const early = source.replace(declaration, '').replace('var initErrors =', 'function swallow(callback) { try { callback(); } catch {} }\nvar early = swallow(() => { initSiteStatus(); });\n' + declaration + '\nvar initErrors =');
+  const inline = source.slice(0, source.indexOf('async function enforce(')) + `
+    var Gate = class { policies = {siteStatus: async site => {
+      if ((await checkSite(this.runtime, site, this.backend))?.result.blocked) throw new Error('Blocked');
+    }}; };
+    var gate = new Gate;
+    gate.runtime = runtime; gate.backend = backend;
+  `;
+  const entry = '\ngate.policies.siteStatus(site);';
+  const variants = [
+    [source + '\nconst [proto] = [URL.prototype]; proto.toString = replacement;', 'DEFERRED_HOST_MUTATION'],
+    [source + '\nconst proto = URL.prototype || {}; proto.toString = replacement;', 'DEFERRED_HOST_MUTATION'],
+    [source + '\nconst proto = (0, URL.prototype); proto.toString = replacement;', 'DEFERRED_HOST_MUTATION'],
+    [early, 'DEFERRED_INITIALIZATION_ORDER'],
+    [inline + 'gate.policies = {siteStatus: async site => {}};' + entry, 'DEFERRED_POLICY_RECEIVER'],
+    [inline + 'gate.policies.siteStatus = async site => {};' + entry, 'DEFERRED_POLICY_RECEIVER'],
+    [inline + 'function overwrite(table) { table.siteStatus = async site => {}; } overwrite(gate.policies);' + entry, 'DEFERRED_POLICY_RECEIVER'],
+  ];
+  for (const [index, [text, code]] of variants.entries()) {
+    await writeFile(box.targets[0], text);
+    const detected = box.run(['detect', '--plugin-root', box.root, '--json']);
+    assert.equal(detected.status, 3);
+    const analysis = JSON.parse(detected.stdout).data.artifacts[0].analysis;
+    assert.equal(analysis.diagnostics[0].code, code);
+    assert.equal(analysis.target, null);
+    const output = join(box.directory, `refused-review-${index}`);
+    const prepared = box.run(['prepare', '--plugin-root', box.root, '--target', box.targets[0], '--output', output, '--json']);
+    assert.equal(prepared.status, 3, prepared.stdout + prepared.stderr);
+    assert.equal(JSON.parse(prepared.stdout).data, null);
+    assert.ok(!(await readdir(box.directory)).includes(`refused-review-${index}`));
+    assert.equal(await readFile(box.targets[0], 'utf8'), text);
+  }
+  for (const [index, text] of [
+    source + '\nconst [local] = [{}]; const alias = (0, local) || {}; alias.value = 1;',
+    source.replace('initialize();\nasync function transport', 'initMetadata();\ninitialize();\nasync function transport'),
+    inline + entry,
+  ].entries()) {
+    await writeFile(box.targets[0], text);
+    const output = join(box.directory, `safe-review-${index}`);
+    const prepared = box.run(['prepare', '--plugin-root', box.root, '--target', box.targets[0], '--output', output, '--json']);
+    assert.equal(prepared.status, 0, prepared.stdout + prepared.stderr);
+    const status = box.run(['status', '--plan', output, '--store', join(box.directory, 'store'), '--json']);
+    assert.equal(status.status, 0, status.stdout + status.stderr);
+    assert.equal(JSON.parse(status.stdout).data.targets[0].state, 'original');
+    assert.equal(await readFile(box.targets[0], 'utf8'), text);
+  }
+});
+
 test('prepare publishes rederivable deferred plans for either plugin and all-compatible without overwriting', async t => {
   const box = await sandbox(t);
   for (const [index, selection] of [ ['--target', box.targets[0]], ['--target', box.targets[1]], ['--all-compatible'] ].entries()) {

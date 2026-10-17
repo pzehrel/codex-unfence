@@ -68,6 +68,10 @@ function properties(node: E.Node | null | undefined, names: string[]): E.Propert
 
 interface Candidate { wrapper: Fn; generic: Fn; key: E.Identifier; consumption: E.CallExpression; owner: E.ClassExpression; patched?: boolean }
 interface Initializer { binding: Variable; declaration: E.VariableDeclarator; callback: Fn; dependencies: Initializer[] }
+interface RequestChain { fetchMethod: E.MethodDefinition; blocking: E.MethodDefinition; entry: E.MethodDefinition }
+interface ReceiverChain { instance: E.VariableDeclarator }
+const stateRoles = ['now', 'getTurnMetadata', 'cache', 'inflightRequests'] as const;
+type StateRole = typeof stateRoles[number];
 
 /** A separate finite proof; compatibility requires every stage and relevant effect gate. */
 export function analyzeDeferredStage(program: E.Program): SourceAnalysis | null {
@@ -87,13 +91,13 @@ export function analyzeDeferredStage(program: E.Program): SourceAnalysis | null 
     // hide a current-file capability escape (including an opaque host bridge).
     proof.closeRelevantEffects();
     const receiver = proof.receiver(candidate);
-    const cache = proof.cache(candidate);
-    const consumption = proof.policy(candidate);
+    const cache = proof.cache(candidate, request.chain);
+    const consumption = proof.policy(candidate, request.chain, receiver.chain);
     proof.closeRelevantEffects();
     result.evidence.push(initialization, {
       kind: 'predicate', range: range(candidate.wrapper),
       description: 'Object guards protect feature_status; the initialized agent key blocks only on strict equality to true.',
-    }, ...request, receiver, cache, consumption);
+    }, ...request.evidence, receiver.evidence, cache, consumption);
     requireStage(!candidate.patched, 'UNTRUSTED_PATCHED_SHAPE', 'Response-copy shape found without trusted operation provenance; this is not proof of tool application.', candidate.consumption.arguments[0]!);
     result.compatibility = 'compatible';
     result.target = range(candidate.consumption.arguments[0]!);
@@ -116,23 +120,27 @@ class DeferredProof {
   private readonly initializedData = new Set<Variable>();
   private readonly plainData = new Set<Variable>();
   private readonly provenMethods = new Set<Fn>();
-  private entryMethod: E.MethodDefinition | null = null;
-  private readonly stateNames = new Map<string, string>();
-  private state(name: string): string { return this.stateNames.get(name) ?? name; }
+  private readonly hostDefaults = new Set<E.Node>();
+  private readonly stateNames: Record<StateRole, string> = { now: 'now', getTurnMetadata: 'getTurnMetadata', cache: 'cache', inflightRequests: 'inflightRequests' };
+  private state(role: StateRole): string { return this.stateNames[role]; }
 
   private stateShape(owner: E.ClassExpression): void {
     const fields = owner.body.body.filter((item): item is E.PropertyDefinition => item.type === 'PropertyDefinition');
     const constructor = owner.body.body.find((item): item is E.MethodDefinition => item.type === 'MethodDefinition' && item.kind === 'constructor');
     const assignments = constructor ? statements(constructor.value) : [];
+    const clock = constructor?.value.params[0];
+    // Receiver validation later requires this exact standard default and its
+    // unchanged assignment. No arbitrary parameter defaults are exempted.
+    if (clock?.type === 'AssignmentPattern' && member(clock.right, 'now') && this.standard(clock.right.object, 'Date')) this.hostDefaults.add(clock);
     if (fields.length !== 4 || assignments.length !== 2) return;
-    for (const [index, role] of ['now', 'getTurnMetadata'].entries()) {
+    for (const [index, role] of stateRoles.slice(0, 2).entries()) {
       const statement = assignments[index];
       const assignment = statement?.type === 'ExpressionStatement' && statement.expression.type === 'AssignmentExpression' ? statement.expression : null;
-      if (assignment?.left.type === 'MemberExpression' && assignment.left.object.type === 'ThisExpression' && key(assignment.left) !== null) this.stateNames.set(role, key(assignment.left)!);
+      if (assignment?.left.type === 'MemberExpression' && assignment.left.object.type === 'ThisExpression' && key(assignment.left) !== null) this.stateNames[role] = key(assignment.left)!;
     }
-    for (const [index, role] of ['now', 'getTurnMetadata', 'cache', 'inflightRequests'].entries()) {
+    for (const [index, role] of stateRoles.entries()) {
       const field = fields[index];
-      if (field?.key.type === 'Identifier' && index >= 2) this.stateNames.set(role, field.key.name);
+      if (field?.key.type === 'Identifier' && index >= 2) this.stateNames[role] = field.key.name;
     }
   }
 
@@ -443,7 +451,9 @@ class DeferredProof {
         const factory = this.parents.get(enclosing), declaration = factory && this.parents.get(factory);
         if (call(factory) && declaration?.type === 'VariableDeclarator') {
           const caller = this.binding(declaration.id);
-          if (caller) { this.checkEarlyActivation(caller, root, seen); continue; }
+          if (caller && this.initializers.get(caller)?.callback === enclosing) {
+            this.checkEarlyActivation(caller, root, seen); continue;
+          }
         }
         if (range(this.top(enclosing)).start >= range(root).start) {
           // Deferred callbacks created after module initialization cannot be an
@@ -577,7 +587,7 @@ class DeferredProof {
     this.read(node);
   }
 
-  request(candidate: Candidate): StructuralEvidence[] {
+  request(candidate: Candidate): { evidence: StructuralEvidence[]; chain: RequestChain } {
     this.stateShape(candidate.owner);
     const method = this.parents.get(this.parents.get(candidate.consumption)!);
     this.requestNeed(method?.type === 'BlockStatement' && this.parents.get(method)?.type === 'FunctionExpression', 'RESPONSE_BINDING', 'Predicate consumption must be the direct return of the HTTP method.', candidate.consumption);
@@ -606,18 +616,18 @@ class DeferredProof {
     // tracked input or capability. The request path has no other opaque effects.
     this.matchedFunction(wrapper);
     this.matchedFunction(fetch);
-    const builder = this.requestEntry(candidate, definition, runtime!, request!);
+    const { builder, chain } = this.requestEntry(candidate, definition, runtime!, request!);
     this.requestBuilder(builder);
     this.requestReceiverEffects(candidate.owner);
-    return [
+    return { chain, evidence: [
       { kind: 'source', range: range(builder), description: 'Finite input URL proof preserves http/https and localhost filtering, normalized cache key, origin/pathname/search without fragment or credentials, initialized site-status endpoint and source, and conversation_id/turn_id metadata field provenance; constructor/accessor and actual cache/policy connection are proven by the accompanying evidence.' },
       { kind: 'transport', range: range(wrapper), description: 'Guarded runtime.fetch keeps its receiver and passes the corresponding endpoint and GET options unchanged under the runtime interface assumption.' },
       { kind: 'response', range: range(definition), description: 'The same HTTP object is checked for ok before JSON parsing; the unchanged JSON binding reaches the proven strict agent predicate.' },
-    ];
+    ] };
   }
 
   /** Only request forwarding is checked here; cache behavior and class identity are ticket 12. */
-  private requestEntry(candidate: Candidate, fetchMethod: E.MethodDefinition, runtime: E.Identifier, request: E.Identifier): Fn {
+  private requestEntry(candidate: Candidate, fetchMethod: E.MethodDefinition, runtime: E.Identifier, request: E.Identifier): { builder: Fn; chain: RequestChain } {
     const fetchName = fetchMethod.key.type === 'Identifier' ? fetchMethod.key.name : null;
     const forwards = this.nodes.filter((node): node is E.CallExpression => call(node) && node.callee.type === 'MemberExpression' && node.callee.object.type === 'ThisExpression' && key(node.callee) === fetchName && range(node).start >= range(candidate.owner).start && range(node).end <= range(candidate.owner).end);
     this.requestNeed(forwards.length === 1, 'REQUEST_CONNECTION', 'HTTP method needs one corresponding direct request forwarding call.', fetchMethod);
@@ -654,11 +664,10 @@ class DeferredProof {
     const attempt = guarded?.type === 'TryStatement' && guarded.block.body.length === 1 ? guarded.block.body[0] : null;
     const assigned = attempt?.type === 'ExpressionStatement' ? attempt.expression : null;
     this.requestNeed(entryBody.length === 5 && entry.value.async && empty && !empty.init && guarded?.type === 'TryStatement' && !guarded.finalizer && guarded.handler && !guarded.handler.param && guarded.handler.body.body.length === 1 && guarded.handler.body.body[0]?.type === 'ReturnStatement' && !guarded.handler.body.body[0].argument && assigned?.type === 'AssignmentExpression' && assigned.operator === '=' && this.same(assigned.left, empty.id) && awaited(assigned.right) === sends[0] && output && this.same(output[0]?.value, built.id) && this.same(output[1]?.value, empty.id), 'REQUEST_CONNECTION', 'Entry request construction must lead directly through the single awaited forwarding call with its existing catch-return and request/result return; unknown control flow is unproven.', entry);
-    this.entryMethod = entry;
     // Restrict request provenance here; the separate finite cache/receiver proof
     // closes result state before any complete structural evidence is exposed.
     for (const identifier of [runtime, request, blockingRuntime!, blockingRequest!, entryRuntime!, site!, backend!, metadata.id, built.id]) this.requestValue(identifier, new Set([forward, sends[0]!, built.init, metadata.init]), new Set([built.id]));
-    return builder;
+    return { builder, chain: { fetchMethod, blocking, entry } };
   }
 
   private standard(node: E.Node | null | undefined, name: string): boolean {
@@ -666,22 +675,26 @@ class DeferredProof {
   }
 
   private selfMember(node: E.Node | null | undefined, name: string): node is E.MemberExpression {
-    return member(node, this.state(name)) && node.object.type === 'ThisExpression';
+    return member(node, name) && node.object.type === 'ThisExpression';
   }
 
-  receiver(candidate: Candidate): StructuralEvidence {
+  private stateMember(node: E.Node | null | undefined, role: StateRole): node is E.MemberExpression {
+    return this.selfMember(node, this.state(role));
+  }
+
+  receiver(candidate: Candidate): { evidence: StructuralEvidence; chain: ReceiverChain } {
     const owner = candidate.owner;
     const constructor = owner.body.body.find((item): item is E.MethodDefinition => item.type === 'MethodDefinition' && item.kind === 'constructor');
     this.requestNeed(constructor && constructor.value.params.length === 2, 'CLASS_CONSTRUCTOR', 'Class needs the finite two-default constructor.', owner);
     const [clock, metadata] = constructor.value.params;
     this.requestNeed(clock?.type === 'AssignmentPattern' && clock.left.type === 'Identifier' && member(clock.right, 'now') && this.standard(clock.right.object, 'Date') && metadata?.type === 'AssignmentPattern' && metadata.left.type === 'Identifier' && metadata.right.type === 'Identifier', 'CLASS_CONSTRUCTOR', 'Constructor defaults must be standard Date.now and the local metadata accessor.', constructor);
     const body = statements(constructor.value);
-    this.requestNeed(body.length === 2 && body.every((statement, index) => statement.type === 'ExpressionStatement' && statement.expression.type === 'AssignmentExpression' && statement.expression.operator === '=' && this.selfMember(statement.expression.left, index === 0 ? 'now' : 'getTurnMetadata') && this.same(statement.expression.right, index === 0 ? clock.left : metadata.left)), 'CLASS_CONSTRUCTOR', 'Constructor must retain only the corresponding clock and metadata defaults.', constructor);
+    this.requestNeed(body.length === 2 && body.every((statement, index) => statement.type === 'ExpressionStatement' && statement.expression.type === 'AssignmentExpression' && statement.expression.operator === '=' && this.stateMember(statement.expression.left, index === 0 ? 'now' : 'getTurnMetadata') && this.same(statement.expression.right, index === 0 ? clock.left : metadata.left)), 'CLASS_CONSTRUCTOR', 'Constructor must retain only the corresponding clock and metadata defaults.', constructor);
     const accessor = this.directFunction(metadata.right, 'METADATA_ACCESSOR');
     this.metadataAccessor(accessor);
     this.matchedFunction(constructor.value);
     const fields = owner.body.body.filter((item): item is E.PropertyDefinition => item.type === 'PropertyDefinition');
-    this.requestNeed(new Set(fields.map(field => field.key.type === 'Identifier' ? field.key.name : null)).size === 4 && fields.length === 4 && fields.every((field, index) => field.key.type === 'Identifier' && field.key.name === this.state(['now', 'getTurnMetadata', 'cache', 'inflightRequests'][index]!) && (index < 2 ? !field.value : field.value?.type === 'NewExpression' && this.standard(field.value.callee, 'Map') && !field.value.arguments.length)), 'CLASS_FIELDS', 'Class state must be two empty accessor fields and two fresh standard Map fields.', owner);
+    this.requestNeed(new Set(fields.map(field => field.key.type === 'Identifier' ? field.key.name : null)).size === 4 && fields.length === 4 && fields.every((field, index) => field.key.type === 'Identifier' && field.key.name === this.state(stateRoles[index]!) && (index < 2 ? !field.value : field.value?.type === 'NewExpression' && this.standard(field.value.callee, 'Map') && !field.value.arguments.length)), 'CLASS_FIELDS', 'Class state must be two empty accessor fields and two fresh standard Map fields.', owner);
     const declaration = this.parents.get(owner);
     this.requestNeed(declaration?.type === 'VariableDeclarator' && declaration.id.type === 'Identifier' && this.parents.get(this.parents.get(declaration)!) === this.program, 'CLASS_LIFECYCLE', 'Class expression must have a module-local binding.', owner);
     const binding = this.track(declaration.id);
@@ -692,7 +705,7 @@ class DeferredProof {
     this.read(uses[0]!.identifier);
     this.track(instance.id);
     for (const reference of this.binding(instance.id)!.references) if (!reference.isWrite()) this.allowedReads.add(reference.identifier);
-    return { kind: 'receiver', range: range(owner), description: 'Finite constructor retains Date.now and the default metadata accessor; fresh standard Map fields belong to one unique local instance with direct method receivers.' };
+    return { chain: { instance }, evidence: { kind: 'receiver', range: range(owner), description: 'Finite constructor retains Date.now and the default metadata accessor; fresh standard Map fields belong to one unique local instance with direct method receivers.' } };
   }
 
   private metadataAccessor(accessor: Fn): void {
@@ -725,16 +738,16 @@ class DeferredProof {
     return methods[0]!;
   }
 
-  private selfCall(node: E.Node | null | undefined, field: string, operation: string, args: (E.Node | null | undefined)[]): node is E.CallExpression {
-    return call(node) && member(node.callee, operation) && this.selfMember(node.callee.object, field) && node.arguments.length === args.length && node.arguments.every((argument, index) => this.same(argument, args[index]));
+  private selfCall(node: E.Node | null | undefined, field: StateRole, operation: string, args: (E.Node | null | undefined)[]): node is E.CallExpression {
+    return call(node) && member(node.callee, operation) && this.stateMember(node.callee.object, field) && node.arguments.length === args.length && node.arguments.every((argument, index) => this.same(argument, args[index]));
   }
 
   private cacheKey(node: E.Node | null | undefined, request: E.Node): boolean {
     return member(node, 'cacheKey') && this.same(node.object, request);
   }
 
-  private cacheCall(node: E.Node | null | undefined, field: string, operation: string, request: E.Node): node is E.CallExpression {
-    return call(node) && member(node.callee, operation) && this.selfMember(node.callee.object, field) && node.arguments.length === 1 && this.cacheKey(node.arguments[0], request);
+  private cacheCall(node: E.Node | null | undefined, field: StateRole, operation: string, request: E.Node): node is E.CallExpression {
+    return call(node) && member(node.callee, operation) && this.stateMember(node.callee.object, field) && node.arguments.length === 1 && this.cacheKey(node.arguments[0], request);
   }
 
   private nullTest(node: E.Node | null | undefined, input: E.Node, operator: string): boolean {
@@ -746,13 +759,10 @@ class DeferredProof {
     return !!fields && this.same(wait ? awaited(fields[0]!.value) : fields[0]!.value, input) && bool(fields[1]!.value, cached);
   }
 
-  cache(candidate: Candidate): StructuralEvidence {
-    const fetch = this.parents.get(this.parents.get(this.parents.get(candidate.consumption)!)!)!;
-    const fetchMethod = this.parents.get(fetch);
-    this.requestNeed(fetchMethod?.type === 'MethodDefinition', 'CACHE_FLOW', 'HTTP method owner is missing.', candidate.owner);
-    const fetchName = this.methodName(fetchMethod);
-    const blocking = candidate.owner.body.body.find((item): item is E.MethodDefinition => item.type === 'MethodDefinition' && statements(item.value).some(statement => statement.type === 'VariableDeclaration' && call(statement.declarations[0]?.init) && this.selfMember(statement.declarations[0].init.callee, fetchName)));
-    this.requestNeed(blocking && blocking.value.async, 'CACHE_FLOW', 'Cache method must directly start the proven request.', candidate.owner);
+  cache(candidate: Candidate, chain: RequestChain): StructuralEvidence {
+    const { fetchMethod, blocking } = chain;
+    this.methodName(fetchMethod);
+    this.requestNeed(blocking.value.async, 'CACHE_FLOW', 'Cache method must directly start the proven request.', candidate.owner);
     this.methodName(blocking);
     const [, request] = this.params(blocking.value, 2, 'CACHE_FLOW');
     const body = statements(blocking.value), startup = body[0];
@@ -776,13 +786,13 @@ class DeferredProof {
     const save = call(then) && member(then.callee, 'then') && this.same(then.callee.object, pending!.id) && then.arguments.length === 1 ? then.arguments[0] : null;
     this.requestNeed(current && call(final) && final.arguments.length === 1 && save?.type === 'ArrowFunctionExpression' && !save.async && save.params.length === 1 && save.params[0]?.type === 'Identifier' && save.body.type !== 'BlockStatement', 'CACHE_RECORD', 'New inflight promise must derive from pending.then followed by finally.', body[4] ?? blocking);
     const saved = expressions(save.body), write = saved[0], fields = call(write) ? properties(write.arguments[1], ['blocked', 'timestampMs']) : null;
-    this.requestNeed(saved.length === 2 && call(write) && member(write.callee, 'set') && this.selfMember(write.callee.object, 'cache') && write.arguments.length === 2 && this.cacheKey(write.arguments[0], request!) && fields && this.same(fields[0]?.value, save.params[0]) && call(fields[1]?.value) && this.selfMember(fields[1].value.callee, 'now') && !fields[1].value.arguments.length && this.same(saved[1], save.params[0]), 'CACHE_RECORD', 'New boolean and completion clock must be recorded under the same cache key, then returned unchanged.', save);
+    this.requestNeed(saved.length === 2 && call(write) && member(write.callee, 'set') && this.stateMember(write.callee.object, 'cache') && write.arguments.length === 2 && this.cacheKey(write.arguments[0], request!) && fields && this.same(fields[0]?.value, save.params[0]) && call(fields[1]?.value) && this.stateMember(fields[1].value.callee, 'now') && !fields[1].value.arguments.length && this.same(saved[1], save.params[0]), 'CACHE_RECORD', 'New boolean and completion clock must be recorded under the same cache key, then returned unchanged.', save);
     const cleanup = final.arguments[0];
     this.requestNeed(cleanup?.type === 'ArrowFunctionExpression' && !cleanup.async && !cleanup.params.length && cleanup.body.type === 'BlockStatement' && cleanup.body.body.length === 1 && cleanup.body.body[0]?.type === 'ExpressionStatement', 'CACHE_CLEANUP', 'Finally must contain one synchronous identity-checked inflight cleanup.', final);
     const clear = cleanup.body.body[0].expression;
     this.requestNeed(clear.type === 'LogicalExpression' && clear.operator === '&&' && clear.left.type === 'BinaryExpression' && clear.left.operator === '===' && this.cacheCall(clear.left.left, 'inflightRequests', 'get', request!) && this.same(clear.left.right, current.id) && this.cacheCall(clear.right, 'inflightRequests', 'delete', request!), 'CACHE_CLEANUP', 'Cleanup may delete only the same current inflight promise.', clear);
     const output = returned(body[5]), sequence = output ? expressions(output) : [], store = sequence[0];
-    this.requestNeed(sequence.length === 2 && call(store) && member(store.callee, 'set') && this.selfMember(store.callee.object, 'inflightRequests') && store.arguments.length === 2 && this.cacheKey(store.arguments[0], request!) && this.same(store.arguments[1], current.id) && this.blockedResult(sequence[1], current.id, false, true), 'CACHE_INFLIGHT', 'New inflight must be stored before awaiting the same promise and returning cached false.', body[5] ?? blocking);
+    this.requestNeed(sequence.length === 2 && call(store) && member(store.callee, 'set') && this.stateMember(store.callee.object, 'inflightRequests') && store.arguments.length === 2 && this.cacheKey(store.arguments[0], request!) && this.same(store.arguments[1], current.id) && this.blockedResult(sequence[1], current.id, false, true), 'CACHE_INFLIGHT', 'New inflight must be stored before awaiting the same promise and returning cached false.', body[5] ?? blocking);
     this.cached(cacheMethod);
     this.matchedFunction(blocking.value);
     return { kind: 'cache', range: range(blocking), description: 'Every call starts a new request before cache and inflight lookup; TTL is 86400000 ms, completion records boolean/time, cleanup deletes only the same current promise, and discarded request rejections are handled before old cache/promise reuse.' };
@@ -793,7 +803,7 @@ class DeferredProof {
     const [cacheKey] = this.params(method.value, 1, 'CACHE_TTL'), body = statements(method.value), entry = declared(body[0]), value = returned(body[1]);
     this.requestNeed(body.length === 2 && entry && this.selfCall(entry.init, 'cache', 'get', [cacheKey]) && value?.type === 'ConditionalExpression' && value.test.type === 'LogicalExpression' && value.test.operator === '||' && this.nullTest(value.test.left, entry.id, '=='), 'CACHE_TTL', 'Cache must read its key and treat missing or expired entries as misses.', method);
     const expired = value.test.right;
-    this.requestNeed(expired.type === 'BinaryExpression' && expired.operator === '>=' && expired.left.type === 'BinaryExpression' && expired.left.operator === '-' && call(expired.left.left) && this.selfMember(expired.left.left.callee, 'now') && !expired.left.left.arguments.length && member(expired.left.right, 'timestampMs') && this.same(expired.left.right.object, entry.id) && expired.right.type === 'Identifier', 'CACHE_TTL', 'Expiry must compare current clock minus the corresponding completion timestamp against TTL inclusively.', expired);
+    this.requestNeed(expired.type === 'BinaryExpression' && expired.operator === '>=' && expired.left.type === 'BinaryExpression' && expired.left.operator === '-' && call(expired.left.left) && this.stateMember(expired.left.left.callee, 'now') && !expired.left.left.arguments.length && member(expired.left.right, 'timestampMs') && this.same(expired.left.right.object, entry.id) && expired.right.type === 'Identifier', 'CACHE_TTL', 'Expiry must compare current clock minus the corresponding completion timestamp against TTL inclusively.', expired);
     const ttl = this.binding(expired.right), declaration = ttl?.defs[0]?.node;
     const numeric = (node: E.Node | null | undefined): number | null => {
       if (node?.type === 'Literal' && typeof node.value === 'number' && Number.isFinite(node.value)) return node.value;
@@ -808,16 +818,14 @@ class DeferredProof {
     this.matchedFunction(method.value);
   }
 
-  policy(candidate: Candidate): StructuralEvidence {
-    const declaration = this.parents.get(candidate.owner) as E.VariableDeclarator;
-    const construct = this.parents.get(this.binding(declaration.id)!.references.find(reference => !reference.isWrite())!.identifier)!;
-    const instance = this.parents.get(construct) as E.VariableDeclarator;
+  policy(candidate: Candidate, chain: RequestChain, receiver: ReceiverChain): StructuralEvidence {
+    const { instance } = receiver;
     const uses = this.binding(instance.id)!.references.filter(reference => !reference.isWrite());
     this.requestNeed(uses.length === 1, 'POLICY_CONNECTION', 'Unique instance must have one direct checkUrl forwarding entry.', instance);
     const access = this.parents.get(uses[0]!.identifier), invoke = access && this.parents.get(access);
     this.requestNeed(access?.type === 'MemberExpression' && key(access) !== null && call(invoke), 'POLICY_CONNECTION', 'Instance entry must be a direct method invocation.', instance);
-    const entry = this.method(candidate.owner, key(access)!);
-    this.requestNeed(entry === this.entryMethod, 'POLICY_CONNECTION', 'Policy must consume the exact request-building checkUrl entry, not another method.', invoke);
+    const { entry } = chain;
+    this.requestNeed(key(access) === this.methodName(entry), 'POLICY_CONNECTION', 'Policy must consume the exact request-building checkUrl entry, not another method.', invoke);
     const bridgeReturn = this.parents.get(invoke), bridgeBlock = bridgeReturn && this.parents.get(bridgeReturn), bridge = bridgeBlock && this.parents.get(bridgeBlock);
     this.requestNeed(bridge && fn(bridge) && bridge.type === 'FunctionDeclaration' && bridge.id && !bridge.async && !bridge.generator && statements(bridge).length === 1 && bridgeReturn?.type === 'ReturnStatement' && bridgeReturn.argument === invoke, 'POLICY_CONNECTION', 'Instance checkUrl result must be returned unchanged by one local bridge.', invoke);
     const inputs = this.params(bridge, 3, 'POLICY_CONNECTION');
@@ -838,6 +846,7 @@ class DeferredProof {
       this.requestNeed(body.length === 1 && deny?.type === 'IfStatement' && !deny.alternate && member(test, 'blocked') && test.object.type === 'MemberExpression' && test.object.optional && key(test.object) === 'result' && awaited(test.object.object) === consumption && this.throws(deny.consequent), 'POLICY_BLOCKED', 'Inline policy must deny on the awaited bridge result optional result.blocked without replacing that result.', consumer);
       const property = this.parents.get(consumer), object = property && this.parents.get(property), field = object && this.parents.get(object);
       this.requestNeed(property?.type === 'Property' && property.value === consumer && !property.computed && property.kind === 'init' && object?.type === 'ObjectExpression' && field?.type === 'PropertyDefinition' && !field.static && !field.computed && field.value === object, 'POLICY_CONNECTION', 'Inline consumer must be installed directly in an instance policy table.', consumer);
+      this.inlinePolicyReceiver(consumer, property, object, field, runtime, backend);
     } else {
       const parameters = this.params(consumer, 3, 'POLICY_CONNECTION');
       this.requestNeed(consumption.arguments.every((argument, index) => this.same(argument, parameters[index])), 'POLICY_CONNECTION', 'Policy invocation must retain runtime/site/backend input provenance.', consumption);
@@ -851,6 +860,40 @@ class DeferredProof {
     for (const item of candidate.owner.body.body) if (item.type === 'MethodDefinition' && !this.provenMethods.has(item.value)) this.unusedThrowHelper(item, entry);
     this.requestNeed(candidate.owner.body.body.every(item => item.type !== 'MethodDefinition' || this.provenMethods.has(item.value)), 'CLASS_METHOD', 'Every class method must have a finite proven body; unknown methods can affect state or receivers.', candidate.owner);
     return { kind: 'consumption', range: range(consumer), description: 'The unique instance checkUrl entry returns request/result through the direct bridge to actual policy result.blocked denial; its existing catch returns undefined on request failure. An isolated unused throw helper is not consumption evidence.' };
+  }
+
+  /** The inline shape has a second receiver: close its class, instance and table. */
+  private inlinePolicyReceiver(consumer: Fn, property: E.Property, object: E.ObjectExpression, field: E.PropertyDefinition, runtime: E.MemberExpression, backend: E.MemberExpression): void {
+    const name = (node: E.Node): string | null => node.type === 'Identifier' ? node.name : node.type === 'Literal' && typeof node.value === 'string' ? node.value : null;
+    const tableName = name(field.key), callbackName = name(property.key);
+    const classBody = this.parents.get(field), owner = classBody && this.parents.get(classBody);
+    this.requestNeed(tableName && callbackName && !['__proto__', 'constructor', 'prototype'].includes(tableName) && !['__proto__', 'constructor', 'prototype'].includes(callbackName) && object.properties.length === 1 && !property.method && owner?.type === 'ClassExpression' && !owner.superClass && owner.body.body.length === 1 && owner.body.body[0] === field, 'POLICY_RECEIVER', 'Inline policy owner must be a finite class with only its fresh single-callback policy table; inheritance and additional effects are unproven.', field);
+    const declaration = this.parents.get(owner);
+    this.requestNeed(declaration?.type === 'VariableDeclarator' && declaration.id.type === 'Identifier' && this.parents.get(this.parents.get(declaration)!) === this.program, 'POLICY_LIFECYCLE', 'Inline policy class needs a module-local binding and unique constructed receiver.', owner);
+    const binding = this.track(declaration.id), uses = binding.references.filter(reference => !reference.isWrite());
+    this.requestNeed(uses.length === 1, 'POLICY_LIFECYCLE', 'Inline policy class needs exactly one direct construction; an uninstantiated callback is not actual consumption.', owner);
+    const construct = this.parents.get(uses[0]!.identifier), instance = construct && this.parents.get(construct);
+    this.requestNeed(construct?.type === 'NewExpression' && construct.callee === uses[0]!.identifier && !construct.arguments.length && instance?.type === 'VariableDeclarator' && instance.id.type === 'Identifier' && this.parents.get(this.parents.get(instance)!) === this.program && range(construct).start > range(owner).end, 'POLICY_LIFECYCLE', 'Inline policy receiver must be constructed locally after class establishment, without arguments or aliases.', owner);
+    this.read(uses[0]!.identifier);
+    const receiver = this.track(instance.id);
+    let entries = 0;
+    for (const reference of receiver.references) {
+      if (reference.isWrite()) continue; // The final binding gate rejects reassignment.
+      const access = this.parents.get(reference.identifier), use = access && this.parents.get(access);
+      this.requestNeed(access?.type === 'MemberExpression' && access.object === reference.identifier && !access.optional && key(access) !== null && range(access).start > range(construct).end, 'POLICY_RECEIVER', 'Inline policy receiver alias, escape or dynamic access is unproven.', reference.identifier);
+      if (key(access) === tableName) {
+        const invoke = use && this.parents.get(use);
+        this.requestNeed(use?.type === 'MemberExpression' && use.object === access && !use.optional && key(use) === callbackName && call(invoke) && invoke.callee === use && invoke.arguments.length === consumer.params.length, 'POLICY_RECEIVER', 'Actual inline table and callback must only be used for direct entry calls; replacement, extraction and table escape are unproven.', access);
+        entries++;
+      } else {
+        this.requestNeed([key(runtime), key(backend)].includes(key(access)) && use?.type === 'AssignmentExpression' && use.operator === '=' && use.left === access && this.parents.get(use)?.type === 'ExpressionStatement' && this.parents.get(this.parents.get(use)!) === this.program, 'POLICY_RECEIVER', 'Outer receiver may only establish its runtime/backend fields directly; other field access or mutation is unproven.', access);
+      }
+      this.allowedReads.add(reference.identifier);
+    }
+    this.requestNeed(entries > 0, 'POLICY_LIFECYCLE', 'Inline policy table needs a direct actual entry call; an unused table is not consumption evidence.', instance);
+    walk(owner, node => {
+      if (node.type === 'ThisExpression') this.requestNeed(node === runtime.object || node === backend.object, 'POLICY_RECEIVER', 'Inline lexical receiver escapes its proven runtime/backend reads.', node);
+    });
   }
 
   private unusedThrowHelper(method: E.MethodDefinition, entry: E.MethodDefinition): void {
@@ -1001,9 +1044,31 @@ class DeferredProof {
     const capabilities = new Set(['Object', 'Function', 'Set', 'TextEncoder', 'Error', 'URL', 'URLSearchParams', 'String', 'Map', 'Date', 'Promise', 'JSON', 'Array']);
     const aliases = new Set<Variable>();
     const codeGenerators = new Set<Variable>();
-    const generatesCode = (node: E.Node | null | undefined): boolean => node?.type === 'Identifier' && (this.standard(node, 'Function') || this.standard(node, 'eval') || codeGenerators.has(this.binding(node)!));
+    // These wrappers can carry a value without changing its identity. Treat all
+    // alternatives as possible; unsupported coercions/calls are not proof of a
+    // capability becoming unrelated data.
+    const carried = (node: E.Node, classify: (node: E.Node | null | undefined) => boolean): boolean => {
+      if (node.type === 'LogicalExpression') return classify(node.left) || classify(node.right);
+      if (node.type === 'SequenceExpression') return classify(node.expressions.at(-1));
+      if (node.type === 'ConditionalExpression') return classify(node.consequent) || classify(node.alternate);
+      if (node.type === 'AssignmentExpression' || node.type === 'AssignmentPattern') return classify(node.right);
+      if (node.type === 'AwaitExpression' || node.type === 'SpreadElement' || node.type === 'RestElement') return classify(node.argument);
+      if (node.type === 'ChainExpression') return classify(node.expression);
+      return false;
+    };
+    const generatesCode = (node: E.Node | null | undefined): boolean => {
+      if (!node) return false;
+      if (node.type === 'Identifier') return this.standard(node, 'Function') || this.standard(node, 'eval') || codeGenerators.has(this.binding(node)!);
+      if (node.type === 'MemberExpression') {
+        if (key(node) === 'constructor' && host(node.object)) return true;
+        if (globalObject(node.object) || host(node.object)) return key(node) === 'Function' || key(node) === 'eval' || key(node) === null;
+      }
+      if (node.type === 'ArrayExpression') return node.elements.some(item => generatesCode(item));
+      if (node.type === 'ObjectExpression') return node.properties.some(item => generatesCode(item.type === 'Property' ? item.value : item.argument));
+      return carried(node, generatesCode);
+    };
     const globalAliases = new Set<Variable>();
-    const globalObject = (node: E.Node | null | undefined): boolean => node?.type === 'Identifier' && (!this.binding(node) && ['globalThis', 'global'].includes(node.name) || globalAliases.has(this.binding(node)!)) || node?.type === 'ConditionalExpression' && (globalObject(node.consequent) || globalObject(node.alternate));
+    const globalObject = (node: E.Node | null | undefined): boolean => !!node && (node.type === 'Identifier' && (!this.binding(node) && ['globalThis', 'global'].includes(node.name) || globalAliases.has(this.binding(node)!)) || carried(node, globalObject));
     const finiteKeys = (node: E.Node, seen = new Set<Variable>()): string[] | null => {
       if (node.type === 'Identifier') {
         const binding = this.binding(node), declaration = binding?.defs[0]?.node;
@@ -1028,7 +1093,7 @@ class DeferredProof {
       if (node.type === 'ConditionalExpression') return host(node.consequent) || globalObject(node.consequent) || host(node.alternate) || globalObject(node.alternate);
       if (node.type === 'ArrayExpression') return node.elements.some(item => item && (host(item) || globalObject(item)));
       if (node.type === 'ObjectExpression') return node.properties.some(item => item.type === 'Property' ? host(item.value) || globalObject(item.value) : host(item.argument) || globalObject(item.argument));
-      return false;
+      return carried(node, value => host(value) || globalObject(value));
     };
     let changed = true;
     while (changed) {
@@ -1037,17 +1102,32 @@ class DeferredProof {
         const left = node.type === 'VariableDeclarator' ? node.id : node.type === 'AssignmentExpression' ? node.left : null;
         const right = node.type === 'VariableDeclarator' ? node.init : node.type === 'AssignmentExpression' ? node.right : null;
         if (!left || !right) continue;
-        const targets = left.type === 'Identifier' ? [left] : left.type === 'ObjectPattern' ? left.properties.flatMap(item => item.type === 'Property' && item.value.type === 'Identifier' ? [item.value] : []) : [];
+        const identifiers = (pattern: E.Node): E.Identifier[] => {
+          if (pattern.type === 'Identifier') return [pattern];
+          if (pattern.type === 'ArrayPattern') return pattern.elements.flatMap(item => item ? identifiers(item) : []);
+          if (pattern.type === 'ObjectPattern') return pattern.properties.flatMap(item => identifiers(item.type === 'Property' ? item.value : item.argument));
+          if (pattern.type === 'AssignmentPattern') return identifiers(pattern.left);
+          if (pattern.type === 'RestElement') return identifiers(pattern.argument);
+          return [];
+        };
+        const targets = identifiers(left);
         for (const target of targets) {
-          const binding = this.binding(target);
-          if (binding && generatesCode(right) && !codeGenerators.has(binding)) { codeGenerators.add(binding); changed = true; }
-          const globalDestructure = globalObject(right) && left.type === 'ObjectPattern' && left.properties.some(item => item.type === 'Property' && item.value === target && !item.computed && capabilities.has(item.key.type === 'Identifier' ? item.key.name : item.key.type === 'Literal' ? String(item.key.value) : ''));
-          if (binding && (host(right) && !globalObject(right) || globalDestructure) && !aliases.has(binding)) { aliases.add(binding); changed = true; }
-          if (binding && globalObject(right) && !globalAliases.has(binding)) { globalAliases.add(binding); changed = true; }
+          const binding = this.binding(target), values: E.Node[] = [right];
+          let ancestor: E.Node | undefined = target;
+          while (ancestor && ancestor !== left) {
+            ancestor = this.parents.get(ancestor);
+            if (ancestor?.type === 'AssignmentPattern') values.push(ancestor.right);
+          }
+          const globalDestructure = left.type !== 'Identifier' && values.some(globalObject);
+          if (binding && (values.some(generatesCode) || globalDestructure) && !codeGenerators.has(binding)) { codeGenerators.add(binding); changed = true; }
+          if (binding && (values.some(value => host(value) && !globalObject(value)) || globalDestructure) && !aliases.has(binding)) { aliases.add(binding); changed = true; }
+          if (binding && values.some(globalObject) && !globalAliases.has(binding)) { globalAliases.add(binding); changed = true; }
         }
       }
     }
     for (const node of this.nodes) {
+      const unsupportedTransfer = node.type === 'AssignmentPattern' ? node.right : node.type === 'ForOfStatement' || node.type === 'ForInStatement' ? node.right : node.type === 'ThrowStatement' || node.type === 'YieldExpression' ? node.argument : null;
+      requireStage(this.hostDefaults.has(node) || !host(unsupportedTransfer) && !globalObject(unsupportedTransfer), 'DEFERRED_HOST_MUTATION', 'Relevant capability propagation through defaults, iteration, exceptions or yield is outside the finite host proof.', node);
       if (node.type === 'CallExpression' || node.type === 'NewExpression') {
         const invoked = node.callee.type === 'SequenceExpression' ? node.callee.expressions.at(-1) : node.callee;
         requireStage(!generatesCode(invoked), 'DEFERRED_DYNAMIC_SCOPE', 'Dynamic code generation cannot preserve relevant standard capabilities.', node);
@@ -1071,6 +1151,11 @@ class DeferredProof {
       if (node.type === 'TaggedTemplateExpression') requireStage(!node.quasi.expressions.some(item => host(item) || globalObject(item)), 'DEFERRED_HOST_MUTATION', 'Relevant capability escapes to a tagged template call.', node);
       if (node.type === 'NewExpression') for (const argument of node.arguments) requireStage(!host(argument) && !globalObject(argument), 'DEFERRED_HOST_MUTATION', 'Relevant standard capability escapes to an unknown constructor.', node);
       if (call(node)) {
+        if (node.callee.type === 'MemberExpression' && host(node.callee.object)) {
+          const operation = key(node.callee);
+          const directStandard = node.callee.object.type === 'Identifier' && !this.binding(node.callee.object) && capabilities.has(node.callee.object.name);
+          requireStage(directStandard && operation !== null && !['__defineGetter__', '__defineSetter__'].includes(operation), 'DEFERRED_HOST_MUTATION', 'Calls through a relevant capability alias, prototype or dynamic method are outside the finite host proof.', node);
+        }
         for (const [index, argument] of node.arguments.entries()) if (host(argument) || globalObject(argument)) {
           const target = this.definition(node.callee), parameter = target?.params[index];
           const reads = parameter?.type === 'Identifier' ? this.binding(parameter)?.references : null;

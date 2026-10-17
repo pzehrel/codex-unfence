@@ -426,17 +426,122 @@ test('proves an inline awaited policy callback and refuses an unused helper as i
         if ((await checkSite(this.runtime, site, this.backend))?.result.blocked) throw new Error('Site status blocked');
       }};
     };`;
-  assert.equal(analyzeSource(inline).evidence.length, 8, JSON.stringify(analyzeSource(inline).diagnostics));
+  // Preserve the original accepted literal-only input as an explicit regression:
+  // no outer instance or entry exists, so this no longer proves actual use.
+  const unusedInline = transformSource(inline);
+  assert.equal(unusedInline.analysis.diagnostics[0].code, 'DEFERRED_POLICY_LIFECYCLE');
+  assert.equal(unusedInline.analysis.compatibility, 'incompatible');
+  assert.equal(unusedInline.transformation, null);
+  const liveInline = inline + '\nvar gate = new Gate; gate.runtime = runtime; gate.backend = backend; gate.policies.siteStatus(site);';
+  assert.equal(analyzeSource(liveInline).evidence.length, 8, JSON.stringify(analyzeSource(liveInline).diagnostics));
   const helper = 'async throwIfBlocksUrl(runtime, site, backend) { let result = await this.checkUrl(runtime, site, backend); if (result?.result.blocked) throw new Error("blocked"); }';
-  const withHelper = inline.replace('  now;\n  getTurnMetadata;', `  ${helper}\n  now;\n  getTurnMetadata;`);
+  const withHelper = liveInline.replace('  now;\n  getTurnMetadata;', `  ${helper}\n  now;\n  getTurnMetadata;`);
   assert.equal(analyzeSource(withHelper).evidence.length, 8, JSON.stringify(analyzeSource(withHelper).diagnostics));
   assert.deepEqual(analyzeSource(withHelper.slice(0, withHelper.indexOf('var Gate'))).evidence, []);
   assert.deepEqual(analyzeSource(withHelper.replace('this.checkUrl(runtime, site, backend)', 'this.cache.clear()')).evidence, []);
   for (const changed of [
-    inline.replace('?.result.blocked', '?.result.cached'),
-    inline.replace('await checkSite', 'checkSite'),
-    inline.replace('this.runtime, site, this.backend', 'this.runtime, "fixed", this.backend'),
+    liveInline.replace('?.result.blocked', '?.result.cached'),
+    liveInline.replace('await checkSite', 'checkSite'),
+    liveInline.replace('this.runtime, site, this.backend', 'this.runtime, "fixed", this.backend'),
   ]) assert.deepEqual(analyzeSource(changed).evidence, []);
+});
+
+test('rejects replaced or escaped inline policy tables while preserving the live inline entry', async () => {
+  const inline = source.slice(0, source.indexOf('async function enforce(')) + `
+    var Gate = class {
+      policies = {siteStatus: async site => {
+        if ((await checkSite(this.runtime, site, this.backend))?.result.blocked) throw new Error('Blocked');
+      }};
+    };
+    var gate = new Gate;
+    gate.runtime = {turn: {}, fetch(endpoint) { globalThis.requestCount++; return Promise.resolve({ok: true, json: async () => ({feature_status: {agent: true}})}); }};
+    gate.backend = null;
+  `;
+  const entry = '\nglobalThis.finished = gate.policies.siteStatus("https://inline.test/");';
+  const run = async text => {
+    const context = { URL, basename: value => value, requestCount: 0 };
+    runInNewContext(text.replace("import { basename } from 'node:path';", ''), context);
+    let error;
+    try { await context.finished; } catch (caught) { error = caught; }
+    return {error, requests: context.requestCount};
+  };
+  const safe = inline + entry, original = await run(safe);
+  assert.match(String(original.error), /Blocked/);
+  assert.equal(original.requests, 1);
+  const transformed = transformSource(safe);
+  assert.equal(transformed.analysis.compatibility, 'compatible', JSON.stringify(transformed.analysis.diagnostics));
+  const patched = await run(transformed.transformation.patchedSource);
+  assert.equal(patched.error, undefined);
+  assert.equal(patched.requests, 1);
+  for (const mutation of [
+    'gate.policies = {siteStatus: async site => {}};',
+    'gate.policies.siteStatus = async site => {};',
+    'function overwrite(table) { table.siteStatus = async site => {}; } overwrite(gate.policies);',
+  ]) {
+    const text = inline + mutation + entry, observed = await run(text);
+    assert.equal(observed.error, undefined);
+    assert.equal(observed.requests, 0);
+    const result = transformSource(text);
+    assert.equal(result.analysis.compatibility, 'incompatible', mutation);
+    assert.equal(result.analysis.diagnostics[0].code, 'DEFERRED_POLICY_RECEIVER', mutation);
+    assert.equal(result.analysis.target, null);
+    assert.equal(result.transformation, null);
+  }
+});
+
+test('closes inline outer receiver, table and callback aliases while retaining renamed direct entries', () => {
+  const inline = source.slice(0, source.indexOf('async function enforce(')) + `
+    var Gate = class { policies = {siteStatus: async site => {
+      if ((await checkSite(this.runtime, site, this.backend))?.result.blocked) throw new Error('Blocked');
+    }}; };
+    var gate = new Gate;
+    gate.runtime = runtime; gate.backend = backend;
+  `;
+  const entry = '\ngate.policies.siteStatus(site);';
+  let renamed = inline + entry;
+  for (const [before, after] of Object.entries({Gate: 'Outer0', gate: 'outer0', policies: 'rules0', siteStatus: 'deny0', runtime: 'runtime0', backend: 'backend0'})) renamed = renamed.replace(new RegExp(`\\b${before}\\b`, 'g'), after);
+  renamed = renamed.replaceAll('/backend0-api', '/backend-api');
+  assert.equal(analyzeSource(renamed).compatibility, 'compatible', JSON.stringify(analyzeSource(renamed).diagnostics));
+  assert.equal(analyzeSource(inline + '\nother.policies = {}; unknown(other);' + entry).compatibility, 'compatible');
+  for (const mutation of [
+    'const alias = gate; alias.policies = {};',
+    'const {policies: alias} = gate; unknown(alias);',
+    'const [alias] = [gate.policies]; unknown(alias);',
+    'const alias = (0, gate.policies); unknown(alias);',
+    'const alias = gate.policies.siteStatus; alias(site);',
+    'gate.policies.siteStatus.call(other, site);',
+    'gate.policies[dynamicKey] = replacement;',
+    'gate[dynamicKey] = replacement;',
+    'Reflect.set(gate.policies, "siteStatus", replacement);',
+    'Object.setPrototypeOf(gate, other);',
+    'delete gate.policies.siteStatus;',
+    'unknown(() => gate.policies);',
+    'export {gate};',
+    'Gate.prototype.policies = {};',
+    'class Child extends Gate {}',
+    'var second = new Gate;',
+    'gate = other;',
+  ]) {
+    const result = transformSource(inline + mutation + entry);
+    assert.equal(result.analysis.compatibility, 'incompatible', mutation);
+    assert.match(result.analysis.diagnostics[0].code, /^DEFERRED_(POLICY_(RECEIVER|LIFECYCLE)|REASSIGNED_BINDING)$/, mutation);
+    assert.equal(result.transformation, null);
+  }
+  for (const changed of [
+    inline + entry.replace('siteStatus(site)', 'siteStatus.call(other, site)'),
+    inline + entry.replace('.siteStatus', '[dynamicKey]'),
+    inline + entry.replace('gate.policies', 'gate?.policies'),
+    inline.replace('class { policies', 'class extends Other { policies') + entry,
+    inline.replace('policies =', 'constructor() { this.policies = {}; } policies =') + entry,
+    inline.replace('policies =', 'runtime = unknown(this); policies =') + entry,
+    inline.replace('new Gate', 'new Gate(argument)') + entry,
+    inline,
+  ]) {
+    const result = transformSource(changed);
+    assert.equal(result.analysis.compatibility, 'incompatible');
+    assert.match(result.analysis.diagnostics[0].code, /^DEFERRED_POLICY_(RECEIVER|LIFECYCLE)$/);
+    assert.equal(result.transformation, null);
+  }
 });
 
 test('rejects a policy bridge redirected to an unrelated three-input method with five statements', () => {
@@ -457,6 +562,65 @@ test('rejects relevant standard capability escape through aggregate containers a
     const result = analyzeSource(source + '\n' + extra);
     assert.deepEqual(result.evidence, [], extra);
     assert.equal(result.diagnostics[0].code, 'DEFERRED_HOST_MUTATION', extra);
+  }
+});
+
+test('rejects host aliases propagated through destructuring, logical and sequence values', async () => {
+  const extra = '\nconst [proto] = [URL.prototype]; proto.toString = function() { return "https://attacker.invalid/"; };';
+  // Synthetic execution demonstrates the endpoint violation without mutating the
+  // process URL prototype. The analyzer must refuse this visible host change.
+  class PrivateURL extends URL {}
+  const context = { URL: PrivateURL, basename: value => value };
+  runInNewContext((source + extra).replace("import { basename } from 'node:path';", '') + '\nglobalThis.check = checkSite;', context);
+  const endpoints = [];
+  await context.check({turn: {}, fetch(endpoint) { endpoints.push(endpoint); return Promise.resolve({ok: true, json: async () => ({feature_status: {agent: true}})}); }}, 'https://original.test/', null);
+  assert.deepEqual(endpoints, ['https://attacker.invalid/']);
+  const result = transformSource(source + extra);
+  assert.equal(result.analysis.compatibility, 'incompatible');
+  assert.equal(result.analysis.diagnostics[0].code, 'DEFERRED_HOST_MUTATION');
+  assert.equal(result.analysis.target, null);
+  assert.equal(result.transformation, null);
+});
+
+test('rejects wrapped host and dynamic-code values without rejecting unrelated wrapped values', () => {
+  const safe = source + '\nconst [local] = [{nested: {}}]; const alias = (0, local.nested) || {}; alias.value = 1; unknown(alias);';
+  assert.equal(analyzeSource(safe).compatibility, 'compatible');
+  for (const extra of [
+    'const proto = URL.prototype || {}; proto.toString = replacement;',
+    'const proto = (0, URL.prototype); proto.toString = replacement;',
+    'const proto = URL.prototype && URL.prototype; proto.toString = replacement;',
+    'const proto = URL.prototype ?? {}; proto.toString = replacement;',
+    'const {nested: [proto]} = {nested: [URL.prototype]}; proto.toString = replacement;',
+    'const [...protos] = [URL.prototype]; unknown(protos);',
+    'let proto; [proto] = [URL.prototype]; proto.toString = replacement;',
+    'const [proto = URL.prototype] = []; proto.toString = replacement;',
+    'const {proto = URL.prototype} = {}; proto.toString = replacement;',
+    'const { ["URL"]: ctor } = globalThis; ctor.prototype.toString = replacement;',
+    'const [root] = [globalThis]; root.URL = replacement;',
+    'const root = (0, globalThis) || {}; root.URL = replacement;',
+    'const [root = globalThis] = []; unknown(root);',
+    'unknown((0, URL.prototype));',
+    'unknown(URL.prototype || {});',
+    'unknown({...URL.prototype});',
+    'const proto = await URL.prototype; proto.toString = replacement;',
+    'const make = (0, Function) || replacement; make("URL.prototype.toString = replacement")();',
+    'const [make] = [Function]; make("URL.prototype.toString = replacement")();',
+    'const make = globalThis.Function; make("URL.prototype.toString = replacement")();',
+    'const {["Function"]: make} = globalThis; make("URL.prototype.toString = replacement")();',
+    'const [root] = [globalThis]; root.Function("URL.prototype.toString = replacement")();',
+    'const make = Function.prototype.constructor; make("URL.prototype.toString = replacement")();',
+    'function mutate(proto = URL.prototype) { proto.toString = replacement; } mutate();',
+    'for (const proto of [URL.prototype]) { proto.toString = replacement; }',
+    'try { throw URL.prototype; } catch (proto) { proto.toString = replacement; }',
+    'function* expose() { yield URL.prototype; } unknown(expose());',
+    'const proto = URL.prototype || {}; proto.__defineGetter__("toString", replacement);',
+    'const proto = (0, URL.prototype); proto[dynamicKey](replacement);',
+  ]) {
+    const result = transformSource(source + '\n' + extra);
+    assert.equal(result.analysis.compatibility, 'incompatible', extra);
+    assert.match(result.analysis.diagnostics[0].code, /^DEFERRED_(HOST_MUTATION|DYNAMIC_SCOPE)$/, extra);
+    assert.equal(result.analysis.target, null);
+    assert.equal(result.transformation, null);
   }
 });
 
@@ -711,6 +875,26 @@ test('rejects a caught failed initialization attempt before the normal initializ
   assert.equal(result.compatibility, 'incompatible');
   assert.deepEqual(result.evidence, []);
   assert.equal(result.diagnostics[0].code, 'DEFERRED_INITIALIZATION_ORDER');
+});
+
+test('rejects premature once activation inside an unknown callback factory even when failure is swallowed', async () => {
+  const declaration = "var metadata, initMetadata = once(() => { metadata = { name: 'synthetic' }; });";
+  const early = 'function swallow(callback) { try { callback(); } catch {} }\nvar early = swallow(() => { initSiteStatus(); });\n';
+  const text = source.replace(declaration, '').replace('var initErrors =', early + declaration + '\nvar initErrors =');
+  const box = fixtureRuntime(text);
+  await assert.rejects(box.check('https://original.test/'), /Invalid URL/);
+  assert.equal(box.requests.length, 0);
+  const result = transformSource(text);
+  assert.equal(result.analysis.compatibility, 'incompatible');
+  assert.equal(result.analysis.diagnostics[0].code, 'DEFERRED_INITIALIZATION_ORDER');
+  assert.equal(result.analysis.target, null);
+  assert.equal(result.transformation, null);
+});
+
+test('permits unknown callback creation after normal initialization and unrelated earlier callback work', () => {
+  const after = source.replace('initialize();\nasync function transport', 'initialize();\nvar later = unknown(() => { initSiteStatus(); });\nasync function transport');
+  const unrelated = source.replace('var initErrors =', 'var earlier = unknown(() => { unrelated.count++; });\nvar initErrors =');
+  for (const text of [after, unrelated]) assert.equal(analyzeSource(text).compatibility, 'compatible', JSON.stringify(analyzeSource(text).diagnostics));
 });
 
 test('rejects a once helper factory defined after the initialization call', () => {
