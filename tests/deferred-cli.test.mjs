@@ -31,8 +31,8 @@ test('detect human/JSON exposes deferred stage evidence and remaining proof obli
     assert.equal(artifact.analysis.patternVersion, 'site-status-deferred-v1');
     assert.equal(artifact.analysis.compatibility, 'incompatible');
     assert.equal(artifact.analysis.target, null);
-    assert.deepEqual(artifact.analysis.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response']);
-    assert.deepEqual(artifact.analysis.diagnostics.map(entry => entry.code), ['UNPROVEN_CACHE_POLICY', 'DEFERRED_TRANSFORM_DISABLED']);
+    assert.deepEqual(artifact.analysis.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption']);
+    assert.deepEqual(artifact.analysis.diagnostics.map(entry => entry.code), ['DEFERRED_TRANSFORM_DISABLED']);
     for (const entry of artifact.analysis.evidence) {
       assert.equal(entry.range.unit, 'utf16');
       assert.ok(source.slice(entry.range.start, entry.range.end).length > 0);
@@ -46,7 +46,10 @@ test('detect human/JSON exposes deferred stage evidence and remaining proof obli
   assert.match(human.stdout, /Evidence transport:.*receiver.*GET/);
   assert.match(human.stdout, /Evidence response:.*same HTTP.*JSON.*binding/);
   assert.doesNotMatch(human.stdout, /UNPROVEN_REQUEST_CHAIN/);
-  assert.match(human.stdout, /UNPROVEN_CACHE_POLICY/);
+  assert.match(human.stdout, /Evidence receiver:.*Date.now.*metadata/);
+  assert.match(human.stdout, /Evidence cache:.*86400000.*same current promise.*discarded/);
+  assert.match(human.stdout, /Evidence consumption:.*checkUrl.*result.blocked/);
+  assert.doesNotMatch(human.stdout, /UNPROVEN_CACHE_POLICY/);
   assert.match(human.stdout, /target, transformation and plan publication remain disabled/);
   for (const target of box.targets) assert.equal(await readFile(target, 'utf8'), source);
   assert.deepEqual(await readdir(box.directory), ['plugins']);
@@ -61,6 +64,12 @@ test('detect human/JSON pinpoints request provenance failures and prepare keeps 
     [source.replace('await response.json()', 'await other.json()'), 'DEFERRED_RESPONSE_BINDING'],
     [source.replace('runtime.fetch(endpoint, options)', 'runtime.fetch.call(other, endpoint, options)'), 'DEFERRED_TRANSPORT_RECEIVER'],
     [source + '\nconst alias = endpointFor; unknown(alias);', 'DEFERRED_ESCAPED_BINDING'],
+    [source.replace('>= ttl', '> ttl'), 'DEFERRED_CACHE_TTL'],
+    [source.replace('=== current &&', '!== current &&'), 'DEFERRED_CACHE_CLEANUP'],
+    [source.replace('pending.catch(() => {}), { blocked: cached', 'pending, { blocked: cached'), 'DEFERRED_CACHE_DISCARDED_REQUEST'],
+    [source.replace('status.result.blocked', 'status.request.blocked'), 'DEFERRED_POLICY_BLOCKED'],
+    [source.replace('return runtime.turn;', 'return other.turn;'), 'DEFERRED_METADATA_ACCESSOR'],
+    [source + '\nunknown(policy);', 'DEFERRED_REQUEST_RECEIVER'],
   ]) {
     await writeFile(box.targets[0], text);
     const detected = box.run(['detect', '--plugin-root', box.root, '--json']);

@@ -18,7 +18,7 @@ export interface AnalysisDiagnostic {
 }
 
 export interface StructuralEvidence {
-  kind: 'source' | 'transport' | 'response' | 'predicate' | 'consumption' | 'initialization';
+  kind: 'source' | 'transport' | 'response' | 'predicate' | 'consumption' | 'initialization' | 'receiver' | 'cache';
   range: SourceRange;
   description: string;
 }

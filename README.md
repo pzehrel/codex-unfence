@@ -163,7 +163,13 @@ status 对发现的待恢复冲突返回 4；否则所选目标不兼容返回 3
 
 纯源码边界 `analyzeSource(source)` 返回兼容性、证据、诊断及唯一 target；`transformSource(source)` 局部变换后重新解析。区间单位为 JavaScript UTF-16 code units，半开区间，可用于 `source.slice(start, end)`，不是 UTF-8 字节偏移。变换保留原响应及其他 feature，只改变此处 agent 消费。用户授权、企业策略、协议检查、侧栏评论模式等不在作用范围内。
 
-**真实样本边界：** 历史研究 bundle 使用 deferred initializer 中赋值的未初始化 `var`、跨 helper 的 URL 构造以及 cache/inflight 查询控制流。site-status-v1 不支持这些结构；单次文本赋值不能证明初始化顺序。本次交付未重新分析真实安装，也没有新增真实结构兼容或运行成功证据。增加模式需要新的正反证明样例与审阅。
+**延迟模式阶段证明：** `site-status-deferred-v1` 独立验证有限一次性初始化、拆分请求来源、同一 HTTP/JSON 响应、严格 agent 判定、构造器默认时钟与 metadata accessor、类/实例 receiver、缓存/inflight 及实际 policy 的 `result.blocked` 消费。detect 输出八类 UTF-16 证据；完整证明后仍返回 incompatible、target null 和 `DEFERRED_TRANSFORM_DISABLED`，不生成变换或 prepare 方案。新模式方案支持尚未启用；旧 `site-status-v1` 与五项方案证据契约保持原样。
+
+该证明信任标准宿主 URL、Map、Date、Promise、JSON 等内建能力、约定 runtime.fetch/response.json 接口及 Node 标准模块按约定工作，不递归审计所有依赖。当前文件中可能影响相关链的修改、反射、原型/别名写入及未知逃逸仍须拒绝，外围代码位置不构成无关性证明。相关类只接受唯一直接构造的本地实例、已证明的方法和状态字段；继承覆盖、方法借用/提取和未知接收者拒绝。
+
+**缓存与运行边界：** 每次调用先启动新请求，再查询旧缓存或旧 inflight promise；命中时为丢弃的新请求处理拒绝。新结果按完成时钟记录，24 小时到期，仅清理同一 inflight promise。修改磁盘副本不会立即清除已缓存的禁止结果，也不证明运行中模块已经重载。真实宿主加载、完整性接受、缓存清除和网站操作继续为 `not-verified`。
+
+**指定真实样本仍阻塞：** 两份 `26.1013.31256` 实际工件都存在 `globalThis` 经本地 handle 存储暴露给不透明 Wasm/可选回调的未解决影响路径，detect 保留 `DEFERRED_HOST_MUTATION`。没有为该桥接扩展信任或添加白名单；合成完整证明不能替代真实工件静态验收。真实源码仅作文本读取与解析，从不执行或 import。
 
 ## 开发与验证
 

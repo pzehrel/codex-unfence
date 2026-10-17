@@ -23,8 +23,12 @@ Usage:
 Default root: ~/.codex/plugins/cache/openai-bundled
 Read-only discovery and finite AST structural proof are available.
 Only one proven site-status source/response/agent/blocking chain is compatible.
-Unsupported patterns and ambiguity are rejected. Deferred initialization, strict-agent and
-request/HTTP/JSON stages report evidence only; cache/policy proof and new-pattern plans remain disabled.
+Unsupported patterns and ambiguity are rejected. Complete finite deferred initialization,
+request/response, receiver, cache/inflight and actual policy proofs report evidence only.
+Deferred targets, transforms and new-pattern plans remain disabled.
+Standard host capabilities, runtime.fetch/JSON and Node standard modules are trusted interfaces;
+current-file relevant mutation or unknown escape still rejects. Runtime remains not-verified.
+Changing disk source does not immediately clear an already cached blocked result.
 prepare requires explicit selection and creates a review plan without changing plugins.
 Exact paths come from detect. --all-compatible filters compatible artifacts explicitly.
 Aliases to the same file are rejected. Existing output paths are never overwritten.

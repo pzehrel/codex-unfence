@@ -1,9 +1,145 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
+import { setImmediate } from 'node:timers';
 import { analyzeSource, transformSource } from '../dist/analysis.js';
 
 const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url), 'utf8');
+
+// Execute only this independently authored fixture. The exposed callable boundary
+// and host clock/fetch adapters do not expose analyzer internals or AST state.
+function fixtureRuntime(text = source) {
+  let time = 1000;
+  const requests = [];
+  const context = { URL, basename: value => value, Date: { now: () => time } };
+  runInNewContext(text.replace("import { basename } from 'node:path';", '') + '\n globalThis.fixture = {checkSite, enforce};', context);
+  const runtime = {
+    turn: { session_id: 'conversation', turn_id: 'turn' },
+    fetch(endpoint, options) {
+      assert.equal(this, runtime);
+      let resolve, reject;
+      const response = new Promise((yes, no) => { resolve = yes; reject = no; });
+      requests.push({ endpoint, method: options.method, resolve: blocked => resolve({ ok: true, json: async () => ({feature_status: {agent: blocked}}) }), failHttp: () => resolve({ok: false}), failJson: () => resolve({ok: true, json: async () => { throw new Error('json'); }}), reject });
+      return response;
+    },
+  };
+  return { requests, runtime, setTime: value => { time = value; }, check: site => context.fixture.checkSite(runtime, site, 'test'), enforce: site => context.fixture.enforce(runtime, site, 'test') };
+}
+
+const plain = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+
+test('self-authored fixture starts every request, keeps cache until inclusive TTL and timestamps completion', async () => {
+  const box = fixtureRuntime(), site = 'https://www.example.test/path?q=1#fragment';
+  const first = box.check(site);
+  assert.equal(box.requests.length, 1);
+  const endpoint = new URL(box.requests[0].endpoint);
+  assert.equal(endpoint.pathname, '/backend-api/aura/site_status');
+  assert.equal(endpoint.searchParams.get('site_url'), 'https://www.example.test/path?q=1');
+  assert.equal(endpoint.searchParams.get('conversation_id'), 'conversation');
+  assert.equal(endpoint.searchParams.get('turn_id'), 'turn');
+  assert.equal(endpoint.searchParams.get('url_request_source'), 'codex_browser_use:test');
+  assert.equal(box.requests[0].method, 'GET');
+  box.setTime(5000);
+  box.requests[0].resolve(true);
+  assert.deepEqual(plain((await first).result), {blocked: true, cached: false});
+  box.setTime(5000 + 86400000 - 1);
+  const hit = await box.check(site);
+  assert.equal(box.requests.length, 2);
+  assert.deepEqual(plain(hit.result), {blocked: true, cached: true});
+  box.requests[1].resolve(false);
+  box.setTime(5000 + 86400000);
+  const expired = box.check(site);
+  assert.equal(box.requests.length, 3);
+  box.requests[2].resolve(false);
+  assert.deepEqual(plain((await expired).result), {blocked: false, cached: false});
+  const refreshed = await box.check(site);
+  assert.equal(box.requests.length, 4);
+  assert.deepEqual(plain(refreshed.result), {blocked: false, cached: true});
+  box.requests[3].resolve(true);
+});
+
+test('self-authored fixture reuses old inflight while discarding new requests and clears settled failures for retry', async () => {
+  const box = fixtureRuntime(), site = 'https://inflight.test/';
+  const first = box.check(site), second = box.check(site);
+  assert.equal(box.requests.length, 2);
+  box.requests[1].reject(new Error('discarded new request'));
+  box.requests[0].resolve(true);
+  assert.deepEqual(plain((await first).result), {blocked: true, cached: false});
+  assert.deepEqual(plain((await second).result), {blocked: true, cached: false});
+  const cached = await box.check(site);
+  assert.equal(box.requests.length, 3);
+  assert.deepEqual(plain(cached.result), {blocked: true, cached: true});
+  box.requests[2].reject(new Error('discarded cached request'));
+  // Give unhandled-rejection reporting a turn; neither discarded rejection escapes.
+  await new Promise(resolve => setImmediate(resolve));
+  const failure = box.check('https://retry.test/');
+  box.requests[3].reject(new Error('network'));
+  assert.equal(await failure, undefined);
+  const retry = box.check('https://retry.test/');
+  assert.equal(box.requests.length, 5);
+  box.requests[4].resolve(false);
+  assert.deepEqual(plain((await retry).result), {blocked: false, cached: false});
+});
+
+test('self-authored entry preserves HTTP/JSON/network catches, invalid-input throws and actual blocked policy denial', async () => {
+  for (const failure of ['failHttp', 'failJson', 'reject']) {
+    const box = fixtureRuntime(), checking = box.check('https://failure.test/');
+    box.requests[0][failure](new Error('network'));
+    assert.equal(await checking, undefined);
+  }
+  const box = fixtureRuntime();
+  await assert.rejects(box.check('not a URL'), /Invalid URL/);
+  assert.equal(await box.check('file:///path'), undefined);
+  assert.equal(await box.check('https://localhost/'), undefined);
+  assert.equal(box.requests.length, 0);
+  const denied = box.enforce('https://denied.test/');
+  box.requests[0].resolve(true);
+  await assert.rejects(denied, /Site status blocked/);
+  const allowed = box.enforce('https://allowed.test/');
+  box.requests[1].resolve(false);
+  assert.equal(await allowed, undefined);
+});
+
+test('self-authored reentrant fetch preserves the first installed inflight result and retries after expiry', async () => {
+  const box = fixtureRuntime(), site = 'https://overlap.test/';
+  // Reenter at fetch, the authorized runtime boundary, before the outer call
+  // installs its inflight value. No internal Map or method is exposed to tests.
+  const fetch = box.runtime.fetch;
+  let inner, reenter = true;
+  box.runtime.fetch = function(endpoint, options) {
+    const pending = fetch.call(this, endpoint, options);
+    if (reenter) { reenter = false; inner = box.check(site); }
+    return pending;
+  };
+  const outer = box.check(site);
+  assert.equal(box.requests.length, 2);
+  box.requests[1].resolve(true);
+  assert.deepEqual(plain((await inner).result), {blocked: true, cached: false});
+  // Outer reused inner, so both results still come from the original inflight.
+  assert.deepEqual(plain((await outer).result), {blocked: true, cached: false});
+  box.requests[0].reject(new Error('discarded reentrant request'));
+  await new Promise(resolve => setImmediate(resolve));
+  box.setTime(1000 + 86400000);
+  const next = box.check(site);
+  assert.equal(box.requests.length, 3);
+  box.requests[2].resolve(false);
+  assert.deepEqual(plain((await next).result), {blocked: false, cached: false});
+});
+
+test('retains full evidence after state-field, method, bridge, callback and local renames', () => {
+  let text = source;
+  for (const [before, after] of Object.entries({now:'clock0', getTurnMetadata:'metadata0', cache:'cache0', inflightRequests:'flights0', cachedBlocked:'cached0', getMetadata:'accessor0', ttl:'ttl0', checkSite:'bridge0', enforce:'policy0', policy:'instance0', pending:'pending0', cached:'hit0', previous:'old0', current:'current0', blocked:'blocked0'})) {
+    // blocked/cached are public result schema; their local bindings may be renamed
+    // with explicit keys without changing schema fields.
+    if (before === 'blocked' || before === 'cached') continue;
+    text = text.replace(new RegExp(`\\b${before}\\b`, 'g'), after);
+  }
+  text = text.replace('Date.clock0', 'Date.now');
+  text = text.replace('blocked => (', 'value0 => (').replace('{ blocked, timestampMs:', '{ blocked: value0, timestampMs:').replace(' }), blocked)).finally', ' }), value0)).finally');
+  const result = analyzeSource(text);
+  assert.equal(result.evidence.length, 8, JSON.stringify(result.diagnostics));
+});
 
 test('reports finite once initialization and strict agent stage evidence without claiming compatibility or a transform', () => {
   const result = analyzeSource(source);
@@ -11,10 +147,10 @@ test('reports finite once initialization and strict agent stage evidence without
   assert.equal(result.compatibility, 'incompatible');
   assert.equal(result.runtime, 'not-verified');
   assert.equal(result.target, null);
-  assert.deepEqual(result.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response']);
+  assert.deepEqual(result.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption']);
   assert.match(result.evidence[0].description, /normal completion/i);
   assert.match(result.evidence[1].description, /strict.*true/i);
-  assert.deepEqual(result.diagnostics.map(entry => entry.code), ['UNPROVEN_CACHE_POLICY', 'DEFERRED_TRANSFORM_DISABLED']);
+  assert.deepEqual(result.diagnostics.map(entry => entry.code), ['DEFERRED_TRANSFORM_DISABLED']);
   for (const entry of [...result.evidence, ...result.diagnostics]) {
     assert.equal(entry.range.unit, 'utf16');
     assert.ok(source.slice(entry.range.start, entry.range.end).length > 0);
@@ -24,8 +160,8 @@ test('reports finite once initialization and strict agent stage evidence without
 
 test('proves URL input, request metadata, guarded receiver transport and same HTTP JSON binding while retaining later blockers', () => {
   const result = analyzeSource(source);
-  assert.deepEqual(result.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response']);
-  assert.deepEqual(result.diagnostics.map(entry => entry.code), ['UNPROVEN_CACHE_POLICY', 'DEFERRED_TRANSFORM_DISABLED']);
+  assert.deepEqual(result.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption']);
+  assert.deepEqual(result.diagnostics.map(entry => entry.code), ['DEFERRED_TRANSFORM_DISABLED']);
   const [input, transport, response] = result.evidence.slice(2);
   assert.ok(source.slice(input.range.start, input.range.end).startsWith('function requestFor('));
   assert.match(input.description, /origin.*pathname.*search/);
@@ -37,6 +173,239 @@ test('proves URL input, request metadata, guarded receiver transport and same HT
   assert.equal(result.compatibility, 'incompatible');
   assert.equal(result.target, null);
   assert.equal(transformSource(source).transformation, null);
+});
+
+test('proves constructor defaults, fresh state fields and the unique class receiver without enabling a transform', () => {
+  const result = analyzeSource(source);
+  const receiver = result.evidence.find(entry => entry.kind === 'receiver');
+  assert.ok(receiver, JSON.stringify(result.diagnostics));
+  assert.match(receiver.description, /constructor.*Date\.now.*metadata/i);
+  assert.match(receiver.description, /fresh.*Map.*unique.*instance/i);
+  assert.ok(source.slice(receiver.range.start, receiver.range.end).startsWith('class {'));
+  assert.equal(result.target, null);
+  assert.equal(transformSource(source).transformation, null);
+});
+
+test('proves request-first cache hits, TTL, inflight reuse and identity-checked cleanup through the policy consumer', () => {
+  const result = analyzeSource(source);
+  assert.deepEqual(result.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption']);
+  assert.deepEqual(result.diagnostics.map(entry => entry.code), ['DEFERRED_TRANSFORM_DISABLED']);
+  assert.match(result.evidence[6].description, /before.*cache.*inflight/i);
+  assert.match(result.evidence[6].description, /86400000.*same.*promise.*discarded/i);
+  assert.match(result.evidence[7].description, /checkUrl.*result\.blocked.*catch/i);
+  assert.equal(result.compatibility, 'incompatible');
+  assert.equal(result.target, null);
+  assert.equal(transformSource(source).transformation, null);
+});
+
+test('rejects changed constructor, fields, metadata, TTL and every finite cache branch', () => {
+  for (const [before, after, code] of [
+    ['now = Date.now', 'now = otherClock', 'CLASS_CONSTRUCTOR'],
+    ['this.now = now;', 'this.now = turnMetadata;', 'CLASS_CONSTRUCTOR'],
+    ['return runtime.turn;', 'return other.turn;', 'METADATA_ACCESSOR'],
+    ['cache = new Map;', 'cache = other;', 'CLASS_FIELDS'],
+    ['inflightRequests = new Map;', 'inflightRequests = this.cache;', 'CLASS_FIELDS'],
+    ['ttl = 1440 * 60 * 1e3', 'ttl = 1440 * 60 * 1e2', 'CACHE_TTL'],
+    ['this.now() - entry.timestampMs >= ttl', 'this.now() - entry.timestampMs > ttl', 'CACHE_TTL'],
+    ['entry != null && this.cache.delete(key)', 'entry == null && this.cache.delete(key)', 'CACHE_TTL'],
+    ['null) : entry.blocked', 'null) : false', 'CACHE_TTL'],
+    ['pending.catch(() => {}), { blocked: cached', 'pending, { blocked: cached', 'CACHE_DISCARDED_REQUEST'],
+    ['pending.catch(() => {}), { blocked: await previous', 'pending.catch(() => { throw new Error("discarded"); }), { blocked: await previous', 'CACHE_DISCARDED_REQUEST'],
+    ['blocked: await previous, cached: false', 'blocked: await pending, cached: false', 'CACHE_DISCARDED_REQUEST'],
+    ['{ blocked, timestampMs: this.now() }', '{ blocked: false, timestampMs: this.now() }', 'CACHE_RECORD'],
+    ['=== current && this.inflightRequests.delete', '!== current && this.inflightRequests.delete', 'CACHE_CLEANUP'],
+    ['=== current && this.inflightRequests.delete(request.cacheKey)', '=== current && this.cache.delete(request.cacheKey)', 'CACHE_CLEANUP'],
+    ['set(request.cacheKey, current), { blocked: await current', 'set(request.cacheKey, pending), { blocked: await current', 'CACHE_INFLIGHT'],
+    ['status.result.blocked', 'status.request.blocked', 'POLICY_BLOCKED'],
+    ['let status = await checkSite(runtime, site, backend);', 'let status = await checkSite(runtime, other, backend);', 'POLICY_CONNECTION'],
+    ['function checkSite(runtime, site, backend) { return policy.checkUrl(runtime, site, backend); }', 'function checkSite(runtime, site, backend) { return policy.isBlocked(runtime, site, backend); }', 'POLICY_CONNECTION'],
+  ]) {
+    assert.ok(source.includes(before), before);
+    const text = source.replace(before, after), result = analyzeSource(text);
+    assert.deepEqual(result.evidence, [], after);
+    assert.equal(result.diagnostics[0].code, `DEFERRED_${code}`, JSON.stringify(result));
+    assert.equal(result.target, null);
+    assert.equal(transformSource(text).transformation, null);
+  }
+});
+
+test('rejects additional class state effects, extra methods, nested dynamic receivers and cache host mutation', () => {
+  for (const extra of [
+    'this.cache = new Map;', 'this.now = replacement;', 'this.inflightRequests.clear();',
+    'unknown(this.cache);', 'unknown(this.now);',
+  ]) {
+    const text = source.replace('let previous = this.inflightRequests', `${extra} let previous = this.inflightRequests`);
+    const result = analyzeSource(text);
+    assert.deepEqual(result.evidence, [], extra);
+    assert.match(result.diagnostics[0].code, /^DEFERRED_(CACHE|REQUEST_RECEIVER)/, extra);
+  }
+  for (const extra of [
+    'mutate() { this.cache.clear(); }',
+    'cachedBlocked() { return false; }',
+    'get now() { return replacement; }',
+    'extra = unknown();',
+    'escape() { return this.cache; }',
+  ]) {
+    const result = analyzeSource(source.replace('  now;\n  getTurnMetadata;', `  ${extra}\n  now;\n  getTurnMetadata;`));
+    assert.deepEqual(result.evidence, [], extra);
+  }
+  for (const extra of [
+    'Map.prototype.get = replacement;', 'Date.now = replacement;', 'Promise.prototype.then = replacement;',
+    'const root = globalThis; const {Map: alias} = root; unknown(alias);',
+    'const mutate = Reflect.set; mutate(Promise.prototype, "finally", replacement);',
+  ]) {
+    const result = analyzeSource(source + '\n' + extra);
+    assert.deepEqual(result.evidence, [], extra);
+    assert.equal(result.diagnostics[0].code, 'DEFERRED_HOST_MUTATION', extra);
+  }
+});
+
+test('rejects class/instance/bridge aliases, borrowed methods, shadowing and multiple complete candidates', () => {
+  for (const extra of [
+    'const alias = SitePolicy; Reflect.set(alias.prototype, "cachedBlocked", replacement);',
+    'const {prototype: alias} = SitePolicy; alias.now = replacement;',
+    'class Child extends SitePolicy {}', 'unknown(policy);', 'export {policy};',
+    'const borrowed = policy.checkUrl; borrowed(runtime, site, backend);',
+    'policy.checkUrl.call(other, runtime, site, backend);',
+    'const otherPolicy = new SitePolicy;', 'unknown(checkSite);', 'checkSite = replacement;',
+    'ttl = 1;',
+  ]) {
+    const result = analyzeSource(source + '\n' + extra);
+    assert.deepEqual(result.evidence, [], extra);
+    assert.equal(result.target, null);
+  }
+  const unused = source.slice(0, source.indexOf('async function enforce('));
+  assert.deepEqual(analyzeSource(unused).evidence, []);
+  const duplicate = source + '\n' + source.slice(source.indexOf('var ttl')).replace(/\b(SitePolicy|policy|checkSite|enforce|ttl)\b/g, '$1Other');
+  assert.equal(analyzeSource(duplicate).diagnostics[0].code, 'AMBIGUOUS_DEFERRED_STAGE');
+});
+
+test('rejects generator methods that do not execute the claimed async lifecycle', () => {
+  for (const name of ['isBlocked', 'checkUrl']) {
+    const result = analyzeSource(source.replace(`async ${name}(`, `async *${name}(`));
+    assert.deepEqual(result.evidence, [], name);
+  }
+});
+
+test('proves the finite guarded string-or-object request metadata accessor with throwing JSON parse fallback', () => {
+  const accessor = `function getMetadata(runtime) {
+    let value = runtime.requestMeta?.['x-codex-turn-metadata'];
+    if (typeof value == 'string') try { value = JSON.parse(value); } catch { return; }
+    if (!(value == null || typeof value != 'object' || Array.isArray(value))) return value;
+  }`;
+  const text = source.replace('function getMetadata(runtime) { return runtime.turn; }', accessor);
+  const result = analyzeSource(text);
+  assert.equal(result.evidence.length, 8, JSON.stringify(result.diagnostics));
+  for (const changed of [
+    accessor.replace('JSON.parse(value)', 'JSON.parse(other)'),
+    accessor.replace('Array.isArray(value)', 'Array.isArray(other)'),
+    accessor.replace('catch { return; }', 'catch { value = {}; }'),
+    accessor.replace('return value;', 'return other;'),
+  ]) assert.deepEqual(analyzeSource(source.replace('function getMetadata(runtime) { return runtime.turn; }', changed)).evidence, []);
+});
+
+test('proves an inline awaited policy callback and refuses an unused helper as its substitute', () => {
+  const inline = source.slice(0, source.indexOf('async function enforce(')) + `
+    var Gate = class {
+      policies = {siteStatus: async site => {
+        if ((await checkSite(this.runtime, site, this.backend))?.result.blocked) throw new Error('Site status blocked');
+      }};
+    };`;
+  assert.equal(analyzeSource(inline).evidence.length, 8, JSON.stringify(analyzeSource(inline).diagnostics));
+  const helper = 'async throwIfBlocksUrl(runtime, site, backend) { let result = await this.checkUrl(runtime, site, backend); if (result?.result.blocked) throw new Error("blocked"); }';
+  const withHelper = inline.replace('  now;\n  getTurnMetadata;', `  ${helper}\n  now;\n  getTurnMetadata;`);
+  assert.equal(analyzeSource(withHelper).evidence.length, 8, JSON.stringify(analyzeSource(withHelper).diagnostics));
+  assert.deepEqual(analyzeSource(withHelper.slice(0, withHelper.indexOf('var Gate'))).evidence, []);
+  assert.deepEqual(analyzeSource(withHelper.replace('this.checkUrl(runtime, site, backend)', 'this.cache.clear()')).evidence, []);
+  for (const changed of [
+    inline.replace('?.result.blocked', '?.result.cached'),
+    inline.replace('await checkSite', 'checkSite'),
+    inline.replace('this.runtime, site, this.backend', 'this.runtime, "fixed", this.backend'),
+  ]) assert.deepEqual(analyzeSource(changed).evidence, []);
+});
+
+test('rejects a policy bridge redirected to an unrelated three-input method with five statements', () => {
+  const text = source.replace('  now;\n  getTurnMetadata;', '  other(a,b,c) { let x; let y; let z; let w; return {result:{blocked:false}}; }\n  now;\n  getTurnMetadata;').replace('return policy.checkUrl(runtime, site, backend);', 'return policy.other(runtime, site, backend);');
+  assert.deepEqual(analyzeSource(text).evidence, []);
+});
+
+test('rejects relevant standard capability escape through aggregate containers and returned prototype aliases', () => {
+  for (const extra of [
+    'unknown({capability: Map});',
+    'unknown([Date]);',
+    'unknown({capability: Promise.prototype});',
+    'const alias = Object.getPrototypeOf(Map.prototype); alias.get = replacement;',
+    'const alias = Object.getPrototypeOf(Promise.prototype); unknown(alias);',
+    'new Unknown(Map);',
+    'export const exposed = Map;',
+  ]) {
+    const result = analyzeSource(source + '\n' + extra);
+    assert.deepEqual(result.evidence, [], extra);
+    assert.equal(result.diagnostics[0].code, 'DEFERRED_HOST_MUTATION', extra);
+  }
+});
+
+test('retains refusal for a local handle bridge into opaque Wasm or callbacks', () => {
+  for (const access of ['globalThis', 'globalThis[dynamicKey]']) {
+    const text = source + `\nconst handles = []; const bridge = {store(value) { handles.push(value); return handles.length - 1; }, load(key) { return handles[key]; }}; const imports = {get: () => bridge.store(${access}), invoke: key => bridge.load(key)()}; opaqueInstantiate(imports);`;
+    const result = analyzeSource(text);
+    assert.deepEqual(result.evidence, []);
+    assert.equal(result.diagnostics[0].code, 'DEFERRED_HOST_MUTATION');
+    assert.equal(result.target, null);
+  }
+});
+
+test('permits a uniquely established unrelated global cache key through conditional global aliases', () => {
+  const safe = source + '\nvar cacheKey = "unrelatedCache", root = ready ? globalThis : {}; var value = root[cacheKey]; root[cacheKey] = {}; unknown(value);';
+  assert.equal(analyzeSource(safe).evidence.length, 8, JSON.stringify(analyzeSource(safe).diagnostics));
+  for (const text of [safe.replace('"unrelatedCache"', '"Map"'), safe + '\ncacheKey = dynamicKey;']) {
+    assert.deepEqual(analyzeSource(text).evidence, []);
+    assert.equal(analyzeSource(text).diagnostics[0].code, 'DEFERRED_HOST_MUTATION');
+  }
+});
+
+test('rejects dynamic code and capability-returning callbacks that can reach relevant host state', () => {
+  for (const extra of [
+    'Function("Map.prototype.get = replacement")();',
+    'const make = Function; make("Date.now = replacement")();',
+    '(0, eval)("Promise.prototype.then = replacement");',
+    'unknown(() => Map);',
+    'unknown(() => globalThis);',
+  ]) {
+    const result = analyzeSource(source + '\n' + extra);
+    assert.deepEqual(result.evidence, [], extra);
+    assert.match(result.diagnostics[0].code, /^DEFERRED_(HOST_MUTATION|DYNAMIC_SCOPE)$/, extra);
+  }
+});
+
+test('rejects initialization-time lifecycle substitutions and malformed policy returns', () => {
+  for (const text of [
+    source.replace('}, policy = new SitePolicy;', '}; if (ready) { var policy = new SitePolicy; }'),
+    source.replace('}, policy = new SitePolicy;', '}, policy = new SitePolicy; policy = new SitePolicy;'),
+    source.replace('return { request, result };', 'return { request, result: {blocked: false} };'),
+    source.replace('} catch { return; }\n    return { request, result };', '} catch { return {result:{blocked:false}}; }\n    return { request, result };'),
+    source.replace('now;\n  getTurnMetadata;', 'now;\n  getTurnMetadata;\n  cache;'),
+    source.replace('ttl = 1440 * 60 * 1e3', 'ttl = 1440 * 60 * clock()'),
+  ]) {
+    const result = analyzeSource(text);
+    assert.deepEqual(result.evidence, []);
+    assert.equal(result.target, null);
+  }
+});
+
+test('rejects indirect capability exports, tagged calls and storage on unknown objects', () => {
+  for (const extra of [
+    'const alias = Map; export {alias};',
+    'function expose() { return Map; } unknown(expose);',
+    'unknown.target = Map;',
+    'unknown`capability ${Map}`;',
+    'const alias = ready ? Date : Promise; unknown(alias);',
+    'const alias = [Map]; unknown(alias[0]);',
+  ]) {
+    const result = analyzeSource(source + '\n' + extra);
+    assert.deepEqual(result.evidence, [], extra);
+    assert.equal(result.diagnostics[0].code, 'DEFERRED_HOST_MUTATION', extra);
+  }
 });
 
 test('rejects request-chain replacements, unknown control flow, escapes and capability mutation with concrete locations', () => {
@@ -131,7 +500,7 @@ test('retains request evidence after helper and local binding renames, compressi
   for (const [before, after] of Object.entries({ requestFor: 'r0', endpointFor: 'r1', localHost: 'r3', transport: 'r4', site: 'r5', url: 'r6', host: 'r7', copy: 'r8', response: 'r9', body: 'r10', runtime: 'r11', options: 'r12', pending: 'r13', backend: 'r14', fetchBlocked: 'r15', isBlocked: 'r16', checkUrl: 'r17' })) text = text.replace(new RegExp(`\\b${before}\\b`, 'g'), after);
   text = '﻿/* 中文 😀 */\r\n' + text.replaceAll('ENDPOINT_LITERAL', 'https://chatgpt.com/backend-api').replace(/^\/\/[^\n]*/gm, '').replaceAll("'", '"').replaceAll('.feature_status', '["feature_status"]').replaceAll('.fetch', '["fetch"]').replaceAll('.ok', '["ok"]').replaceAll('.json', '["json"]').replace(/\s+/g, ' ');
   const result = analyzeSource(text);
-  assert.deepEqual(result.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response'], JSON.stringify(result.diagnostics));
+  assert.deepEqual(result.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption'], JSON.stringify(result.diagnostics));
   assert.ok(text.slice(result.evidence[2].range.start, result.evidence[2].range.end).startsWith('function r0('));
   assert.ok(text.slice(result.evidence[3].range.start, result.evidence[3].range.end).startsWith('async function r4('));
   assert.ok(text.slice(result.evidence[4].range.start, result.evidence[4].range.end).startsWith('async r15('));
@@ -193,7 +562,7 @@ test('rejects this aliases and computed instance effects that could change reque
 
 test('permits finite unrelated global property choices while rejecting a branch that can replace URL', () => {
   const safe = source + '\nconst root = globalThis; root[ready ? "unrelatedOne" : "unrelatedTwo"] ??= {};';
-  assert.deepEqual(analyzeSource(safe).evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response']);
+  assert.deepEqual(analyzeSource(safe).evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption']);
   const unsafe = safe.replace('"unrelatedTwo"', '"URL"');
   assert.equal(analyzeSource(unsafe).diagnostics[0].code, 'DEFERRED_HOST_MUTATION');
 });
@@ -218,7 +587,7 @@ test('rejects duplicate or field-shadowed request methods', () => {
 
 test('permits standard string conversion in unrelated computed property writes', () => {
   const text = source + '\nfunction unrelatedCopy(input) { const output = {}; output[String(input)] = 1; return output; }';
-  assert.deepEqual(analyzeSource(text).evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response']);
+  assert.deepEqual(analyzeSource(text).evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption']);
 });
 
 test('rejects a caught failed initialization attempt before the normal initialization path', () => {
@@ -303,7 +672,7 @@ test('keeps stage recognition under renaming, compressed formatting, static read
   for (const [before, after] of Object.entries({ once: 'z0', task: 'z1', value: 'z2', initSiteStatus: 'z3', initialize: 'z4', initMetadata: 'z5', initProtocols: 'z6', initErrors: 'z7', agentKey: 'z8', agentBlocked: 'z9', enabled: 'z10', isRecord: 'z11', body: 'z12', flags: 'z13', key: 'z14', SitePolicy: 'z15', baseUrl: 'z16' })) text = text.replace(new RegExp(`\\b${before}\\b`, 'g'), after);
   text = '﻿/* 中文 😀 */\r\n' + text.replace(/^\/\/[^\n]*/gm, '').replaceAll("'", '"').replaceAll('.feature_status', '["feature_status"]').replaceAll('true', '!0').replaceAll('false', '!1').replace(/\s+/g, ' ');
   const result = analyzeSource(text);
-  assert.deepEqual(result.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response']);
+  assert.deepEqual(result.evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption']);
   assert.equal(text.slice(result.evidence[0].range.start, result.evidence[0].range.end), 'z4()');
   assert.ok(text.slice(result.evidence[1].range.start, result.evidence[1].range.end).startsWith('function z9('));
   assert.equal(transformSource(text).transformation, null);
@@ -347,7 +716,7 @@ test('rejects a caught partial initialization of a required dependency before th
 
 test('accepts a dependency initialized by an earlier unconditional normally completed module call', () => {
   const text = source.replace('initialize();\nasync function transport', 'initMetadata();\ninitialize();\nasync function transport');
-  assert.deepEqual(analyzeSource(text).evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response']);
+  assert.deepEqual(analyzeSource(text).evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption']);
 });
 
 test('rejects a deferred closure that later overwrites initialization data consumed by a dependency', () => {
@@ -393,7 +762,7 @@ test('rejects file-visible mutation of standard capabilities used during initial
 
 test('allows unrelated once initializers with independent external effects', () => {
   const text = source.replace('initialize();\nasync function transport', 'var initUnrelated = once(() => { unknown("unrelated"); });\ninitUnrelated();\ninitialize();\nasync function transport');
-  assert.deepEqual(analyzeSource(text).evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response']);
+  assert.deepEqual(analyzeSource(text).evidence.map(entry => entry.kind), ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption']);
 });
 
 test('rejects object coercion during initialization arithmetic', () => {
