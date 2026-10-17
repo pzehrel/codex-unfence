@@ -1150,7 +1150,8 @@ class DeferredProof {
       if (node.type === 'AssignmentExpression' && node.left.type === 'MemberExpression' && (host(node.right) || globalObject(node.right))) requireStage(false, 'DEFERRED_HOST_MUTATION', 'Relevant capability is stored on an externally reachable object.', node);
       if (node.type === 'TaggedTemplateExpression') requireStage(!node.quasi.expressions.some(item => host(item) || globalObject(item)), 'DEFERRED_HOST_MUTATION', 'Relevant capability escapes to a tagged template call.', node);
       if (node.type === 'NewExpression') for (const argument of node.arguments) requireStage(!host(argument) && !globalObject(argument), 'DEFERRED_HOST_MUTATION', 'Relevant standard capability escapes to an unknown constructor.', node);
-      if (call(node)) {
+      // Optional calls still transfer capabilities when their callee is present.
+      if (node.type === 'CallExpression') {
         if (node.callee.type === 'MemberExpression' && host(node.callee.object)) {
           const operation = key(node.callee);
           const directStandard = node.callee.object.type === 'Identifier' && !this.binding(node.callee.object) && capabilities.has(node.callee.object.name);
