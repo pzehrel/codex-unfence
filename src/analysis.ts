@@ -1,4 +1,5 @@
 import { parse } from 'acorn';
+import { analyzeDeferredStage } from './deferred-analysis.js';
 import { analyze } from 'eslint-scope';
 import type { Variable } from 'eslint-scope';
 import type * as E from 'estree';
@@ -17,13 +18,13 @@ export interface AnalysisDiagnostic {
 }
 
 export interface StructuralEvidence {
-  kind: 'source' | 'transport' | 'response' | 'predicate' | 'consumption';
+  kind: 'source' | 'transport' | 'response' | 'predicate' | 'consumption' | 'initialization';
   range: SourceRange;
   description: string;
 }
 
 export interface SourceAnalysis {
-  patternVersion: 'site-status-v1';
+  patternVersion: 'site-status-v1' | 'site-status-deferred-v1';
   compatibility: 'compatible' | 'incompatible';
   runtime: 'not-verified';
   evidence: StructuralEvidence[];
@@ -146,6 +147,8 @@ export function analyzeSource(source: string): SourceAnalysis {
     result.diagnostics.push({ code: 'PARSE_ERROR', severity: 'error', message: error instanceof Error ? error.message : 'Invalid JavaScript.' });
     return result;
   }
+  const deferredStage = analyzeDeferredStage(program);
+  if (deferredStage) return deferredStage;
   try {
     const proof = new Proof(program);
     const candidates: { target: E.Node; evidence: StructuralEvidence[]; patched: boolean }[] = [];

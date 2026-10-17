@@ -1,0 +1,87 @@
+// Independently authored finite bundle fixture. Standard URL/Map/Date, runtime.fetch
+// and response.json are trusted host interfaces. Discovery only parses this data.
+import { basename } from 'node:path';
+const unrelated = { count: 0 };
+unrelated.count++;
+basename('/unrelated');
+var once = (task, value) => () => (task && (value = task(task = 0)), value);
+var metadata, initMetadata = once(() => { metadata = { name: 'synthetic' }; });
+var protocols, initProtocols = once(() => {
+  initMetadata();
+  protocols = Object.freeze(['http:', 'https:']);
+});
+function isRecord(value) { return typeof value == 'object' && value != null; }
+function enabled(body, key) {
+  if (!isRecord(body)) return false;
+  let flags = body.feature_status;
+  return isRecord(flags) ? flags[key] === true : false;
+}
+function agentBlocked(body) { return enabled(body, agentKey); }
+function localHost(host) { return host === 'localhost' || host.endsWith('.localhost') || host === '127.0.0.1' || host === '[::1]' || host === '::1'; }
+function displayUrl(url) { let copy = new URL(url.origin); copy.pathname = url.pathname; let text = copy.toString(); return copy.pathname === '/' ? text.slice(0, -1) : text; }
+function endpointFor(url, { conversationId, turnId, urlRequestSource }) {
+  let copy = new URL(url.origin);
+  copy.pathname = url.pathname, copy.search = url.search;
+  let endpoint = new URL(`${baseUrl}/aura/site_status`);
+  return endpoint.searchParams.set('site_url', copy.toString()), endpoint.searchParams.set('url_request_source', urlRequestSource), conversationId != null && endpoint.searchParams.set('conversation_id', conversationId), turnId != null && endpoint.searchParams.set('turn_id', turnId), endpoint.toString();
+}
+function requestFor(site, { conversationId, turnId, urlRequestSource = requestSource } = {}) {
+  let url;
+  try { url = new URL(site); } catch { throw new Error('Invalid URL'); }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  let host = url.hostname.trim().toLowerCase();
+  if (host.length === 0) throw new Error('Missing host');
+  return localHost(host) ? null : { cacheKey: host.startsWith('www.') ? host.slice(4) : host, displayUrl: displayUrl(url), endpoint: endpointFor(url, { conversationId, turnId, urlRequestSource }) };
+}
+var baseUrl, agentKey, requestSource, initSiteStatus = once(() => {
+  'use strict';
+  initMetadata();
+  initProtocols();
+  baseUrl = 'https://chatgpt.com/backend-api', agentKey = 'agent', requestSource = 'codex_browser_use';
+});
+var initErrors = once(() => { initMetadata(); initSiteStatus(); });
+var initialize = once(() => { initMetadata(); initProtocols(); initErrors(); initSiteStatus(); });
+initialize();
+async function transport(runtime, endpoint, options) {
+  if (typeof runtime.fetch !== 'function') throw new Error('Missing fetch');
+  return await runtime.fetch(endpoint, options);
+}
+function getMetadata(runtime) { return runtime.turn; }
+var ttl = 1440 * 60 * 1e3, SitePolicy = class {
+  constructor(now = Date.now, turnMetadata = getMetadata) { this.now = now; this.getTurnMetadata = turnMetadata; }
+  now;
+  getTurnMetadata;
+  cache = new Map;
+  inflightRequests = new Map;
+  async checkUrl(runtime, site, backend) {
+    let metadata = this.getTurnMetadata(runtime), request = requestFor(site, { conversationId: metadata?.session_id, turnId: metadata?.turn_id, urlRequestSource: backend == null ? requestSource : `${requestSource}:${backend}` });
+    if (request == null) return;
+    let result;
+    try { result = await this.isBlocked(runtime, request); } catch { return; }
+    return { request, result };
+  }
+  async isBlocked(runtime, request) {
+    let pending = this.fetchBlocked(runtime, request), cached = this.cachedBlocked(request.cacheKey);
+    if (cached != null) return pending.catch(() => {}), { blocked: cached, cached: true };
+    let previous = this.inflightRequests.get(request.cacheKey);
+    if (previous != null) return pending.catch(() => {}), { blocked: await previous, cached: false };
+    let current = pending.then(blocked => (this.cache.set(request.cacheKey, { blocked, timestampMs: this.now() }), blocked)).finally(() => { this.inflightRequests.get(request.cacheKey) === current && this.inflightRequests.delete(request.cacheKey); });
+    return this.inflightRequests.set(request.cacheKey, current), { blocked: await current, cached: false };
+  }
+  cachedBlocked(key) {
+    let entry = this.cache.get(key);
+    return entry == null || this.now() - entry.timestampMs >= ttl ? (entry != null && this.cache.delete(key), null) : entry.blocked;
+  }
+  async fetchBlocked(runtime, request) {
+    let response = await transport(runtime, request.endpoint, { method: 'GET' });
+    if (!response.ok) throw new Error('Site status request failed');
+    let body = await response.json();
+    return agentBlocked(body);
+  }
+}, policy = new SitePolicy;
+function checkSite(runtime, site, backend) { return policy.checkUrl(runtime, site, backend); }
+async function enforce(runtime, site, backend) {
+  let status = await checkSite(runtime, site, backend);
+  if (status == null) return;
+  if (status.result.blocked) throw new Error('Site status blocked');
+}

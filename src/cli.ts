@@ -23,7 +23,8 @@ Usage:
 Default root: ~/.codex/plugins/cache/openai-bundled
 Read-only discovery and finite AST structural proof are available.
 Only one proven site-status source/response/agent/blocking chain is compatible.
-Unsupported patterns, ambiguity and deferred initialization are rejected.
+Unsupported patterns and ambiguity are rejected. Deferred initialization and strict-agent
+stages report evidence only; request/cache/policy proof and new-pattern plans remain disabled.
 prepare requires explicit selection and creates a review plan without changing plugins.
 Exact paths come from detect. --all-compatible filters compatible artifacts explicitly.
 Aliases to the same file are rejected. Existing output paths are never overwritten.

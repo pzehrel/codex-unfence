@@ -11,6 +11,7 @@
   },
   "files": [
     "dist/analysis.js",
+    "dist/deferred-analysis.js",
     "dist/cli.js",
     "dist/discovery.js",
     "dist/integrity.js",

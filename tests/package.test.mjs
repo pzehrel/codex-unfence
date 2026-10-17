@@ -98,7 +98,7 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
   const [output] = JSON.parse(pack.stdout);
   const files = output.files.map((file) => file.path);
   assert.deepEqual(files.filter((path) => !path.startsWith('node_modules/')).sort(), [
-    'README.md', 'dist/analysis.js', 'dist/cli.js', 'dist/discovery.js', 'dist/integrity.js', 'dist/plan.js', 'dist/processes.js', 'dist/result.js',
+    'README.md', 'dist/analysis.js', 'dist/cli.js', 'dist/deferred-analysis.js', 'dist/discovery.js', 'dist/integrity.js', 'dist/plan.js', 'dist/processes.js', 'dist/result.js',
     'dist/transaction-locks.js', 'dist/transaction-storage.js', 'dist/transactions.js', 'package.json',
   ]);
   const dependencies = new Set();
@@ -119,6 +119,23 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
   await assert.rejects(access(join(installed, 'src')));
   await assert.rejects(access(join(installed, 'tests')));
   const installation = { directory, binary };
+
+  await t.test('installed CLI retains deferred stage evidence and refuses plan publication', async t => {
+    const box = await sandbox(t, installation);
+    const deferred = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url), 'utf8');
+    for (const target of box.targets) await writeFile(target, deferred);
+    const detected = result(box.run(['detect', '--plugin-root', box.root]), 'detect', 3);
+    for (const artifact of detected.data.artifacts) {
+      assert.equal(artifact.analysis.patternVersion, 'site-status-deferred-v1');
+      assert.deepEqual(artifact.analysis.evidence.map(entry => entry.kind), ['initialization', 'predicate']);
+      assert.equal(artifact.analysis.target, null);
+      assert.equal(artifact.analysis.diagnostics[0].code, 'UNPROVEN_REQUEST_CHAIN');
+    }
+    const prepared = result(box.run(['prepare', '--plugin-root', box.root, '--target', box.targets[0], '--output', box.plan]), 'prepare', 3);
+    assert.equal(prepared.data, null);
+    await assert.rejects(access(box.plan));
+    for (const target of box.targets) assert.equal(await readFile(target, 'utf8'), deferred);
+  });
 
   await t.test('installed executable documents all commands, supported platform and exit protocol', () => {
     const help = runCli(['--help'], { directory, binary, direct: true });
