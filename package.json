@@ -12,6 +12,9 @@
   "files": [
     "dist/analysis.js",
     "dist/deferred-analysis.js",
+    "dist/dependency-analysis.js",
+    "dist/dependency-contracts.js",
+    "dist/dependency-source.js",
     "dist/cli.js",
     "dist/discovery.js",
     "dist/integrity.js",

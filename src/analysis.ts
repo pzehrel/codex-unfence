@@ -1,4 +1,7 @@
 import { parse } from 'acorn';
+import { inspectDependency } from './dependency-analysis.js';
+import type { DependencyEvidenceInput, DependencyProof } from './dependency-analysis.js';
+export type { DependencyEvidenceInput, DependencyProof } from './dependency-analysis.js';
 import { analyzeDeferredStage } from './deferred-analysis.js';
 import { analyze } from 'eslint-scope';
 import type { Variable } from 'eslint-scope';
@@ -32,6 +35,7 @@ export interface SourceAnalysis {
   evidence: StructuralEvidence[];
   diagnostics: AnalysisDiagnostic[];
   target: SourceRange | null;
+  dependencyProof?: DependencyProof;
 }
 
 export interface SourceTransformation {
@@ -48,8 +52,8 @@ export interface SourceTransformResult {
 }
 
 /** Pure local transformation; only a proven simple response argument is copied. */
-export function transformSource(source: string): SourceTransformResult {
-  const analysis = analyzeSource(source);
+export function transformSource(source: string, dependencyEvidence?: DependencyEvidenceInput): SourceTransformResult {
+  const analysis = analyzeSource(source, dependencyEvidence);
   if (!analysis.target) return { analysis, transformation: null };
   const target = analysis.target;
   const before = source.slice(target.start, target.end);
@@ -137,7 +141,16 @@ function objectProperty(node: E.Node | null | undefined, name: string): E.Expres
 }
 
 /** Pure, finite structural proof. Never evaluates source or reads an installation. */
-export function analyzeSource(source: string): SourceAnalysis {
+export function analyzeSource(source: string, dependencyEvidence?: DependencyEvidenceInput): SourceAnalysis {
+  const analysis = analyzeSourceOnly(source);
+  if (dependencyEvidence === undefined) return analysis;
+  const dependencyProof = inspectDependency(source, dependencyEvidence);
+  // Until the complete operation graph is proved, evidence can only add a
+  // rejection. It never suppresses the source-only capability/effect gates.
+  return { ...analysis, compatibility: 'incompatible', target: null, dependencyProof, diagnostics: [...analysis.diagnostics, ...dependencyProof.diagnostics] };
+}
+
+function analyzeSourceOnly(source: string): SourceAnalysis {
   const result: SourceAnalysis = {
     patternVersion: 'site-status-v1', compatibility: 'incompatible', runtime: 'not-verified',
     evidence: [], diagnostics: [], target: null,

@@ -6,7 +6,7 @@ import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout } from 'node:timers';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 const repository = fileURLToPath(new URL('..', import.meta.url));
@@ -98,7 +98,7 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
   const [output] = JSON.parse(pack.stdout);
   const files = output.files.map((file) => file.path);
   assert.deepEqual(files.filter((path) => !path.startsWith('node_modules/')).sort(), [
-    'README.md', 'dist/analysis.js', 'dist/cli.js', 'dist/deferred-analysis.js', 'dist/discovery.js', 'dist/integrity.js', 'dist/plan.js', 'dist/processes.js', 'dist/result.js',
+    'README.md', 'dist/analysis.js', 'dist/cli.js', 'dist/deferred-analysis.js', 'dist/dependency-analysis.js', 'dist/dependency-contracts.js', 'dist/dependency-source.js', 'dist/discovery.js', 'dist/integrity.js', 'dist/plan.js', 'dist/processes.js', 'dist/result.js',
     'dist/transaction-locks.js', 'dist/transaction-storage.js', 'dist/transactions.js', 'package.json',
   ]);
   const dependencies = new Set();
@@ -119,6 +119,22 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
   await assert.rejects(access(join(installed, 'src')));
   await assert.rejects(access(join(installed, 'tests')));
   const installation = { directory, binary };
+
+  await t.test('installed pure analysis measures explicit inert bytes without granting an unknown dependency contract', async () => {
+    const { analyzeSource } = await import(pathToFileURL(join(installed, 'dist/analysis.js')).href);
+    const { createHash } = await import('node:crypto');
+    const text = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url), 'utf8');
+    const analysis = analyzeSource(text, {
+      schemaVersion: 1,
+      contract: { id: 'zxing-reader-lifetime-noninterference', revision: 1 },
+      association: { sourceSha256: createHash('sha256').update(text).digest('hex'), relativePath: './zxing_reader.wasm', route: 'adjacent' },
+      resourceBytes: Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0]),
+    });
+    assert.equal(analysis.compatibility, 'incompatible');
+    assert.equal(analysis.dependencyProof.resource.binaryVersion, 1);
+    assert.equal(analysis.dependencyProof.acceptedContract, null);
+    assert.equal(analysis.dependencyProof.diagnostics[0].code, 'DEPENDENCY_RESOURCE_IDENTITY');
+  });
 
   await t.test('installed CLI proves deferred sources and rederives mixed mode plans offline', async t => {
     const box = await sandbox(t, installation);
