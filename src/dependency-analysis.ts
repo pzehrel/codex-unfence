@@ -145,7 +145,7 @@ export function inspectDependency(source: string, input: DependencyEvidenceInput
   if (imports !== contract.imports) return fail('DEPENDENCY_IMPORT_INTERFACE', 'Measured import names and signatures do not match the approved resource interface.');
   proof.registeredContract = { id: contract.id, revision: contract.revision, assumption: 'The approved resource preserves relevant host capabilities, prototypes, site-status bindings and configuration throughout verified initialization and decoding, including delayed effects.' };
   proof.status = 'incomplete';
-  const structural = proveDependencySource(source);
+  const structural = proveDependencySource(source, proof.resource);
   proof.evidence = structural.evidence;
   proof.diagnostics.push(...structural.diagnostics);
   return proof;

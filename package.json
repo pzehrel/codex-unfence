@@ -15,6 +15,7 @@
     "dist/dependency-analysis.js",
     "dist/dependency-contracts.js",
     "dist/dependency-source.js",
+    "dist/resource-provenance.js",
     "dist/cli.js",
     "dist/discovery.js",
     "dist/integrity.js",

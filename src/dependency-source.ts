@@ -1,5 +1,6 @@
 import { parse } from 'acorn';
 import { analyze } from 'eslint-scope';
+import { resourceProvenance } from './resource-provenance.js';
 import type { Variable } from 'eslint-scope';
 import type * as E from 'estree';
 import type { AnalysisDiagnostic, SourceRange, StructuralEvidence } from './analysis.js';
@@ -25,7 +26,7 @@ function call(node: E.Node | undefined | null): node is E.CallExpression { retur
 function body(node: Fn): E.Statement[] { return node.body.type === 'BlockStatement' ? node.body.body : []; }
 
 /** No capability exception is granted by this partial structural proof. */
-export function proveDependencySource(source: string): SourceProof {
+export function proveDependencySource(source: string, resource: Parameters<typeof resourceProvenance>[2]): SourceProof {
   const proof: SourceProof = { evidence: [], diagnostics: [] };
   let program: E.Program;
   try { program = parse(source, { ecmaVersion: 2022, sourceType: 'module', ranges: true }) as unknown as E.Program; }
@@ -45,6 +46,7 @@ export function proveDependencySource(source: string): SourceProof {
   const privateEscape = graph.cacheEscape(cache);
   if (privateEscape) return fail('DEPENDENCY_PRIVATE_STATE_ESCAPE', 'WeakMap state may only be accessed by the matched cache operations; aliases, extra accesses, writes and exports are unproven.', privateEscape);
   proof.evidence.push({ kind: 'cache', range: position(cache), description: 'Finite WeakMap cache syntax replaces selected overrides rather than merging, reuses a module only through its equality parameter, and invokes initialization with a new spread object. WeakMap references close over these operations. Equality/default provenance, other binding references and inherited options remain unproven.' });
+  proof.evidence.push(...resourceProvenance(graph, initialization.factory, resource));
   const glue = graph.prototypeEffects(initialization.factory);
   proof.evidence.push(...glue.evidence);
   if (glue.blocker) return fail('DEPENDENCY_GLUE_EFFECT_UNPROVEN', 'A directly reached JavaScript glue prototype operation lacks a finite private constructor, receiver or method-effect proof. The resource contract does not cover this JavaScript write.', glue.blocker);
