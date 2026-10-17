@@ -19,6 +19,115 @@ interface Graph {
   standard(node: E.Node, name: string): boolean;
   owner(node: E.Node): Fn | E.Program;
 }
+const summaryBrand = Symbol('resource-summary');
+const callbackBrand = Symbol('resource-callback');
+class VerifierIdentity { declare private verifierIdentity: void }
+function verifiedRecord<T extends object>(fields: T): T & VerifierIdentity {
+  const record = Object.assign(new VerifierIdentity(), fields);
+  Object.freeze(record);
+  return record;
+}
+
+// Private module interface. AST nodes and scope variables are borrowed identities
+// from this analysis, not copies, public proof inputs or effect authorizations.
+type ResourceEvidence = Readonly<Omit<StructuralEvidence, 'range'> & { range: Readonly<SourceRange> }>;
+export interface ResourceSummary extends VerifierIdentity {
+  readonly [summaryBrand]: true;
+  readonly evidence: readonly ResourceEvidence[];
+  readonly callbacks: readonly ResourceCallback[];
+}
+export interface ResourceRequirement {
+  readonly id: keyof typeof requirementDescriptions | 'unsupported-structure';
+  readonly operation: E.Node;
+  readonly allocation: E.NewExpression | E.ObjectExpression | E.ArrayExpression | null;
+  readonly state: 'unsatisfied';
+  readonly detail?: string;
+}
+type CallbackField = 'rawDestructor' | 'getActualType' | 'upcast' | 'downcast';
+interface BoundFunction { readonly node: Fn; readonly binding: Variable }
+interface BoundValue { readonly formal: E.Pattern; readonly binding: Variable }
+interface ResourceFlow {
+  readonly imports: E.ObjectExpression;
+  readonly namespace: E.Property;
+  readonly importTable: E.ObjectExpression;
+  readonly importsBinding: Variable;
+  readonly instantiate: E.CallExpression;
+  readonly bytes: BoundFunction;
+  readonly bytesCall: E.CallExpression;
+  readonly route: BoundFunction;
+  readonly routeCall: E.CallExpression;
+  readonly initializer: BoundFunction;
+  readonly initializerCall: E.CallExpression;
+  readonly receiveResult: BoundFunction;
+  readonly resultCall: E.CallExpression;
+  readonly receive: BoundFunction;
+  readonly receiveCalls: readonly E.CallExpression[];
+  readonly saveExports: E.AssignmentExpression;
+  readonly assignExports: E.CallExpression;
+  readonly exportAssignment: BoundFunction;
+}
+type CallbackOrigin = Readonly<{
+  kind: 'resource-table-function';
+  tableBinding: Variable;
+  tableStore: E.AssignmentExpression;
+  tableExport: E.MemberExpression;
+  lookup: BoundFunction;
+  lookupCall: E.CallExpression;
+  cacheBinding: Variable;
+  cacheAllocation: E.ArrayExpression;
+}> | Readonly<{
+  kind: 'closed-signature-wrapper';
+  wrapper: BoundFunction;
+  wrapperCall: E.CallExpression;
+  closure: Fn;
+  captures: Readonly<{ signature: Variable; pointer: Variable; flag: Variable; invoke: Variable }>;
+  invoke: BoundFunction;
+  wide: BoundFunction;
+  functionsBinding: Variable;
+  functionsAllocation: E.ObjectExpression;
+  exports: readonly Readonly<{ store: E.AssignmentExpression; source: E.MemberExpression }>[];
+}> | Readonly<{
+  // Only the guarded syntax is established. Zero still requires the i32 ABI
+  // and invocation/lifetime conditions; this is not a proved scalar value.
+  kind: 'guarded-optional-zero';
+  guard: E.LogicalExpression;
+  pointerBinding: Variable;
+}>;
+export interface ResourceCallback extends VerifierIdentity { readonly [callbackBrand]: true }
+export interface ResourceCallbackFacts extends VerifierIdentity {
+  readonly [callbackBrand]: true;
+  readonly operation: E.AssignmentExpression;
+  readonly allocation: E.NewExpression;
+  readonly field: CallbackField;
+  readonly constructor: BoundFunction;
+  readonly arguments: readonly Readonly<{ index: number; argument: E.Node; argumentBinding: Variable | null; formal: E.Pattern; formalBinding: Variable | null }>[];
+  readonly importer: BoundFunction;
+  readonly importProperty: E.Property;
+  readonly scheduler: Readonly<{ call: E.CallExpression; callback: Fn; target: BoundFunction }>;
+  readonly conversion: Readonly<{
+    assignment: E.AssignmentExpression;
+    call: E.CallExpression;
+    pointer: BoundValue;
+    signature: BoundValue;
+    argumentIndex: number;
+    guard: E.LogicalExpression | null;
+    resolver: BoundFunction;
+    selector: BoundFunction;
+    selection: E.ConditionalExpression;
+  }>;
+  readonly resource: ResourceFlow;
+  readonly origins: readonly CallbackOrigin[];
+  readonly references: readonly E.Node[];
+  readonly requirements: readonly ResourceRequirement[];
+}
+const summaryContexts = new WeakMap<ResourceSummary, { graph: Graph; factory: Fn; callbacks: readonly ResourceCallbackFacts[] }>();
+
+/** Reject summaries from another parsed graph/factory, including equal text. */
+export function resourceCallbacks(summary: ResourceSummary, graph: Graph, factory: Fn): readonly ResourceCallbackFacts[] | null {
+  const context = summaryContexts.get(summary);
+  return context?.graph === graph && context.factory === factory ? context.callbacks : null;
+}
+
 interface Operation {
   role: string;
   node: E.Node;
@@ -26,8 +135,23 @@ interface Operation {
   origin: 'resource-instance' | 'resource-table' | 'resource-function' | 'closed-wrapper' | 'resource-function-or-closed-wrapper' | 'own-record';
   effects: string;
   references: E.Node[];
-  requirements: string[];
+  requirements: readonly ResourceRequirement[];
   status: 'proved' | 'conditional' | 'pruned' | 'unknown';
+}
+interface MetadataField {
+  node: E.AssignmentExpression;
+  receiver: E.NewExpression;
+  name: CallbackField;
+  constructor: Fn;
+  callback: Fn;
+  scheduled: E.CallExpression;
+  scheduler: Fn;
+  formal: number;
+  conversion: E.CallExpression;
+  assignment: E.AssignmentExpression;
+  pointer: E.Pattern;
+  signature: E.Pattern;
+  guard: E.LogicalExpression | null;
 }
 const fn = (node: E.Node | null | undefined): node is Fn => !!node && ['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(node.type);
 const call = (node: E.Node | null | undefined): node is E.CallExpression => node?.type === 'CallExpression' && !node.optional;
@@ -37,21 +161,42 @@ const range = (node: E.Node): SourceRange => { const located = node as E.Node & 
 const key = (node: E.Node | null | undefined): string | null => node?.type === 'Identifier' ? node.name : node?.type === 'Literal' && typeof node.value === 'string' ? node.value : null;
 const member = (node: E.Node | null | undefined, name?: string): node is E.MemberExpression => node?.type === 'MemberExpression' && !node.optional && (name === undefined || key(node.property) === name && (!node.computed || node.property.type === 'Literal'));
 const plain = (property: E.Property | E.SpreadElement): property is E.Property => property.type === 'Property' && property.kind === 'init' && !property.computed && !property.method && key(property.key) !== '__proto__';
-const conditions = [
-  'adjacent bytes, copy/options and cache call ordering must be closed',
-  'inherited instantiateWasm and hooks must be absent with all intervening JavaScript effects proved',
-  'byte/signature decoders, initialization callbacks and error branches need individual effect proofs',
-  'numeric ABI keys, own properties and unchanged standard prototypes must be proved',
-  'scheduler, metadata publication and every later invocation/receiver/lifetime remain unproved',
-];
+// IDs are stable requirements; descriptions are only the public diagnostic
+// projection. Several distinct obligations retain the existing grouped wording.
+const requirementDescriptions = {
+  'source-bytes': 'adjacent bytes, copy/options and cache call ordering must be closed',
+  'copy-options': 'adjacent bytes, copy/options and cache call ordering must be closed',
+  'cache-order': 'adjacent bytes, copy/options and cache call ordering must be closed',
+  'hooks-absent': 'inherited instantiateWasm and hooks must be absent with all intervening JavaScript effects proved',
+  'intervening-effects': 'inherited instantiateWasm and hooks must be absent with all intervening JavaScript effects proved',
+  'decoder-effects': 'byte/signature decoders, initialization callbacks and error branches need individual effect proofs',
+  'initialization-readiness': 'byte/signature decoders, initialization callbacks and error branches need individual effect proofs',
+  'error-effects': 'byte/signature decoders, initialization callbacks and error branches need individual effect proofs',
+  'abi-key-category': 'numeric ABI keys, own properties and unchanged standard prototypes must be proved',
+  'own-data-property': 'numeric ABI keys, own properties and unchanged standard prototypes must be proved',
+  'standard-prototypes': 'numeric ABI keys, own properties and unchanged standard prototypes must be proved',
+  'scheduler-effects': 'scheduler, metadata publication and every later invocation/receiver/lifetime remain unproved',
+  'metadata-publication': 'scheduler, metadata publication and every later invocation/receiver/lifetime remain unproved',
+  'callback-invocation': 'scheduler, metadata publication and every later invocation/receiver/lifetime remain unproved',
+  'callback-receiver': 'scheduler, metadata publication and every later invocation/receiver/lifetime remain unproved',
+  'callback-lifetime': 'scheduler, metadata publication and every later invocation/receiver/lifetime remain unproved',
+};
+const requirementIds = Object.keys(requirementDescriptions) as (keyof typeof requirementDescriptions)[];
+function renderRequirements(requirements: readonly ResourceRequirement[]): string {
+  return [...new Set(requirements.map(requirement => requirement.id === 'unsupported-structure' ? requirement.detail! : requirementDescriptions[requirement.id]))].join('; ') || 'none for this individual syntax fact';
+}
+function renderEvidence(operations: readonly Operation[]): StructuralEvidence[] {
+  return operations.map(operation => ({ kind: 'source', range: range(operation.node), description: `${operation.role}: ${operation.status}; ${operation.effects} Origin ${operation.origin}; ${operation.references.length} local references accounted for this operation. Remaining conditions: ${renderRequirements(operation.requirements)}. This record never authorizes a host effect or certifies a cycle.` }));
+}
 
 /** Read only the already parsed source and independently measured interface. */
-export function resourceProvenance(graph: Graph, factory: Fn, resource: ResourceInterface): StructuralEvidence[] {
+export function resourceProvenance(graph: Graph, factory: Fn, resource: ResourceInterface): ResourceSummary {
   return new Provenance(graph, factory, resource).inspect();
 }
 
 class Provenance {
   readonly operations: Operation[] = [];
+  readonly callbacks: ResourceCallbackFacts[] = [];
   constructor(readonly graph: Graph, readonly factory: Fn, readonly resource: ResourceInterface) {}
   local(node: E.Node): boolean {
     let owner = this.graph.owner(node);
@@ -83,15 +228,32 @@ class Provenance {
     const binding = this.graph.bindings.get(identifier), definition = binding?.defs[0]?.node;
     return binding?.defs.length === 1 && definition?.type === 'VariableDeclarator' ? definition.init : null;
   }
-  record(role: string, node: E.Node, receiver: E.Node, origin: Operation['origin'], effects: string, references: E.Node[], requirements = conditions): void {
-    this.operations.push({ role, node, receiver, origin, effects, references, requirements: [...requirements], status: requirements.length ? 'conditional' : 'proved' });
+  requirements(node: E.Node, receiver: E.Node, ids = requirementIds): readonly ResourceRequirement[] {
+    const allocation = receiver.type === 'NewExpression' || receiver.type === 'ObjectExpression' || receiver.type === 'ArrayExpression' ? receiver : null;
+    return Object.freeze(ids.map(id => Object.freeze({ id, operation: node, allocation, state: 'unsatisfied' as const })));
   }
-  fail(node: E.Node, role: string, requirement: string): StructuralEvidence[] {
+  record(role: string, node: E.Node, receiver: E.Node, origin: Operation['origin'], effects: string, references: E.Node[], ids = requirementIds): readonly ResourceRequirement[] {
+    const requirements = this.requirements(node, receiver, ids);
+    this.operations.push({ role, node, receiver, origin, effects, references, requirements, status: requirements.length ? 'conditional' : 'proved' });
+    return requirements;
+  }
+  fail(node: E.Node, role: string, detail: string): ResourceSummary {
+    const requirement: ResourceRequirement = Object.freeze({ id: 'unsupported-structure', operation: node, allocation: null, state: 'unsatisfied', detail });
     this.operations.push({ role, node, receiver: node, origin: 'own-record', effects: 'No origin or effect authorization.', references: [], requirements: [requirement], status: 'unknown' });
-    return this.evidence();
+    return this.summary();
   }
-  evidence(): StructuralEvidence[] {
-    return this.operations.map(operation => ({ kind: 'source', range: range(operation.node), description: `${operation.role}: ${operation.status}; ${operation.effects} Origin ${operation.origin}; ${operation.references.length} local references accounted for this operation. Remaining conditions: ${operation.requirements.join('; ') || 'none for this individual syntax fact'}. This record never authorizes a host effect or certifies a cycle.` }));
+  summary(): ResourceSummary {
+    const callbacks = Object.freeze([...this.callbacks]);
+    const summary: ResourceSummary = verifiedRecord({
+      [summaryBrand]: true as const,
+      evidence: Object.freeze(renderEvidence(this.operations).map(entry => Object.freeze({ ...entry, range: Object.freeze(entry.range) }))),
+      callbacks: Object.freeze(callbacks.map((): ResourceCallback => verifiedRecord({ [callbackBrand]: true as const }))),
+    });
+    summaryContexts.set(summary, { graph: this.graph, factory: this.factory, callbacks });
+    return summary;
+  }
+  bound(node: Fn, reference = this.bindingNode(node)!): BoundFunction {
+    return Object.freeze({ node, binding: this.graph.bindings.get(reference)! });
   }
   // Exact small helper grammars, alpha-renamed using resolved binding identity.
   // This compares syntax only, never evaluates source or interprets arbitrary JS.
@@ -120,9 +282,9 @@ class Provenance {
     };
     return compare(node, statement.expression) ? captures : null;
   }
-  inspect(): StructuralEvidence[] {
+  inspect(): ResourceSummary {
     const instantiations = this.graph.nodes.filter((node): node is E.CallExpression => call(node) && this.local(node) && member(node.callee, 'instantiate') && this.graph.standard(node.callee.object, 'WebAssembly'));
-    if (instantiations.length !== 1) return [];
+    if (instantiations.length !== 1) return this.summary();
     const instantiate = instantiations[0]!, bytesFunction = this.graph.owner(instantiate);
     if (!fn(bytesFunction) || bytesFunction.params.length !== 2 || instantiate.arguments.length !== 2 || !this.graph.same(instantiate.arguments[1], bytesFunction.params[1])) return this.fail(instantiate, 'Resource import association', 'instantiate must receive the selected import parameter without substitution');
     const instantiateAwait = this.graph.parents.get(instantiate), instantiateReturn = instantiateAwait && this.graph.parents.get(instantiateAwait);
@@ -244,15 +406,65 @@ class Provenance {
       if (!fn(importer) || !importers.has(importer) || !importOnly(importer) || !call(parent) || parent.callee !== operation || operation.arguments.length !== 1 || !this.graph.same(operation.arguments[0], importer.params[0])) return this.fail(operation, 'Resource callback origin', 'direct table invoker has an unknown caller, pointer origin or escaped function value');
       this.record('Resource table invoker', operation, table.target, 'resource-function', 'Imported wrapper calls the selected table function directly with its first ABI parameter as pointer; surrounding exception/stack effects still require proof.', this.uses(this.bindingNode(importer)!));
     }
+    const resourceFlow: ResourceFlow = Object.freeze({
+      imports: modules, namespace, importTable, importsBinding: this.graph.bindings.get(importsId)!,
+      instantiate, bytes: this.bound(bytesFunction), bytesCall: byteCall,
+      route: this.bound(route), routeCall, initializer: this.bound(initializer), initializerCall: initializerCalls[0]!,
+      receiveResult: this.bound(receiveResult), resultCall, receive: this.bound(receive),
+      receiveCalls: Object.freeze([...receiveCalls]), saveExports: save, assignExports: assign,
+      exportAssignment: this.bound(exportAssignment),
+    });
+    const wrapperReturn = statements(wrapper).at(-1);
+    // The exact helper grammar above establishes this returned closure and its
+    // captured flag declaration; retaining them adds no new proof condition.
+    const closure = (wrapperReturn as E.ReturnStatement).argument as Fn;
+    const tableOrigin: CallbackOrigin = Object.freeze({
+      kind: 'resource-table-function', tableBinding: tableBinding!, tableStore: table.operation, tableExport: table.source,
+      lookup: this.bound(lookup), lookupCall: selectors[0]!, cacheBinding: this.graph.bindings.get(cache)!, cacheAllocation: cacheValue,
+    });
+    const wrapperOrigin: CallbackOrigin = Object.freeze({
+      kind: 'closed-signature-wrapper', wrapper: this.bound(wrapper), wrapperCall: selection.consequent,
+      closure, captures: Object.freeze({
+        signature: this.graph.bindings.get(wrapperShape.get('signature')!)!,
+        pointer: this.graph.bindings.get(wrapperShape.get('pointer')!)!,
+        flag: this.graph.bindings.get(wrapperShape.get('flag')!)!,
+        invoke: this.graph.bindings.get(invokeId)!,
+      }), invoke: this.bound(invoke), wide: this.bound(wide),
+      functionsBinding: this.graph.bindings.get(functions)!, functionsAllocation: functionsValue,
+      exports: Object.freeze(functionStores.map(store => Object.freeze({ store: store.operation, source: store.source }))),
+    });
     for (const importer of importers) {
       const calls = resolverCalls.filter(operation => this.graph.owner(operation) === importer);
       const property = (importTable.properties as E.Property[]).find(item => this.graph.definition(item.value) === importer);
       const signature = property && this.resource.imports.find(item => item.name === key(property.key));
       if (calls.length !== 4 || importer.params.length !== 13 || signature?.parameters.length !== 13 || signature.parameters.some(type => type !== 'i32') || signature.results.length) continue;
       const fields = this.metadata(importer, calls, resolver);
-      for (const field of fields) this.record('Resource callback origin', field.node, field.receiver, 'resource-function-or-closed-wrapper', `The ${field.name} field receives only the connected resource table function or closed signature wrapper${field.optional ? ', or zero on its guarded optional conversion path' : ''}; storing this value does not prove its later invocation. The imported class entry has thirteen measured i32 parameters and no JavaScript caller outside its import property.`, [...this.uses(this.bindingNode(importer)!), ...this.uses(this.bindingNode(resolver)!)]);
+      for (const field of fields) {
+        const requirements = this.record('Resource callback origin', field.node, field.receiver, 'resource-function-or-closed-wrapper', `The ${field.name} field receives only the connected resource table function or closed signature wrapper${field.guard ? ', or zero on its guarded optional conversion path' : ''}; storing this value does not prove its later invocation. The imported class entry has thirteen measured i32 parameters and no JavaScript caller outside its import property.`, [...this.uses(this.bindingNode(importer)!), ...this.uses(this.bindingNode(resolver)!)]);
+        const pointerBinding = this.graph.bindings.get(field.pointer)!;
+        const origins: CallbackOrigin[] = [tableOrigin, wrapperOrigin];
+        if (field.guard) origins.push(Object.freeze({ kind: 'guarded-optional-zero', guard: field.guard, pointerBinding }));
+        this.callbacks.push(verifiedRecord({
+          [callbackBrand]: true as const, operation: field.node, allocation: field.receiver, field: field.name,
+          constructor: this.bound(field.constructor),
+          arguments: Object.freeze(field.receiver.arguments.map((argument, index) => {
+            const formal = field.constructor.params[index]!;
+            return Object.freeze({ index, argument, argumentBinding: this.graph.bindings.get(argument) ?? null, formal, formalBinding: this.graph.bindings.get(formal) ?? null });
+          })),
+          importer: this.bound(importer), importProperty: property!,
+          scheduler: Object.freeze({ call: field.scheduled, callback: field.callback, target: this.bound(field.scheduler, field.scheduled.callee) }),
+          conversion: Object.freeze({
+            assignment: field.assignment, call: field.conversion,
+            pointer: Object.freeze({ formal: field.pointer, binding: pointerBinding }),
+            signature: Object.freeze({ formal: field.signature, binding: this.graph.bindings.get(field.signature)! }),
+            argumentIndex: field.formal, guard: field.guard, resolver: this.bound(resolver), selector: this.bound(selector), selection,
+          }),
+          resource: resourceFlow, origins: Object.freeze(origins),
+          references: Object.freeze([...this.uses(this.bindingNode(importer)!), ...this.uses(this.bindingNode(resolver)!)]), requirements,
+        }));
+      }
     }
-    return this.evidence();
+    return this.summary();
   }
   ancestor(node: E.Node, type: string): E.Node | null {
     let parent = this.graph.parents.get(node);
@@ -285,9 +497,9 @@ class Provenance {
     };
     return this.immutable(result.id) && this.uses(result.id).every(use => within(use, check.left) || use === returned[1]) && this.uses(pointer!).every(use => within(use, selection) || within(use, check.right)) && this.uses(signature!).every(use => within(use, decode) || within(use, selection) || within(use, check.right));
   }
-  metadata(importer: Fn, calls: E.CallExpression[], resolver: Fn): { node: E.Node; receiver: E.Node; name: string; optional: boolean }[] {
-    const expected = new Map([[5, 'getActualType'], [7, 'upcast'], [9, 'downcast'], [12, 'rawDestructor']]);
-    const assignments = new Map<Variable, E.CallExpression>();
+  metadata(importer: Fn, calls: E.CallExpression[], resolver: Fn): MetadataField[] {
+    const expected = new Map<number, CallbackField>([[5, 'getActualType'], [7, 'upcast'], [9, 'downcast'], [12, 'rawDestructor']]);
+    const assignments = new Map<Variable, { call: E.CallExpression; assignment: E.AssignmentExpression; pointer: E.Pattern; signature: E.Pattern; guard: E.LogicalExpression | null }>();
     for (const operation of calls) {
       const parent = this.graph.parents.get(operation);
       if (parent?.type !== 'AssignmentExpression' || parent.operator !== '=' || operation.arguments.length !== 2 || !this.graph.same(parent.left, operation.arguments[1])) return [];
@@ -296,20 +508,24 @@ class Provenance {
       if (!expected.has(index) || !signature || !this.immutable(signature) || this.uses(signature).some(use => use !== operation.arguments[0]) || !this.graph.same(operation.arguments[0], signature) || this.graph.definition(operation.callee) !== resolver) return [];
       const binding = this.graph.bindings.get(parent.left);
       if (!binding || assignments.has(binding) || binding.references.some(reference => reference.isWrite() && reference.identifier !== parent.left)) return [];
+      let guard: E.LogicalExpression | null = null;
       if ([7, 9].includes(index)) {
-        const guard = this.graph.parents.get(parent);
-        if (guard?.type !== 'LogicalExpression' || guard.operator !== '&&' || guard.right !== parent || !this.graph.same(guard.left, parent.left)) return [];
+        const protection = this.graph.parents.get(parent);
+        if (protection?.type !== 'LogicalExpression' || protection.operator !== '&&' || protection.right !== parent || !this.graph.same(protection.left, parent.left)) return [];
+        guard = protection;
       }
-      assignments.set(binding, operation);
+      assignments.set(binding, { call: operation, assignment: parent, pointer: importer.params[index]!, signature, guard });
     }
     if (assignments.size !== 4) return [];
     const creations = this.graph.nodes.filter((node): node is E.NewExpression => node.type === 'NewExpression' && this.local(node) && this.graph.owner(this.graph.owner(node)) === importer);
-    const fields: { node: E.Node; receiver: E.Node; name: string; optional: boolean }[] = [];
+    const fields: MetadataField[] = [];
     for (const creation of creations) {
       const constructor = this.graph.definition(creation.callee), callback = this.graph.owner(creation);
       if (!constructor || !fn(callback)) continue;
       const scheduled = this.graph.parents.get(callback);
-      if (!call(scheduled) || scheduled.arguments.length !== 3 || scheduled.arguments[2] !== callback || !this.graph.definition(scheduled.callee)) continue;
+      if (!call(scheduled) || scheduled.arguments.length !== 3 || scheduled.arguments[2] !== callback) continue;
+      const scheduler = this.graph.definition(scheduled.callee);
+      if (!scheduler) continue;
       const constructorCallsClosed = this.closedFunction(constructor, (use, parent) => parent === creation && creation.callee === use);
       if (!constructorCallsClosed || constructor.params.length !== creation.arguments.length) continue;
       const operations = statements(constructor).flatMap(statement => statement.type === 'ExpressionStatement' ? expressions(statement.expression) : []);
@@ -329,11 +545,13 @@ class Provenance {
         const argument = creation.arguments[formal], binding = argument && this.graph.bindings.get(argument), original = binding && assignments.get(binding);
         if (!original) continue;
         const index = importer.params.findIndex(parameter => this.graph.same(parameter, argument));
-        if (key(operation.left.property) !== expected.get(index)) continue;
-        candidate.push({ node: operation, receiver: creation, name: key(operation.left.property)!, optional: [7, 9].includes(index) });
+        const name = expected.get(index);
+        if (!name || key(operation.left.property) !== name) continue;
+        candidate.push({ node: operation, receiver: creation, name, constructor, callback, scheduled, scheduler, formal, conversion: original.call, assignment: original.assignment, pointer: original.pointer, signature: original.signature, guard: original.guard });
       }
       if (candidate.length === 4) {
-        const closed = [...assignments].every(([binding, operation]) => binding.references.every(reference => {
+        const closed = [...assignments].every(([binding, conversion]) => binding.references.every(reference => {
+          const operation = conversion.call;
           const use = reference.identifier, parent = this.graph.parents.get(use);
           if (parent === this.graph.parents.get(operation) || parent === operation) return true;
           if (parent?.type === 'LogicalExpression' && parent.left === use && parent.right === this.graph.parents.get(operation)) return true;
