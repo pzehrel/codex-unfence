@@ -45,8 +45,9 @@ export function proveDependencySource(source: string): SourceProof {
   const privateEscape = graph.cacheEscape(cache);
   if (privateEscape) return fail('DEPENDENCY_PRIVATE_STATE_ESCAPE', 'WeakMap state may only be accessed by the matched cache operations; aliases, extra accesses, writes and exports are unproven.', privateEscape);
   proof.evidence.push({ kind: 'cache', range: position(cache), description: 'Finite WeakMap cache syntax replaces selected overrides rather than merging, reuses a module only through its equality parameter, and invokes initialization with a new spread object. WeakMap references close over these operations. Equality/default provenance, other binding references and inherited options remain unproven.' });
-  const glueEffect = graph.prototypeEffect(initialization.factory);
-  if (glueEffect) return fail('DEPENDENCY_GLUE_EFFECT_UNPROVEN', 'A directly reached JavaScript glue operation writes a prototype. Class/instance privacy and installed method effects need a finite proof; the resource contract does not cover this JavaScript write.', glueEffect);
+  const glue = graph.prototypeEffects(initialization.factory);
+  proof.evidence.push(...glue.evidence);
+  if (glue.blocker) return fail('DEPENDENCY_GLUE_EFFECT_UNPROVEN', 'A directly reached JavaScript glue prototype operation lacks a finite private constructor, receiver or method-effect proof. The resource contract does not cover this JavaScript write.', glue.blocker);
   return fail('DEPENDENCY_LIFETIME_UNPROVEN', 'Private cache references, all decode callsites, inherited hooks and the resource import consumer graph remain unproven.', cache);
 }
 
@@ -103,15 +104,20 @@ class SourceGraph {
     if (!wrapper || wrapper.async || wrapper.params.length !== 1 || wrapper.params[0]?.type !== 'Identifier' || wrapperBody.length !== 1 || !call(forwarding) || forwarding.arguments.length !== 2 || !this.same(forwarding.arguments[1], wrapper.params[0]) || !forwarding.arguments[0] || !fn(this.definition(forwarding.arguments[0]))) return null;
     return { node, wrapper, factory: this.definition(forwarding.arguments[0])! };
   }
-  // Counterexample discovery only, never an acceptance analysis. Follow direct
-  // calls, skip deferred callback bodies, and report a concrete unproved write.
-  // Absence of a found write does not establish a complete reachable graph.
-  prototypeEffect(factory: Fn): E.Node | null {
-    const seen = new Set<Fn>();
+  // Discovery follows direct calls only. Each supported operation gets its own
+  // summary; absence of a blocker never proves the remaining lifetime graph.
+  prototypeEffects(factory: Fn): { evidence: StructuralEvidence[]; blocker: E.Node | null } {
+    const evidence: StructuralEvidence[] = [], seen = new Set<Fn>([factory]);
     const inspect = (node: E.Node, owner: Fn): E.Node | null => {
       if (fn(node) && node !== owner) return null;
       if (call(node)) {
-        if (member(node.callee, 'assign') && this.standard(node.callee.object, 'Object') && member(node.arguments[0], 'prototype')) return node;
+        if (member(node.callee, 'assign') && this.standard(node.callee.object, 'Object')) {
+          const prototype = this.prototypeOrigin(node.arguments[0]);
+          if (prototype) {
+            if (!this.privatePrototype(node, prototype, factory)) return node;
+            evidence.push({ kind: 'receiver', range: position(node), description: 'This individual prototype installation has a closed private constructor and local instances. Every installed method has finite scalar effects on a proven private receiver; constructor, prototype and instance references cannot escape or replace methods. Standard-prototype and the remaining import/lifetime effects remain separate obligations.' });
+          }
+        }
         const target = this.definition(node.callee);
         if (target && !seen.has(target)) { seen.add(target); const effect = inspect(target.body, target); if (effect) return effect; }
       }
@@ -124,8 +130,290 @@ class SourceGraph {
       }
       return null;
     };
-    seen.add(factory);
-    return inspect(factory.body, factory);
+    const blocker = inspect(factory.body, factory);
+    if (blocker?.type === 'CallExpression') {
+      const prototype = this.prototypeOrigin(blocker.arguments[0]);
+      if (prototype) evidence.push(...this.registrationFieldStores(factory, prototype));
+    }
+    return { evidence, blocker };
+  }
+  // An operation-local summary, deliberately weaker than a private type proof.
+  // It proves stores on a newly allocated receiver and traces their callback
+  // location, not argument effects, scheduler behavior or returned-object use.
+  registrationFieldStores(factory: Fn, prototype: E.MemberExpression): StructuralEvidence[] {
+    const base = this.bindings.get(prototype.object);
+    if (!this.immutable(base)) return [];
+    const callbacks = new Set<Fn>();
+    for (const reference of base!.references) {
+      const access = this.parents.get(reference.identifier), callback = this.owner(reference.identifier);
+      if (!member(access, 'prototype') || !fn(callback) || callback === factory) continue;
+      const registration = this.parents.get(callback), importer = this.owner(callback);
+      if (!call(registration) || registration.arguments[2] !== callback || callback.params.length !== 1 || callback.params[0]?.type !== 'Identifier' || callback.async || callback.generator || !fn(importer) || this.owner(importer) !== factory || !this.definition(registration.callee) || registration.arguments.length !== 3) continue;
+      const identifiers = importer.type === 'FunctionDeclaration' && importer.id ? [importer.id] : this.parents.get(importer)?.type === 'VariableDeclarator' ? [(this.parents.get(importer) as E.VariableDeclarator).id] : [];
+      const binding = identifiers[0] ? this.bindings.get(identifiers[0]) : undefined;
+      const objectReference = binding?.references.some(use => {
+        const property = this.parents.get(use.identifier), object = property ? this.parents.get(property) : undefined;
+        return !use.isWrite() && property?.type === 'Property' && property.kind === 'init' && !property.computed && property.value === use.identifier && object?.type === 'ObjectExpression' && this.owner(object) === factory;
+      });
+      if (objectReference) callbacks.add(callback);
+    }
+    const evidence: StructuralEvidence[] = [];
+    for (const callback of callbacks) {
+      const candidates: E.NewExpression[] = [];
+      walk(callback.body, node => { if (node.type === 'NewExpression' && this.owner(node) === callback) candidates.push(node); });
+      for (const creation of candidates) {
+        const constructor = this.definition(creation.callee), binding = this.bindings.get(creation.callee);
+        if (!constructor || constructor.type !== 'FunctionDeclaration' || constructor.async || constructor.generator || this.owner(constructor) !== factory || constructor.params.some(parameter => parameter.type !== 'Identifier') || constructor.params.length !== creation.arguments.length || !this.immutable(binding)) continue;
+        if (binding!.references.some(reference => {
+          const parent = this.parents.get(reference.identifier);
+          return parent?.type !== 'NewExpression' || parent.callee !== reference.identifier || !callbacks.has(this.owner(parent) as Fn);
+        })) continue;
+        const operations = body(constructor).flatMap(statement => statement.type === 'ExpressionStatement' ? statement.expression.type === 'SequenceExpression' ? statement.expression.expressions : [statement.expression] : []);
+        if (!operations.length || body(constructor).some(statement => statement.type !== 'ExpressionStatement')) continue;
+        const names = new Set<string>();
+        const valid = operations.every(operation => {
+          if (operation.type !== 'AssignmentExpression' || operation.operator !== '=' || operation.left.type !== 'MemberExpression' || operation.left.optional || operation.left.computed || operation.left.object.type !== 'ThisExpression' || operation.left.property.type !== 'Identifier') return false;
+          const name = operation.left.property.name;
+          if (['__proto__', 'prototype'].includes(name) || names.has(name)) return false;
+          names.add(name);
+          return constructor.params.some(parameter => this.same(parameter, operation.right)) || operation.right.type === 'ArrayExpression' && !operation.right.elements.length;
+        });
+        if (!valid) continue;
+        for (const operation of operations) evidence.push({ kind: 'receiver', range: position(operation), description: 'This store creates a fresh own data field on the implicit receiver of a direct local new-construction. Its RHS only reads a formal parameter or allocates an empty array. The constructor binding is referenced only by new-constructions in structurally associated registration callbacks sharing this local base prototype. Argument evaluation, standard-prototype interference, callback/scheduler effects, descriptor publication and lifetime are NOT proved by this operation summary.' });
+      }
+    }
+    return evidence;
+  }
+  prototypeOrigin(node: E.Node | undefined): E.MemberExpression | null {
+    if (member(node, 'prototype')) return node;
+    const binding = node ? this.bindings.get(node) : undefined, declaration = binding?.defs[0]?.node;
+    return binding?.defs.length === 1 && declaration?.type === 'VariableDeclarator' && member(declaration.init, 'prototype') ? declaration.init : null;
+  }
+  owner(node: E.Node): Fn | E.Program {
+    let parent = this.parents.get(node);
+    while (parent && !fn(parent) && parent.type !== 'Program') parent = this.parents.get(parent);
+    return parent as Fn | E.Program;
+  }
+  immutable(binding: Variable | undefined): boolean {
+    return !!binding && binding.defs.length === 1 && binding.references.every(reference => !reference.isWrite() || reference.init);
+  }
+  directStatement(node: E.Node, owner: Fn): E.Statement | null {
+    const parent = this.parents.get(node);
+    if (parent?.type === 'ExpressionStatement' && this.parents.get(parent) === owner.body) return parent;
+    if (parent?.type === 'VariableDeclarator') {
+      const declaration = this.parents.get(parent);
+      if (declaration?.type === 'VariableDeclaration' && declaration.declarations.length === 1 && this.parents.get(declaration) === owner.body) return declaration;
+    }
+    return null;
+  }
+  privatePrototype(operation: E.CallExpression, prototype: E.MemberExpression, factory: Fn): boolean {
+    const constructor = this.definition(prototype.object), installer = this.owner(operation);
+    if (!constructor || constructor.type !== 'FunctionDeclaration' || constructor.async || constructor.generator || this.owner(constructor) !== factory || !fn(installer) || installer === factory || this.owner(installer) !== factory || operation.arguments.length !== 2) return false;
+    const methods = operation.arguments[1];
+    if (methods?.type !== 'ObjectExpression' || !methods.properties.length || !this.immutable(this.bindings.get(prototype.object))) return false;
+    const methodMap = new Map<string, Fn>();
+    const callbackUses = new Map<Variable, Set<E.Node>>();
+    const nameOf = (node: E.Node): string | null => node.type === 'Identifier' ? node.name : node.type === 'Literal' && typeof node.value === 'string' ? node.value : null;
+    const safeName = (name: string | null): name is string => !!name && !['__proto__', 'prototype', 'constructor'].includes(name);
+    for (const property of methods.properties) {
+      if (property.type !== 'Property' || property.computed || property.kind !== 'init') return false;
+      const name = nameOf(property.key);
+      const method = property.value.type === 'FunctionExpression' ? property.value : property.value.type === 'Identifier' ? this.definition(property.value) : null;
+      if (!safeName(name) || methodMap.has(name) || !method) return false;
+      if (property.value.type === 'Identifier') {
+        const binding = this.bindings.get(property.value);
+        if (!this.immutable(binding) || this.owner(method) !== factory) return false;
+        const uses = callbackUses.get(binding!) ?? new Set<E.Node>();
+        uses.add(property.value);
+        callbackUses.set(binding!, uses);
+      }
+      methodMap.set(name, method);
+    }
+    for (const [binding, uses] of callbackUses) if (binding.references.some(reference => !reference.init && !uses.has(reference.identifier))) return false;
+    const ownFields = new Set<string>();
+    for (const statement of body(constructor)) {
+      if (statement.type !== 'ExpressionStatement') return false;
+      const expressions = statement.expression.type === 'SequenceExpression' ? statement.expression.expressions : [statement.expression];
+      for (const expression of expressions) {
+        if (expression.type !== 'AssignmentExpression' || expression.operator !== '=' || expression.left.type !== 'MemberExpression' || expression.left.computed || expression.left.optional || expression.left.object.type !== 'ThisExpression') return false;
+        const name = nameOf(expression.left.property);
+        if (!safeName(name) || methodMap.has(name) || ownFields.has(name)) return false;
+        ownFields.add(name);
+      }
+    }
+    if (!ownFields.size) return false;
+    // No prototype aliases beyond the single installer-local alias, if present.
+    const target = operation.arguments[0];
+    if (target !== prototype) {
+      const alias = target ? this.bindings.get(target) : undefined, declaration = alias?.defs[0]?.node;
+      if (!this.immutable(alias) || declaration?.type !== 'VariableDeclarator' || declaration.id.type !== 'Identifier' || declaration.init !== prototype || this.owner(declaration) !== installer || alias!.references.some(reference => !reference.init && reference.identifier !== target)) return false;
+    }
+    const statements = body(installer), installationStatement = this.directStatement(operation, installer);
+    if (!installationStatement || installer.params.length || installer.async || installer.generator || statements.length !== (target === prototype ? 1 : 2) || statements.at(-1) !== installationStatement) return false;
+    if (target !== prototype) {
+      const first = statements[0];
+      if (first?.type !== 'VariableDeclaration' || first.declarations.length !== 1 || first.declarations[0]?.init !== prototype) return false;
+    }
+    const installerBinding = installer.type === 'FunctionDeclaration' && installer.id ? this.bindings.get(installer.id) : undefined;
+    if (!this.immutable(installerBinding) || installerBinding!.references.length !== 1) return false;
+    const installationCall = this.parents.get(installerBinding!.references[0]!.identifier);
+    if (!call(installationCall) || installationCall.callee !== installerBinding!.references[0]!.identifier || installationCall.arguments.length || !this.directStatement(installationCall, factory)) return false;
+    const binding = this.bindings.get(prototype.object)!;
+    const instances = new Map<Variable, E.NewExpression>();
+    for (const reference of binding.references) {
+      if (reference.identifier === prototype.object) continue;
+      const creation = this.parents.get(reference.identifier), declaration = creation ? this.parents.get(creation) : undefined;
+      if (creation?.type !== 'NewExpression' || creation.callee !== reference.identifier || declaration?.type !== 'VariableDeclarator' || declaration.init !== creation || declaration.id.type !== 'Identifier' || !this.directStatement(creation, factory) || position(creation).start <= position(installationCall).end || creation.arguments.length !== constructor.params.length || !creation.arguments.every(argument => this.scalarLiteral(argument))) return false;
+      const instance = this.bindings.get(declaration.id);
+      if (!this.immutable(instance)) return false;
+      instances.set(instance!, creation);
+    }
+    if (!instances.size) return false;
+    const tableUses = new Set<E.Node>(), receivers = new Map<Variable, E.Expression>(instances);
+    for (const [instance] of instances) for (const reference of instance.references) {
+      if (reference.init || tableUses.has(reference.identifier)) continue;
+      const parent = this.parents.get(reference.identifier);
+      const invocation = parent?.type === 'ArrowFunctionExpression' && parent.body === reference.identifier ? this.parents.get(parent) : parent;
+      if (!call(invocation) || invocation.arguments[1] !== (parent?.type === 'ArrowFunctionExpression' ? parent : reference.identifier)) continue;
+      const table = this.descriptorTable(invocation, factory, instances);
+      if (!table) return false;
+      for (const use of table.uses) tableUses.add(use);
+      for (const [receiver, creation] of table.receivers) receivers.set(receiver, creation);
+    }
+    let consumers = 0;
+    for (const [instance, creation] of receivers) {
+      const declaration = this.parents.get(creation);
+      if (declaration?.type !== 'VariableDeclarator') return false;
+      const boundReceivers = new Set<E.Node>();
+      for (const use of instance.references) {
+        if (tableUses.has(use.identifier)) continue;
+        if (use.init || boundReceivers.has(use.identifier)) continue;
+        const access = this.parents.get(use.identifier), invocation = access ? this.parents.get(access) : undefined;
+        if (access?.type !== 'MemberExpression' || access.object !== use.identifier || access.computed || access.optional) return false;
+        const name = nameOf(access.property), method = name ? methodMap.get(name) : undefined;
+        if (!method) return false;
+        consumers++;
+        if (member(invocation, 'bind') && invocation.object === access) {
+          const bindingCall = this.parents.get(invocation), boundDeclaration = bindingCall ? this.parents.get(bindingCall) : undefined;
+          if (!call(bindingCall) || bindingCall.callee !== invocation || bindingCall.arguments.length !== 1 || !this.same(bindingCall.arguments[0], declaration.id) || boundDeclaration?.type !== 'VariableDeclarator' || boundDeclaration.id.type !== 'Identifier' || boundDeclaration.init !== bindingCall || !this.directStatement(bindingCall, factory) || position(bindingCall).start <= position(creation).end) return false;
+          boundReceivers.add(bindingCall.arguments[0]!);
+          const bound = this.bindings.get(boundDeclaration.id);
+          if (!this.immutable(bound)) return false;
+          for (const reference of bound!.references) {
+            if (reference.init) continue;
+            const callsite = this.parents.get(reference.identifier);
+            if (!call(callsite) || callsite.callee !== reference.identifier || !this.directStatement(callsite, factory) || position(callsite).start <= position(bindingCall).end || callsite.arguments.length !== method.params.length || !callsite.arguments.every(argument => this.scalarLiteral(argument))) return false;
+          }
+        } else if (!call(invocation) || invocation.callee !== access || !this.directStatement(invocation, factory) || position(invocation).start <= position(creation).end || invocation.arguments.length !== method.params.length || !invocation.arguments.every(argument => this.scalarLiteral(argument))) return false;
+      }
+    }
+    if (!consumers) return false;
+    const active = new Set<Fn>();
+    const scalar = (node: E.Node | null | undefined, parameters: E.Identifier[]): boolean => {
+      if (!node) return false;
+      if (this.scalarLiteral(node) || node.type === 'Identifier' && parameters.some(parameter => this.same(parameter, node))) return true;
+      if (node.type === 'MemberExpression') return !node.computed && !node.optional && node.object.type === 'ThisExpression' && node.property.type === 'Identifier' && ownFields.has(node.property.name);
+      if (node.type === 'UnaryExpression') return ['!', '+', '-', '~', 'void', 'typeof'].includes(node.operator) && scalar(node.argument, parameters);
+      if (node.type === 'BinaryExpression' || node.type === 'LogicalExpression') return !['in', 'instanceof'].includes(node.operator) && scalar(node.left, parameters) && scalar(node.right, parameters);
+      if (node.type === 'ConditionalExpression') return scalar(node.test, parameters) && scalar(node.consequent, parameters) && scalar(node.alternate, parameters);
+      if (node.type === 'SequenceExpression') return node.expressions.every(expression => scalar(expression, parameters));
+      if (node.type === 'AssignmentExpression') return node.operator === '=' && node.left.type === 'MemberExpression' && !node.left.computed && !node.left.optional && node.left.object.type === 'ThisExpression' && node.left.property.type === 'Identifier' && ownFields.has(node.left.property.name) && scalar(node.right, parameters);
+      if (call(node) && node.callee.type === 'MemberExpression' && !node.callee.computed && !node.callee.optional && node.callee.object.type === 'ThisExpression' && node.callee.property.type === 'Identifier') {
+        const method = methodMap.get(node.callee.property.name);
+        return !!method && node.arguments.length === method.params.length && node.arguments.every(argument => scalar(argument, parameters)) && finiteMethod(method);
+      }
+      return false;
+    };
+    const finiteMethod = (method: Fn): boolean => {
+      if (method.async || method.generator || method.params.some(parameter => parameter.type !== 'Identifier') || active.has(method)) return false;
+      active.add(method);
+      const parameters = method.params as E.Identifier[];
+      const finiteStatement = (statement: E.Statement): boolean => {
+        if (statement.type === 'ExpressionStatement') return scalar(statement.expression, parameters);
+        if (statement.type === 'ReturnStatement') return !statement.argument || scalar(statement.argument, parameters);
+        if (statement.type === 'BlockStatement') return statement.body.every(finiteStatement);
+        if (statement.type === 'IfStatement') return scalar(statement.test, parameters) && finiteStatement(statement.consequent) && (!statement.alternate || finiteStatement(statement.alternate));
+        return false;
+      };
+      const result = body(method).every(finiteStatement);
+      active.delete(method);
+      return result;
+    };
+    return finiteMethod(constructor) && [...methodMap.values()].every(finiteMethod);
+  }
+  descriptorTable(registration: E.CallExpression, factory: Fn, instances: Map<Variable, E.NewExpression>): { uses: Set<E.Node>; receivers: Map<Variable, E.Expression> } | null {
+    const registrationHelper = this.definition(registration.callee);
+    let register = registrationHelper;
+    let callbackProvider: Fn | null = null;
+    if (registrationHelper && body(registrationHelper).length === 1) {
+      const statement = body(registrationHelper)[0], forwarding = statement?.type === 'ExpressionStatement' ? statement.expression : null;
+      if (call(forwarding) && registrationHelper.params.length === 2 && registrationHelper.params.every(parameter => parameter.type === 'Identifier') && forwarding.arguments.length === 2 && this.same(forwarding.arguments[0], registrationHelper.params[0]) && call(forwarding.arguments[1]) && this.same(forwarding.arguments[1].callee, registrationHelper.params[1]) && forwarding.arguments[1].arguments.length === 0) {
+        callbackProvider = registrationHelper;
+        register = this.definition(forwarding.callee);
+      }
+    }
+    if (!register || register.type !== 'FunctionDeclaration' || register.async || register.generator || this.owner(register) !== factory || register.params.length !== 2 || register.params.some(parameter => parameter.type !== 'Identifier')) return null;
+    const [guard, write] = body(register);
+    if (body(register).length !== 2 || guard?.type !== 'IfStatement' || guard.alternate || !call(guard.test) || !member(guard.test.callee, 'hasOwn') || !this.standard(guard.test.callee.object, 'Object') || guard.test.arguments.length !== 2 || !this.same(guard.test.arguments[1], register.params[0]) || !this.finiteThrow(guard.consequent) || write?.type !== 'ExpressionStatement' || write.expression.type !== 'AssignmentExpression' || write.expression.operator !== '=' || write.expression.left.type !== 'MemberExpression' || !write.expression.left.computed || write.expression.left.optional || !this.same(write.expression.left.property, register.params[0]) || !this.same(write.expression.right, register.params[1]) || !this.same(write.expression.left.object, guard.test.arguments[0])) return null;
+    const table = write.expression.left.object, tableBinding = this.bindings.get(table), declaration = tableBinding?.defs[0]?.node;
+    if (!this.immutable(tableBinding) || declaration?.type !== 'VariableDeclarator' || declaration.init?.type !== 'ObjectExpression' || declaration.init.properties.length || !this.directStatement(declaration.init, factory)) return null;
+    const registerBinding = register.id ? this.bindings.get(register.id) : undefined;
+    if (!this.immutable(registerBinding)) return null;
+    const records = new Map<number, E.CallExpression>(), uses = new Set<E.Node>(), receivers = new Map<Variable, E.Expression>();
+    const calls: { invocation: E.CallExpression; value: E.Node }[] = [];
+    for (const reference of registerBinding!.references) {
+      const invocation = this.parents.get(reference.identifier);
+      if (!call(invocation) || invocation.callee !== reference.identifier || invocation.arguments.length !== 2) return null;
+      if (callbackProvider && this.owner(invocation) === callbackProvider) {
+        if (callbackProvider.type !== 'FunctionDeclaration' || callbackProvider.async || callbackProvider.generator || this.owner(callbackProvider) !== factory || !callbackProvider.id) return null;
+        const providerBinding = this.bindings.get(callbackProvider.id);
+        if (!this.immutable(providerBinding)) return null;
+        for (const use of providerBinding!.references) {
+          const callsite = this.parents.get(use.identifier), callback = call(callsite) ? callsite.arguments[1] : null;
+          if (!call(callsite) || callsite.callee !== use.identifier || callsite.arguments.length !== 2 || !this.directStatement(callsite, factory) || callback?.type !== 'ArrowFunctionExpression' || callback.async || callback.generator || callback.params.length || callback.body.type !== 'Identifier') return null;
+          calls.push({ invocation: callsite, value: callback.body });
+        }
+      } else {
+        if (!this.directStatement(invocation, factory) || !invocation.arguments[1]) return null;
+        calls.push({ invocation, value: invocation.arguments[1] });
+      }
+    }
+    for (const { invocation, value } of calls) {
+      const key = invocation.arguments[0];
+      if (key?.type !== 'Literal' || typeof key.value !== 'number' || !Number.isSafeInteger(key.value) || key.value <= 0 || records.has(key.value) || value.type !== 'Identifier') return null;
+      const instance = this.bindings.get(value), creation = instance ? instances.get(instance) : undefined;
+      if (!creation || position(creation).end >= position(invocation).start || position(declaration).end >= position(invocation).start) return null;
+      records.set(key.value, invocation);
+      uses.add(value);
+    }
+    let lookup: Fn | null = null;
+    for (const reference of tableBinding!.references) {
+      if (reference.init || reference.identifier === table || reference.identifier === guard.test.arguments[0]) continue;
+      const owner = this.owner(reference.identifier);
+      if (!fn(owner) || owner === register || lookup && lookup !== owner) return null;
+      lookup = owner;
+    }
+    if (!lookup || lookup.type !== 'FunctionDeclaration' || this.owner(lookup) !== factory || lookup.async || lookup.generator || lookup.params.length !== 1 || lookup.params[0]?.type !== 'Identifier') return null;
+    const [read, missing, returned] = body(lookup);
+    const descriptor = read?.type === 'VariableDeclaration' && read.declarations.length === 1 ? read.declarations[0] : null;
+    if (body(lookup).length !== 3 || !descriptor || descriptor.id.type !== 'Identifier' || descriptor.init?.type !== 'MemberExpression' || !descriptor.init.computed || descriptor.init.optional || !this.same(descriptor.init.object, table) || !this.same(descriptor.init.property, lookup.params[0]) || missing?.type !== 'IfStatement' || missing.alternate || missing.test.type !== 'BinaryExpression' || missing.test.operator !== '===' || !this.same(missing.test.left, descriptor.id) || !(missing.test.right.type === 'Identifier' && this.standard(missing.test.right, 'undefined') || missing.test.right.type === 'UnaryExpression' && missing.test.right.operator === 'void' && this.scalarLiteral(missing.test.right.argument)) || !this.finiteThrow(missing.consequent) || returned?.type !== 'ReturnStatement' || !this.same(returned.argument, descriptor.id)) return null;
+    const lookupBinding = lookup.id ? this.bindings.get(lookup.id) : undefined;
+    if (!this.immutable(lookupBinding)) return null;
+    for (const reference of lookupBinding!.references) {
+      const invocation = this.parents.get(reference.identifier), selected = invocation ? this.parents.get(invocation) : undefined;
+      if (!call(invocation) || invocation.callee !== reference.identifier || invocation.arguments.length !== 1 || selected?.type !== 'VariableDeclarator' || selected.id.type !== 'Identifier' || selected.init !== invocation || !this.directStatement(invocation, factory)) return null;
+      const key = invocation.arguments[0], registered = key?.type === 'Literal' && typeof key.value === 'number' ? records.get(key.value) : null;
+      const binding = this.bindings.get(selected.id);
+      if (!registered || position(registered).end >= position(invocation).start || !this.immutable(binding)) return null;
+      receivers.set(binding!, invocation);
+    }
+    return { uses, receivers };
+  }
+  finiteThrow(node: E.Statement): boolean {
+    return node.type === 'ThrowStatement' && node.argument.type === 'CallExpression' && !node.argument.optional && this.standard(node.argument.callee, 'Error') && node.argument.arguments.length === 1 && node.argument.arguments[0]?.type === 'Literal' && typeof node.argument.arguments[0].value === 'string';
+  }
+  scalarLiteral(node: E.Node): boolean {
+    return node.type === 'Literal' && (node.value === null || ['string', 'number', 'boolean'].includes(typeof node.value)) || node.type === 'UnaryExpression' && ['!', '+', '-', '~', 'void'].includes(node.operator) && this.scalarLiteral(node.argument);
   }
   cacheEscape(helper: Fn): E.Node | null {
     let state: E.Node | undefined;
