@@ -206,8 +206,8 @@ class Handles {
       const flags = this.graph.nodes.filter((node): node is E.AssignmentExpression => node.type === 'AssignmentExpression' && node.operator === '=' && this.graph.owner(node) === owner && member(node.left, 'deleteScheduled') && member(node.left.object, '$$') && node.left.object.object.type === 'ThisExpression' && boolean(node.right, true));
       if (!flags.length) continue;
       const ids = ['receiver-identity','writer-closure','publication-closure','queue-lifetime'] as const;
-      this.record('queue retention', push, push.arguments[0], [definition.init], this.uses(queue), 'The enqueue syntax remains reachable and retains the receiver; no deletion or lifetime effect is pruned.', ids);
-      for (const flag of flags) this.record('scheduled flag', flag, flag.left, [definition.init], this.uses(queue), 'The scheduled flag write remains reachable after enqueue; receiver and property semantics remain conditional.', ids);
+      this.record('queue retention', push, push.arguments[0], [definition.init], this.uses(queue), 'Syntax only: enqueue would retain the receiver if reached with the expected array and method. Queue-retained lifetime effects stay conditional; this record proves no reachability or ordering.', ids);
+      for (const flag of flags) this.record('scheduled flag', flag, flag.left, [definition.init], this.uses(queue), 'Syntax only: the scheduled flag assignment stays conditional on receiver and property semantics, control flow and ordering. Scheduler-call pruning does not discharge this write.', ids);
     }
   }
   inspect(): void {

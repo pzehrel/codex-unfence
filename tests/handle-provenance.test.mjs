@@ -332,6 +332,21 @@ test('binding renames and CRLF preserve graph associations through both public a
   refuses(result);
 });
 
+test('queue syntax records do not claim reachability or enqueue ordering for reordered or unreachable statements', async t => {
+  const api = await fixtureBuild(t);
+  for (const changed of [
+    source.replace('queue.push(this), queue.length === 1 && scheduler && scheduler(flush), this.$$.deleteScheduled = true', 'this.$$.deleteScheduled = true, queue.push(this), queue.length === 1 && scheduler && scheduler(flush)'),
+    source.replace('      deleteLater() {', '      deleteLater() { return;'),
+  ]) {
+    const result = api.transformSource(changed,evidenceFor(changed));
+    for (const entry of [...records(result.analysis,'queue retention'),...records(result.analysis,'scheduled flag')]) {
+      assert.match(entry.description,/conditional; Syntax only/);
+      assert.doesNotMatch(entry.description,/remains reachable|after enqueue/);
+    }
+    refuses(result);
+  }
+});
+
 test('an undefined closed scheduler prunes only its call and flush publication, retaining queue lifetime effects', async t => {
   const api = await fixtureBuild(t);
   const result = api.transformSource(source, evidenceFor(source));
