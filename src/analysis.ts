@@ -36,7 +36,7 @@ export interface SourceAnalysis {
   diagnostics: AnalysisDiagnostic[];
   target: SourceRange | null;
   dependencyProof?: DependencyProof;
-  ambientPremise?: import('./ambient-initializer.js').AmbientPremise;
+  ambientPremise?: import('./deferred-analysis.js').AmbientPremise;
 }
 
 export interface SourceTransformation {
