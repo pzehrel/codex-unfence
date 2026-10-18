@@ -158,7 +158,7 @@ async function readerFactory(options = {}) {
 }
 `;
 
-async function fixtureBuild(t) {
+async function fixtureBuild(t, fixtureResource=resource, fixtureImports='a.sa:iiiiiiiiiiiii> a.sb:iiii>') {
   const directory = await mkdtemp(join(tmpdir(), 'descriptor-provenance-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await mkdir(join(directory, 'dist'));
@@ -168,7 +168,7 @@ async function fixtureBuild(t) {
   }
   await writeFile(join(directory, 'package.json'), JSON.stringify({ type: 'module' }));
   await symlink(new URL('../node_modules', import.meta.url).pathname, join(directory, 'node_modules'), 'dir');
-  await writeFile(join(directory, 'dist/dependency-contracts.js'), `export const dependencyContracts = Object.freeze([Object.freeze(${JSON.stringify({ id: 'zxing-reader-lifetime-noninterference', revision: 1, size: resource.length, sha256: digest(resource), binaryVersion: 1, relativePath: './zxing_reader.wasm', imports: 'a.sa:iiiiiiiiiiiii> a.sb:iiii>' })})]);`);
+  await writeFile(join(directory, 'dist/dependency-contracts.js'), `export const dependencyContracts = Object.freeze([Object.freeze(${JSON.stringify({ id: 'zxing-reader-lifetime-noninterference', revision: 1, size: fixtureResource.length, sha256: digest(fixtureResource), binaryVersion: 1, relativePath: './zxing_reader.wasm', imports: fixtureImports })})]);`);
   return import(pathToFileURL(join(directory, 'dist/analysis.js')).href);
 }
 const records = result => result.dependencyProof.evidence.filter(entry => entry.description.startsWith('Descriptor '));
@@ -248,6 +248,22 @@ test('unsigned-view uncertainty and unknown direct importer callers cannot turn 
   assert.equal(find(result,'scheduled callback').length,8);
   assert.ok(find(result,'scheduled callback').some(entry=>/keys: unknown/.test(entry.description)));
   assert.ok(find(result,'scheduled callback').every(entry=>/uint32 4294967295/.test(entry.description)));
+  assert.equal(result.dependencyProof.acceptedContract,null);
+});
+
+test('one importer exposed under mixed measured signatures retains unknown scalar keys', async t => {
+  const mixed=Uint8Array.from([
+    0,97,115,109,1,0,0,0,
+    ...section(1,[3,96,13,...Array(13).fill(127),0,96,4,127,127,127,127,0,96,4,124,124,124,124,0]),
+    ...section(2,[3,...text('a'),...text('sa'),0,0,...text('a'),...text('sb'),0,1,...text('a'),...text('sc'),0,2]),
+    ...section(7,[3,...text('callbacks'),1,0,...text('memory'),2,0,...text('wideCall'),0,0]),
+  ]);
+  const api=await fixtureBuild(t,mixed,'a.sa:iiiiiiiiiiiii> a.sb:iiii> a.sc:dddd>');
+  const changed=source.replace('{sa:registerClass,sb:extraSchedules}','{sa:registerClass,sb:extraSchedules,sc:extraSchedules}');
+  const result=api.analyzeSource(changed,{...evidenceFor(changed),resourceBytes:mixed});
+  assert.equal(find(result,'scheduled callback').length,8);
+  const aggregate=find(result,'scheduled callback').find(entry=>changed.slice(entry.range.start,entry.range.end).includes("name:'aggregate'"));
+  assert.match(aggregate.description,/Output keys: unknown/);
   assert.equal(result.dependencyProof.acceptedContract,null);
 });
 

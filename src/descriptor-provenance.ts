@@ -246,7 +246,8 @@ class Descriptors {
         const id=this.id(importer);
         const importedOnly=!!id&&this.immutable(id)&&this.uses(id).every(use=>{const parent=this.graph.parents.get(use);return parent?.type==='Property'&&parent.value===use&&table.properties.includes(parent);});
         const index=importer.params.findIndex(param=>this.binding(param)===binding);
-        if(importedOnly&&index>=0&&signature.parameters[index]==='i32')return 'signed-i32 (closed measured import formal)';
+        const entries=table.properties.filter((entry):entry is E.Property=>entry.type==='Property'&&this.graph.definition(entry.value)===importer);
+        if(importedOnly&&index>=0&&entries.every(entry=>this.measured.imports.find(item=>item.name===key(entry.key))?.parameters[index]==='i32'))return 'signed-i32 (closed measured import formal)';
       }
     }
     return 'unknown';
