@@ -17,4 +17,6 @@
 
 ## 当前状态
 
-环境前提已批准，代码尚未实现。ZXing glue 的局部原型、描述符注册和生命周期证明仍未完成，工单 15 / 规格 9 保持开放。本增补不授权推送、公共 npm 发布、真实执行/编译/实例化、安装写入或宿主操作。
+环境前提已批准，有限初始化切片已部分实现。自造 CommonJS/interop 样例可逐项关联三根选择、写回、取值函数和 Log、SDK_VERSION、StatsigClient 的精确赋值，并以独立前提身份 `statsig-initialization-property-effects` v1 报告。此前提模式使用 `site-status-deferred-ambient-v1`，在可重推导方案支持完成前保持 incompatible、target:null、无变换及 prepare 门禁；历史无前提模式保持原身份和证据验证。
+
+真实源码仍在 KD 工厂内首个 u() 调用处拒绝：CommonJS 缓存与 once 的实际激活、异常传播、清除前调用和重入尚无共享证明。后续 pr 依赖、局部 getter、zD 及完整初始化闭包也未完成；部分属性操作建模不构成真实初始化通过。ZXing glue 的局部原型、描述符注册和生命周期证明仍未完成，工单 15 / 规格 9 保持开放。本增补不授权推送、公共 npm 发布、真实执行/编译/实例化、安装写入或宿主操作。

@@ -21,6 +21,87 @@ test('complete finite deferred proof enables only the JSON response argument tra
   assert.equal(transformation.patchedSource, source.replace('return agentBlocked(body);', 'return agentBlocked(({...body,feature_status:{...body?.feature_status,agent:false}}));'));
 });
 
+const ambient = await readFile(new URL('./fixtures/ambient-initializer.js.txt', import.meta.url), 'utf8');
+const ambientSource = source.replace('var once =', ambient + '\nvar once =').replace('var initialize = once(() => {', 'var initialize = once(() => { imported = interop(loadPackage(), 1);');
+
+test('finite ambient CommonJS initialization records the approved premise separately and keeps its plan gate', () => {
+  const {analysis, transformation} = transformSource(ambientSource);
+  assert.equal(analysis.patternVersion, 'site-status-deferred-ambient-v1');
+  assert.equal(analysis.compatibility, 'incompatible');
+  assert.equal(analysis.target, null);
+  assert.equal(transformation, null);
+  assert.equal(analysis.diagnostics[0].code, 'AMBIENT_PLAN_UNSUPPORTED');
+  assert.deepEqual(analysis.ambientPremise.identity, {id: 'statsig-initialization-property-effects', version: 1});
+  assert.equal(analysis.ambientPremise.basis, 'accepted-semantic-assumption');
+  assert.equal(analysis.ambientPremise.environment, 'not-verified');
+  assert.deepEqual(analysis.ambientPremise.operations.filter(item => item.kind === 'target-write').map(item => item.key), ['Log', 'SDK_VERSION', 'StatsigClient']);
+  assert.deepEqual(analysis.evidence.map(item => item.kind), ['initialization', 'predicate', 'source', 'transport', 'response', 'receiver', 'cache', 'consumption']);
+  for (const item of analysis.ambientPremise.operations) assert.ok(ambientSource.slice(item.range.start, item.range.end).length);
+  assert.equal(analyzeSource(source).ambientPremise, undefined);
+});
+
+test('ambient premise refuses changed fallback, root keys, receiver, callbacks and caught initialization', () => {
+  for (const [label, text] of [
+    ['unknown fallback', ambientSource.replace('universal[rootKey] ?? {}', 'universal[rootKey] ?? unknown()')],
+    ['changed key', ambientSource.replace("rootKey = '__STATSIG__'", "rootKey = '__OTHER__'")],
+    ['extra key', ambientSource.replace('SDK_VERSION: log.SDK_VERSION}', 'SDK_VERSION: log.SDK_VERSION, extra: 1}')],
+    ['unassociated ambient name', ambientSource.replace('(0, core._getStatsigGlobal)()', '__STATSIG__')],
+    ['unknown receiver', ambientSource.replace('(0, core._getStatsigGlobal)()', 'unknown()')],
+    ['immediate callback', ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic'; unknown();")],
+    ['caught factory', ambientSource.replace('var globals = loadGlobal(), log = loadLog();', 'try { loadGlobal(); } catch {} var globals = loadGlobal(), log = loadLog();')],
+    ['accessor input', ambientSource.replace("out.SDK_VERSION = 'synthetic';", "Object.defineProperty(out, 'SDK_VERSION', {get: () => unknown()});")],
+    ['getter fallback replacement', ambientSource.replace('server[rootKey] = selected;', 'server[rootKey] = selected; selected = {};')],
+    ['additional module alias', ambientSource + '\nvar escapedPackage = loadPackage;'],
+    ['reflective replacement', ambientSource + '\nObject.defineProperty(loadPackage, "x", {get: unknown});'],
+    ['root alias extra write', ambientSource.replace('browser[rootKey] = selected;', 'browser[rootKey] = selected; browser.URL = unknown;')],
+    ['single root selection', ambientSource.replace('browser[rootKey] ?? server[rootKey] ?? universal[rootKey] ?? {}', 'browser[rootKey] ?? {}')],
+    ['foreign Log value', ambientSource.replace('Log: log.Log', 'Log: unknown')],
+    ['root absent callback', ambientSource.replace("typeof window < 'u' ? window : {}", "typeof window < 'u' ? window : unknown()")],
+    ['missing writeback', ambientSource.replace('server[rootKey] = selected;', '')],
+    ['CommonJS helper cache after call', ambientSource.replace('cache || build((cache = {exports: {}}).exports, cache)', 'cache || (build({}, cache), cache = {exports: {}})')],
+    ['once reentry from factory', ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic'; initSiteStatus();")],
+  ]) {
+    const result = transformSource(text);
+    assert.equal(result.analysis.compatibility, 'incompatible', label);
+    assert.equal(result.analysis.target, null, label);
+    assert.equal(result.transformation, null, label);
+    assert.notEqual(result.analysis.diagnostics[0].code, 'AMBIENT_PLAN_UNSUPPORTED', label);
+  }
+});
+
+test('finite private Map allocation in CommonJS supports ordinary local dependency data only', () => {
+  const text = ambientSource.replace("out.SDK_VERSION = 'synthetic';", "var levels = new Map; out.SDK_VERSION = 'synthetic';");
+  assert.equal(analyzeSource(text).diagnostics[0].code, 'AMBIENT_PLAN_UNSUPPORTED');
+  for (const changed of [text.replace('new Map;', 'new Map(unknown());'), text.replace('new Map;', 'new Foreign;')]) {
+    assert.equal(analyzeSource(changed).diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+  }
+});
+
+test('ambient closure refuses deferred mutation of exported receivers and early missing factory bindings', () => {
+  for (const [label, text] of [
+    ['deferred export mutation', ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic'; var overwrite = () => { out.SDK_VERSION = unknown(); }; unknownContainer.save = overwrite;")],
+    ['early package call', ambientSource.replace('var loadPackage = common(out => {', 'var earlyImport = loadPackage(); var loadPackage = common(out => {')],
+    ['factory callback', ambientSource.replace('out.default = current;', 'out.default = current; out.callback = () => { URL.prototype.toString = replacement; };')],
+    ['captured export write', ambientSource.replace('out.Log = class { warn() {} };', 'out.Log = class { warn() { out.SDK_VERSION = unknown(); } };')],
+    ['helper exports changed', ambientSource.replace('cache.exports)', 'cache.exports, unknown())')],
+    ['deferred module replacement', ambientSource.replace('var current = Object.assign', 'var replace = () => { loadCore = unknown; }; var current = Object.assign')],
+    ['captured root reflection', ambientSource.replace('out._getStatsigGlobal = getGlobal;', 'out._getStatsigGlobal = getGlobal; out.mutate = () => Object.defineProperty(browser, rootKey, {get: unknown});')],
+  ]) {
+    const result = analyzeSource(text);
+    assert.equal(result.compatibility, 'incompatible', label);
+    assert.notEqual(result.diagnostics[0].code, 'AMBIENT_PLAN_UNSUPPORTED', label);
+  }
+});
+
+test('CommonJS-to-once calls retain refusal until activation and reentry share one proof', () => {
+  for (const text of [
+    ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic'; initSiteStatus();"),
+    ambientSource.replace('var initialize = once(() => { imported', 'var initialize = once(() => { initMetadata(); imported').replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic'; initMetadata();"),
+  ]) {
+    assert.equal(analyzeSource(text).diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+  }
+});
+
 // Execute only this independently authored fixture. The exposed callable boundary
 // and host clock/fetch adapters do not expose analyzer internals or AST state.
 function fixtureRuntime(text = source) {

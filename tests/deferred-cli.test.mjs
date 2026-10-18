@@ -36,6 +36,31 @@ async function sandbox(t) {
   return { directory, root, targets, run: args => runCli(args, { directory, fixture: transactionFixture }) };
 }
 
+test('ambient premise detect separates accepted semantics from structure and prepare publishes no unsupported plan', async t => {
+  const box = await sandbox(t);
+  const ambient = await readFile(new URL('./fixtures/ambient-initializer.js.txt', import.meta.url), 'utf8');
+  const text = source.replace('var once =', ambient + '\nvar once =').replace('var initialize = once(() => {', 'var initialize = once(() => { imported = interop(loadPackage(), 1);');
+  for (const target of box.targets) await writeFile(target, text);
+  const detected = box.run(['detect', '--plugin-root', box.root, '--json']);
+  assert.equal(detected.status, 3);
+  for (const artifact of JSON.parse(detected.stdout).data.artifacts) {
+    assert.equal(artifact.analysis.patternVersion, 'site-status-deferred-ambient-v1');
+    assert.equal(artifact.analysis.ambientPremise.identity.id, 'statsig-initialization-property-effects');
+    assert.equal(artifact.analysis.ambientPremise.identity.version, 1);
+    assert.equal(artifact.analysis.ambientPremise.environment, 'not-verified');
+    assert.equal(artifact.analysis.diagnostics[0].code, 'AMBIENT_PLAN_UNSUPPORTED');
+  }
+  const human = box.run(['detect', '--plugin-root', box.root]);
+  assert.match(human.stdout, /Accepted semantic assumption: statsig-initialization-property-effects v1/);
+  assert.match(human.stdout, /environment not-verified/);
+  const output = join(box.directory, 'ambient-plan');
+  const prepared = box.run(['prepare', '--plugin-root', box.root, '--target', box.targets[0], '--output', output, '--json']);
+  assert.equal(prepared.status, 3);
+  assert.equal(JSON.parse(prepared.stdout).data, null);
+  assert.ok(!(await readdir(box.directory)).includes('ambient-plan'));
+  for (const target of box.targets) assert.equal(await readFile(target, 'utf8'), text);
+});
+
 test('detect human/JSON exposes complete deferred compatibility and evidence for both plugins', async t => {
   const box = await sandbox(t);
   const detected = box.run(['detect', '--plugin-root', box.root, '--json']);

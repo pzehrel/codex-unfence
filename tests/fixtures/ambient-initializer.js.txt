@@ -1,0 +1,47 @@
+// Independently authored CommonJS/interop and ambient initialization analogue.
+var createObject = Object.create, define = Object.defineProperty;
+var descriptor = Object.getOwnPropertyDescriptor, ownNames = Object.getOwnPropertyNames;
+var prototypeOf = Object.getPrototypeOf, owns = Object.prototype.hasOwnProperty;
+var common = (build, cache) => () => (cache || build((cache = {exports: {}}).exports, cache), cache.exports);
+var copyExports = (target, input, except, item) => {
+  if (input && typeof input == 'object' || typeof input == 'function')
+    for (let name of ownNames(input))
+      !owns.call(target, name) && name !== except && define(target, name, {get: () => input[name], enumerable: !(item = descriptor(input, name)) || item.enumerable});
+  return target;
+};
+var interop = (input, force, target) => (target = input != null ? createObject(prototypeOf(input)) : {}, copyExports(force || !input || !input.__esModule ? define(target, 'default', {value: input, enumerable: true}) : target, input));
+var loadLog = common(out => {
+  Object.defineProperty(out, '__esModule', {value: true});
+  out.Log = class { warn() {} };
+  out.SDK_VERSION = 'synthetic';
+});
+var loadGlobal = common(out => {
+  Object.defineProperty(out, '__esModule', {value: true});
+  var log = loadLog();
+  var getGlobal = () => { try { return typeof __STATSIG__ < 'u' ? __STATSIG__ : selected; } catch { return selected; } };
+  out._getStatsigGlobal = getGlobal;
+  var rootKey = '__STATSIG__', browser = typeof window < 'u' ? window : {}, server = typeof global < 'u' ? global : {}, universal = typeof globalThis < 'u' ? globalThis : {};
+  var selected = browser[rootKey] ?? server[rootKey] ?? universal[rootKey] ?? {};
+  browser[rootKey] = selected;
+  server[rootKey] = selected;
+  universal[rootKey] = selected;
+});
+var loadCore = common(out => {
+  Object.defineProperty(out, '__esModule', {value: true});
+  var globals = loadGlobal(), log = loadLog();
+  Object.defineProperty(out, '_getStatsigGlobal', {enumerable: true, get: () => globals._getStatsigGlobal});
+  Object.assign((0, globals._getStatsigGlobal)(), {Log: log.Log, SDK_VERSION: log.SDK_VERSION});
+});
+var loadClient = common(out => {
+  Object.defineProperty(out, '__esModule', {value: true});
+  out.default = class {};
+});
+var loadPackage = common(out => {
+  Object.defineProperty(out, '__esModule', {value: true});
+  var core = loadCore(), client = loadClient();
+  out.StatsigClient = client.default;
+  Object.defineProperty(out, '_getStatsigGlobal', {enumerable: true, get: () => core._getStatsigGlobal});
+  var current = Object.assign((0, core._getStatsigGlobal)(), {StatsigClient: client.default});
+  out.default = current;
+});
+var imported;

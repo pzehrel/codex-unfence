@@ -26,7 +26,7 @@ export interface StructuralEvidence {
   description: string;
 }
 
-export type PatternVersion = 'site-status-v1' | 'site-status-deferred-v1';
+export type PatternVersion = 'site-status-v1' | 'site-status-deferred-v1' | 'site-status-deferred-ambient-v1';
 
 export interface SourceAnalysis {
   patternVersion: PatternVersion;
@@ -36,6 +36,7 @@ export interface SourceAnalysis {
   diagnostics: AnalysisDiagnostic[];
   target: SourceRange | null;
   dependencyProof?: DependencyProof;
+  ambientPremise?: import('./ambient-initializer.js').AmbientPremise;
 }
 
 export interface SourceTransformation {

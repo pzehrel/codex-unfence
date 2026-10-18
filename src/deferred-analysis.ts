@@ -1,4 +1,5 @@
 import { analyze } from 'eslint-scope';
+import { AmbientInitializer } from './ambient-initializer.js';
 import type { Variable } from 'eslint-scope';
 import type * as E from 'estree';
 import type { SourceAnalysis, SourceRange, StructuralEvidence } from './analysis.js';
@@ -94,21 +95,39 @@ export function analyzeDeferredStage(program: E.Program): SourceAnalysis | null 
     const cache = proof.cache(candidate, request.chain);
     const consumption = proof.policy(candidate, request.chain, receiver.chain);
     proof.closeRelevantEffects();
+    if (proof.ambient.premise.operations.length) proof.ambient.close();
     result.evidence.push(initialization, {
       kind: 'predicate', range: range(candidate.wrapper),
       description: 'Object guards protect feature_status; the initialized agent key blocks only on strict equality to true.',
     }, ...request.evidence, receiver.evidence, cache, consumption);
     requireStage(!candidate.patched, 'UNTRUSTED_PATCHED_SHAPE', 'Response-copy shape found without trusted operation provenance; this is not proof of tool application.', candidate.consumption.arguments[0]!);
+    if (proof.ambient.premise.operations.length) {
+      requireStage(false, 'AMBIENT_PLAN_UNSUPPORTED', 'The approved ambient premise is structurally associated, but this pattern has no rederivable plan model yet.', candidate.consumption);
+    }
     result.compatibility = 'compatible';
     result.target = range(candidate.consumption.arguments[0]!);
   } catch (error) {
     if (!(error instanceof UnprovenStage)) throw error;
     result.diagnostics.push({ code: error.code, severity: 'error', message: error.message, range: range(error.node) });
   }
+  if (proof.ambient.premise.operations.length) {
+    result.patternVersion = 'site-status-deferred-ambient-v1';
+    result.ambientPremise = proof.ambient.premise;
+  }
   return result;
 }
 
 class DeferredProof {
+  readonly ambient = new AmbientInitializer({
+    binding: node => this.binding(node),
+    parent: node => this.parents.get(node),
+    once: node => {
+      const binding = this.binding(node.callee);
+      if (!binding || node.arguments.length || !this.initializers.has(binding)) return false;
+      throw new UnprovenStage('DEFERRED_INITIALIZER_EFFECT', 'CommonJS-to-once activation requires a shared normal-completion and reentry proof.', node);
+    },
+    fail: (message, node) => { throw new UnprovenStage('DEFERRED_INITIALIZER_EFFECT', message, node); },
+  });
   private readonly bindings = new Map<E.Node, Variable>();
   private readonly parents = new Map<E.Node, E.Node>();
   private readonly nodes: E.Node[] = [];
@@ -341,6 +360,11 @@ class DeferredProof {
         if (binding) { this.literalEnums.add(binding); this.read(argument.left); }
         return;
       }
+    }
+    if (call(node)) {
+      this.ambient.evaluate(node);
+      requireStage(this.ambient.premise.operations.length > 0, 'DEFERRED_INITIALIZER_EFFECT', 'An additional finite factory call is admitted only with the explicit ambient operation proof and separate pattern gate.', node);
+      return;
     }
     reject();
   }
@@ -1183,7 +1207,7 @@ class DeferredProof {
         if (node.callee.type === 'MemberExpression' && host(node.callee.object)) {
           const operation = key(node.callee);
           const directStandard = node.callee.object.type === 'Identifier' && !this.binding(node.callee.object) && capabilities.has(node.callee.object.name);
-          requireStage(directStandard && operation !== null && !['__defineGetter__', '__defineSetter__'].includes(operation), 'DEFERRED_HOST_MUTATION', 'Calls through a relevant capability alias, prototype or dynamic method are outside the finite host proof.', node);
+          requireStage(this.ambient.provedCall(node) || directStandard && operation !== null && !['__defineGetter__', '__defineSetter__'].includes(operation), 'DEFERRED_HOST_MUTATION', 'Calls through a relevant capability alias, prototype or dynamic method are outside the finite host proof.', node);
         }
         for (const [index, argument] of node.arguments.entries()) if (host(argument) || globalObject(argument)) {
           const target = this.definition(node.callee), parameter = target?.params[index];

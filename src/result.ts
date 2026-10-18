@@ -103,6 +103,8 @@ export function renderHuman(result: CommandResult): string {
         `${artifact.plugin} ${artifact.version}: ${artifact.realPath ?? artifact.path}`,
         `  Availability: ${artifact.availability}; structural compatibility: ${artifact.compatibility}`,
       );
+      const premise = artifact.analysis?.ambientPremise;
+      if (premise) lines.push(`  Accepted semantic assumption: ${premise.identity.id} v${premise.identity.version}; environment ${premise.environment}; ${premise.operations.length} exact source operations. This is not a live descriptor check or whole-factory trust.`);
       for (const evidence of artifact.analysis?.evidence ?? []) {
         lines.push(`  Evidence ${evidence.kind}: ${evidence.range.start}..${evidence.range.end} ${evidence.range.unit}. ${evidence.description}`);
       }
