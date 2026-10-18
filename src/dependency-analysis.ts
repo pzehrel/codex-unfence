@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isUint8Array } from 'node:util/types';
 import { dependencyContracts } from './dependency-contracts.js';
 import { proveDependencySource } from './dependency-source.js';
 import type { AnalysisDiagnostic, StructuralEvidence } from './analysis.js';
@@ -33,6 +34,17 @@ export interface DependencyProof {
 }
 
 class InvalidBinary extends Error {}
+
+function snapshotResource(value: unknown): Uint8Array | null {
+  if (!isUint8Array(value)) return null;
+  // Typed-array construction copies the internal view range without consulting
+  // instance iterators or buffer/offset/length getters. It rejects detached views.
+  try { return new Uint8Array(value); }
+  catch (error) {
+    if (!(error instanceof TypeError)) throw error;
+    return null;
+  }
+}
 
 // This is an inert interface decoder, not a WebAssembly validator or engine.
 // Sections outside the interface are length-bounded and skipped. Contract digest
@@ -98,22 +110,22 @@ function measure(bytes: Uint8Array): MeasuredDependencyResource {
     }
     const section = new Decoder(bytes, end);
     section.offset = decoder.offset;
-    if (id === 1) types.push(...section.vector(() => {
+    if (id === 1) for (const type of section.vector(() => {
       if (section.byte() !== 96) throw new InvalidBinary('Unsupported type definition.');
       return { parameters: section.vector(() => section.valueType()), results: section.vector(() => section.valueType()) };
-    }));
-    if (id === 2) imports.push(...section.vector(() => {
+    })) types.push(type);
+    if (id === 2) for (const item of section.vector(() => {
       const module = section.text(), name = section.text(), kind = section.byte();
       if (kind !== 0) throw new InvalidBinary('Only function imports are supported.');
       const type = types[section.uint()];
       if (!type) throw new InvalidBinary('Import references a missing function type.');
       return { module, name, parameters: [...type.parameters], results: [...type.results] };
-    }));
-    if (id === 7) exports.push(...section.vector(() => {
+    })) imports.push(item);
+    if (id === 7) for (const item of section.vector(() => {
       const name = section.text(), kind = section.byte(), index = section.uint();
       if (kind > 3) throw new InvalidBinary('Unsupported export kind.');
       return { name, kind, index };
-    }));
+    })) exports.push(item);
     if (id === 8) { section.uint(); hasStart = true; }
     if ([1, 2, 7, 8].includes(id) && section.offset !== end) throw new InvalidBinary('Trailing interface section bytes.');
     decoder.offset = end;
@@ -128,13 +140,15 @@ export function inspectDependency(source: string, input: DependencyEvidenceInput
   const proof: DependencyProof = { status: 'rejected', resource: null, registeredContract: null, acceptedContract: null, association: null, evidence: [], diagnostics: [], runtime: 'not-verified' };
   const fail = (code: string, message: string): DependencyProof => { proof.diagnostics.push({ code, severity: 'error', message }); return proof; };
   const fields = (value: unknown, names: string[]): boolean => !!value && typeof value === 'object' && Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name));
-  if (!fields(input, ['schemaVersion', 'contract', 'association', 'resourceBytes']) || input.schemaVersion !== 1 || !fields(input.contract, ['id', 'revision']) || !fields(input.association, ['sourceSha256', 'relativePath', 'route']) || !(input.resourceBytes instanceof Uint8Array)) return fail('DEPENDENCY_EVIDENCE_FORMAT', 'Expected version 1 evidence with explicit resource bytes, contract and association; unknown fields cannot confer trust.');
+  if (!fields(input, ['schemaVersion', 'contract', 'association', 'resourceBytes']) || input.schemaVersion !== 1 || !fields(input.contract, ['id', 'revision']) || !fields(input.association, ['sourceSha256', 'relativePath', 'route'])) return fail('DEPENDENCY_EVIDENCE_FORMAT', 'Expected version 1 evidence with explicit resource bytes, contract and association; unknown fields cannot confer trust.');
+  const bytes = snapshotResource(input.resourceBytes);
+  if (!bytes) return fail('DEPENDENCY_EVIDENCE_FORMAT', 'Expected a genuine, non-detached Uint8Array resource view.');
   const contract = dependencyContracts.find(item => item.id === input.contract.id && item.revision === input.contract.revision);
   if (!contract) return fail('DEPENDENCY_CONTRACT_UNKNOWN', 'Contract identity or revision is not in the compiled approval registry.');
   const sourceSha256 = createHash('sha256').update(source, 'utf8').digest('hex');
   if (input.association.sourceSha256 !== sourceSha256 || input.association.relativePath !== contract.relativePath || input.association.route !== 'adjacent') return fail('DEPENDENCY_ASSOCIATION', 'Evidence must bind these source bytes to the explicit adjacent resource; fallback is unsupported.');
   proof.association = { sourceSha256, relativePath: contract.relativePath, route: 'adjacent' };
-  try { proof.resource = measure(Uint8Array.from(input.resourceBytes)); }
+  try { proof.resource = measure(bytes); }
   catch (error) {
     if (!(error instanceof InvalidBinary)) throw error;
     return fail('DEPENDENCY_BINARY_INTERFACE', error.message);

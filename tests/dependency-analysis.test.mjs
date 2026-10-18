@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { TextEncoder } from 'node:util';
 import { analyzeSource, transformSource } from '../dist/analysis.js';
 
 const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url), 'utf8');
@@ -31,6 +32,146 @@ test('explicit bytes are independently measured and unknown resources cannot gra
   assert.ok(result.analysis.diagnostics.some(entry => entry.code === 'DEPENDENCY_RESOURCE_IDENTITY'));
   assert.deepEqual(input.resourceBytes, resource);
   assert.equal(analyzeSource(source).compatibility, 'compatible');
+});
+
+test('resource identity and interface use actual view bytes despite a custom instance iterator', () => {
+  const header = Uint8Array.of(0, 97, 115, 109, 1, 0, 0, 0);
+  for (const substituted of [Uint8Array.of(...header, 0, 0), Uint8Array.of(255)]) {
+    const bytes = header.slice();
+    bytes[Symbol.iterator] = () => substituted.values();
+    const input = evidenceFor(source, bytes);
+    for (const result of [analyzeSource(source, input), transformSource(source, input).analysis]) {
+      assert.deepEqual(result.dependencyProof.resource, {
+        size: 8, sha256: '93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476',
+        binaryVersion: 1, imports: [], exports: [], hasStart: false,
+      });
+      assert.equal(result.dependencyProof.diagnostics[0].code, 'DEPENDENCY_RESOURCE_IDENTITY');
+      assert.equal(result.dependencyProof.acceptedContract, null);
+      assert.equal(result.compatibility, 'incompatible');
+    }
+    assert.equal(transformSource(source, input).transformation, null);
+  }
+});
+
+test('detached and forged byte views produce public evidence diagnostics instead of throwing', async t => {
+  const detached = resource.slice();
+  globalThis.structuredClone(detached.buffer, { transfer: [detached.buffer] });
+  for (const [name, bytes] of [
+    ['detached Uint8Array', detached],
+    ['forged Uint8Array prototype', Object.create(Uint8Array.prototype)],
+    ['different typed array', new Uint16Array(8)],
+    ['DataView', new DataView(new ArrayBuffer(8))],
+  ]) {
+    await t.test(name, () => {
+      const input = evidenceFor(source, bytes);
+      const transformed = transformSource(source, input);
+      for (const result of [analyzeSource(source, input), transformed.analysis]) {
+        assert.equal(result.dependencyProof.diagnostics[0].code, 'DEPENDENCY_EVIDENCE_FORMAT');
+        assert.equal(result.dependencyProof.resource, null);
+        assert.equal(result.dependencyProof.acceptedContract, null);
+        assert.equal(result.compatibility, 'incompatible');
+      }
+      assert.equal(transformed.transformation, null);
+    });
+  }
+});
+
+test('Uint8Array and Buffer offset snapshots ignore instance getters and survive later mutation', () => {
+  for (const backing of [new Uint8Array(resource.length + 6), Buffer.alloc(resource.length + 6)]) {
+    backing.fill(255);
+    backing.set(resource, 3);
+    const bytes = backing.subarray(3, 3 + resource.length);
+    for (const name of ['buffer', 'byteOffset', 'byteLength', 'length', Symbol.iterator]) {
+      Object.defineProperty(bytes, name, { get() { throw new Error('Instance getter must not supply resource bytes.'); } });
+    }
+    const input = evidenceFor(source, bytes);
+    const analysis = analyzeSource(source, input);
+    const transformed = transformSource(source, input);
+    backing.fill(0);
+    for (const result of [analysis, transformed.analysis]) {
+      assert.deepEqual(result.dependencyProof.resource, {
+        size: 24, sha256: 'e03ae00775241ba76d1a252a7b8be899de4142d95b6c36839a67a6f8aad1e163',
+        binaryVersion: 1, imports: [{ module: 'a', name: 'F', parameters: [], results: ['i32'] }],
+        exports: [], hasStart: false,
+      });
+      assert.equal(result.dependencyProof.diagnostics[0].code, 'DEPENDENCY_RESOURCE_IDENTITY');
+      assert.equal(result.dependencyProof.acceptedContract, null);
+    }
+    assert.equal(transformed.transformation, null);
+  }
+});
+
+// Synthetic binary sections only; no engine compiles or executes these modules.
+const uint = value => {
+  const bytes = [];
+  do {
+    const part = value & 127;
+    value = Math.floor(value / 128);
+    bytes.push(part | (value ? 128 : 0));
+  } while (value);
+  return Uint8Array.from(bytes);
+};
+const concatenate = chunks => {
+  const bytes = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0));
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  return bytes;
+};
+const vectorSection = (id, count, entry) => {
+  const chunks = [uint(count)];
+  for (let index = 0; index < count; index++) chunks.push(entry(index));
+  const payload = concatenate(chunks);
+  return concatenate([Uint8Array.of(id), uint(payload.length), payload]);
+};
+const moduleWithSections = sections => concatenate([Uint8Array.of(0, 97, 115, 109, 1, 0, 0, 0), ...sections]);
+
+test('a valid 200000-type vector reaches identity refusal without a spread call overflow', () => {
+  const bytes = moduleWithSections([vectorSection(1, 200000, () => Uint8Array.of(96, 0, 0))]);
+  assert.equal(bytes.length, 600015);
+  const input = evidenceFor(source, bytes);
+  const transformed = transformSource(source, input);
+  for (const result of [analyzeSource(source, input), transformed.analysis]) {
+    assert.equal(result.dependencyProof.resource.size, 600015);
+    assert.equal(result.dependencyProof.resource.sha256, digest(bytes));
+    assert.equal(result.dependencyProof.diagnostics[0].code, 'DEPENDENCY_RESOURCE_IDENTITY');
+    assert.equal(result.dependencyProof.acceptedContract, null);
+  }
+  assert.equal(transformed.transformation, null);
+});
+
+test('a valid 200000-import vector reaches identity refusal without a spread call overflow', () => {
+  const bytes = moduleWithSections([
+    vectorSection(1, 1, () => Uint8Array.of(96, 0, 0)),
+    vectorSection(2, 200000, index => {
+      const name = new TextEncoder().encode(String(index));
+      return concatenate([Uint8Array.of(1, 97), uint(name.length), name, Uint8Array.of(0, 0)]);
+    }),
+  ]);
+  const input = evidenceFor(source, bytes);
+  const transformed = transformSource(source, input);
+  for (const result of [analyzeSource(source, input), transformed.analysis]) {
+    assert.equal(result.dependencyProof.resource.imports.length, 200000);
+    assert.deepEqual(result.dependencyProof.resource.imports[199999], { module: 'a', name: '199999', parameters: [], results: [] });
+    assert.equal(result.dependencyProof.diagnostics[0].code, 'DEPENDENCY_RESOURCE_IDENTITY');
+    assert.equal(result.dependencyProof.acceptedContract, null);
+  }
+  assert.equal(transformed.transformation, null);
+});
+
+test('a valid 200000-export vector reaches identity refusal without a spread call overflow', () => {
+  const bytes = concatenate([resource, vectorSection(7, 200000, index => {
+    const name = new TextEncoder().encode(String(index));
+    return concatenate([uint(name.length), name, Uint8Array.of(0, 0)]);
+  })]);
+  const input = evidenceFor(source, bytes);
+  const transformed = transformSource(source, input);
+  for (const result of [analyzeSource(source, input), transformed.analysis]) {
+    assert.equal(result.dependencyProof.resource.exports.length, 200000);
+    assert.deepEqual(result.dependencyProof.resource.exports[199999], { name: '199999', kind: 0, index: 0 });
+    assert.equal(result.dependencyProof.diagnostics[0].code, 'DEPENDENCY_RESOURCE_IDENTITY');
+    assert.equal(result.dependencyProof.acceptedContract, null);
+  }
+  assert.equal(transformed.transformation, null);
 });
 
 test('a registered inert resource exposes measurements but never skips an unproved JavaScript bridge', async t => {
