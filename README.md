@@ -4,6 +4,12 @@
 
 **当前证据来自临时目录中的合成样例。真实插件结构兼容性、Codex 加载、宿主完整性接受和网站操作均未验证。** 已研究样本包含首版不支持的 deferred initializer 和 cache/inflight 控制流；不能据此声称实际样本兼容。检测不执行插件源码，也不修改插件。
 
+## 限定版本的 CUA 请求包装副本
+
+当前另有一个仓库内的本地准备切片，见 [CUA 请求包装规格](docs/design/cua-request-wrapper-slice.md)：在已确认版本的专用请求通道中注入 `ok/json` 响应适配器，保留原 fetch 和判定器，仅在 JSON 数据副本中将严格为 true 的 agent 改为 false。它采用文件身份限制、定向审查及合成行为测试，不表示完成上述正式 CLI 的结构证明，也不接入其 apply/restore 方案。
+
+该切片只生成私有原始／补丁副本和核对清单，不修改安装或运行应用。真实加载、生效、撤销、旧缓存及宿主完整性接受仍未验证；未知版本拒绝，不自动跟随更新。具体命令及验证结果见 [本轮交付报告](reports/cua-request-wrapper-implementation.zh-CN.md)。该脚本仅供仓库内运行，不包含在 npm 包中。
+
 ## 本地安装
 
 首版仅支持 macOS，要求 **Node.js >=22.13.0** 和 npm。Linux 只用于合成自动化，不属于产品平台支持。
