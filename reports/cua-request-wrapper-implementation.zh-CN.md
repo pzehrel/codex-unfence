@@ -1,6 +1,6 @@
 # CUA 请求包装器本地副本实现
 
-状态：本地副本已生成并独立核对；定向测试通过，独立审查与统一检查待完成。未应用到安装，不代表真实运行生效。
+状态：本地副本切片完成。副本核对、定向测试、独立双轴审查和统一检查通过；未应用到安装，不代表真实运行生效。
 
 ## 本轮交付
 
@@ -40,7 +40,11 @@ node scripts/cua-request-wrapper.mjs --source /Applications/ChatGPT.app/Contents
 
 `node --test tests/cua-request-wrapper.test.mjs`：9/9 通过。覆盖冻结原响应和 runtime、fetch 参数及 receiver、请求次数、ok 延迟读取、json receiver 及单次调用、直接值和 thenable、原错误身份、未知对象形态直通、原对象不变、其他字段及自有 __proto__ 数据保留、相邻运输不变、非 ASCII UTF-16 定位、区间外字节、过期范围和 CLI 拒绝边界。测试仅执行自写样例，不依赖真实安装。
 
-两文件 ESLint、TypeScript 检查及构建已通过。最终统一检查与 Standards／Spec 双轴审查结果在完成后补充。
+候选提交 `8484454` 上的统一检查 `npm run check -- --base 77a23b14988e35973bf180867bef1de9f1ffe913` 通过：差异空白检查、TypeScript、全仓 ESLint、构建及 343/343 测试全部通过，0 失败、0 跳过；测试含安装 tarball 的公开 CLI 验收。此前的两文件 ESLint、TypeScript 及构建也通过。真实补丁副本作为输入时被固定身份门槛拒绝，未创建输出目录。
+
+Standards 独立审查：0 项硬性违规、0 项需处理的基线异味；未重开旧分析器证明。Spec 独立审查：0 项确认的遗漏、额外范围或错误实现；另以独立自造内存样例复核包装器行为。两轴审查范围均为 `77a23b1...8484454`，不以统一测试替代审查结论。既有真实输出再次作为输出目录时被拒绝，manifest 保持一致；Git 未追踪任何 evidence 文件。
+
+实现及直接研究依据保存在本地提交 `8484454b1d2702072bf03c5353f7a6b2027e7ace`；最终报告随后单独提交。后续报告更新不改变已审查实现。
 
 ## 证据限制
 
