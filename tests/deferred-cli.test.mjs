@@ -61,6 +61,38 @@ test('ambient premise detect separates accepted semantics from structure and pre
   for (const target of box.targets) assert.equal(await readFile(target, 'utf8'), text);
 });
 
+test('ambient review counterexamples publish neither premise identity nor a plan', async t => {
+  const box = await sandbox(t);
+  const ambient = await readFile(new URL('./fixtures/ambient-initializer.js.txt', import.meta.url), 'utf8');
+  const control = source.replace('var once =', ambient + '\nvar once =').replace('var initialize = once(() => {', 'var initialize = once(() => { imported = interop(loadPackage(), 1);');
+  for (const [index, addition] of [
+    'out.later = flag => {if (flag) out.SDK_VERSION = unknown();}; out.later(false);',
+    'var flag = false; var setFlag = () => {flag = true;}; setFlag(); if (flag) unknown();',
+    'var last = false; for (var last of [true]) {} if (last) unknown();',
+    'var local = {valueOf: () => unknown()}; local == 1;',
+    "if (typeof out.Log === 'function') unknown();",
+    "var local = Object.create({x: 1}); if ('x' in local) unknown();",
+    "Object.defineProperty(out, 'x', {value: 1}); Object.defineProperty(out, 'x', {value: 2});",
+    "var state = {flag: false}; var touch = () => {state.flag = true; return {x: 1};}; Object.defineProperty(out, 'x', {get: () => touch().x}); if (!state.flag) unknown();",
+  ].entries()) {
+    const text = control.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic';" + addition);
+    await writeFile(box.targets[0], text);
+    const detected = box.run(['detect', '--plugin-root', box.root, '--json']);
+    assert.equal(detected.status, 3);
+    const analysis = JSON.parse(detected.stdout).data.artifacts[0].analysis;
+    assert.equal(analysis.patternVersion, 'site-status-deferred-v1');
+    assert.equal(analysis.ambientPremise, undefined);
+    assert.equal(analysis.diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+    assert.deepEqual(analysis.evidence, []);
+    const output = join(box.directory, `review-refused-${index}`);
+    const prepared = box.run(['prepare', '--plugin-root', box.root, '--target', box.targets[0], '--output', output, '--json']);
+    assert.equal(prepared.status, 3);
+    assert.equal(JSON.parse(prepared.stdout).data, null);
+    assert.ok(!(await readdir(box.directory)).includes(`review-refused-${index}`));
+    assert.equal(await readFile(box.targets[0], 'utf8'), text);
+  }
+});
+
 test('detect human/JSON exposes complete deferred compatibility and evidence for both plugins', async t => {
   const box = await sandbox(t);
   const detected = box.run(['detect', '--plugin-root', box.root, '--json']);

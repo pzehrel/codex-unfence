@@ -94,7 +94,11 @@ export function analyzeDeferredStage(program: E.Program): SourceAnalysis | null 
     const cache = proof.cache(candidate, request.chain);
     const consumption = proof.policy(candidate, request.chain, receiver.chain);
     proof.closeRelevantEffects();
-    if (proof.ambient.premise.operations.length) proof.ambient.close();
+    if (proof.ambient.premise.operations.length) {
+      proof.ambient.close();
+      result.patternVersion = 'site-status-deferred-ambient-v1';
+      result.ambientPremise = proof.ambient.premise;
+    }
     result.evidence.push(initialization, {
       kind: 'predicate', range: range(candidate.wrapper),
       description: 'Object guards protect feature_status; the initialized agent key blocks only on strict equality to true.',
@@ -108,10 +112,6 @@ export function analyzeDeferredStage(program: E.Program): SourceAnalysis | null 
   } catch (error) {
     if (!(error instanceof UnprovenStage)) throw error;
     result.diagnostics.push({ code: error.code, severity: 'error', message: error.message, range: range(error.node) });
-  }
-  if (proof.ambient.premise.operations.length) {
-    result.patternVersion = 'site-status-deferred-ambient-v1';
-    result.ambientPremise = proof.ambient.premise;
   }
   return result;
 }
@@ -1253,7 +1253,7 @@ class DeferredProof {
 type Scalar = string | number | boolean | null | undefined;
 type Value = Scalar | Data | Closure | Native | Ambient | Root | Factory;
 interface Factory {kind: 'factory'; builder: Closure; cache?: Data; active?: boolean}
-interface Data { kind: 'data'; fields: Map<string, Value>; getters: Map<string, Closure>; enumerable: Set<string>; prototype?: Data; class?: boolean }
+interface Data { kind: 'data'; fields: Map<string, Value>; getters: Map<string, Closure>; enumerable: Set<string>; fixed: Set<string>; prototype?: Data; class?: boolean }
 interface Closure { kind: 'closure'; node: Fn; env: Map<Variable, Value> }
 interface Native { kind: 'native'; name: string }
 interface Ambient { kind: 'ambient' }
@@ -1270,7 +1270,7 @@ interface Context {
   once(node: E.CallExpression): boolean;
   fail(message: string, node: E.Node): never;
 }
-const data = (): Data => ({kind: 'data', fields: new Map(), getters: new Map(), enumerable: new Set()});
+const data = (): Data => ({kind: 'data', fields: new Map(), getters: new Map(), enumerable: new Set(), fixed: new Set()});
 const is = <K extends 'data' | 'closure' | 'native' | 'ambient' | 'root' | 'factory'>(value: Value, kind: K): value is Extract<Value, {kind: K}> => !!value && typeof value === 'object' && value.kind === kind;
 const pos = (node: E.Node): SourceRange => { const n = node as E.Node & {start: number; end: number}; return {start: n.start, end: n.end, unit: 'utf16'}; };
 const ambientFn = (node: E.Node): node is Fn => ['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(node.type);
@@ -1289,12 +1289,15 @@ class AmbientInitializer {
   private readonly ambientTarget: Ambient = {kind: 'ambient'};
   private readonly globalFallbacks = new Map<Fn, Variable>();
   private readonly globalGetters = new Set<Fn>();
+  private readonly forwardingGetters = new Set<Fn>();
   private steps = 0;
+  private firstOperation?: E.Node;
   constructor(private readonly context: Context) {}
 
   private fail(node: E.Node, message = 'Immediate initializer operation or receiver is outside the finite ambient proof.'): never { return this.context.fail(message, node); }
   private tick(node: E.Node): void { if (++this.steps > 50000) this.fail(node, 'Finite initializer proof budget exceeded.'); }
   private record(kind: AmbientPremise['operations'][number]['kind'], key: string, node: E.Node): void {
+    this.firstOperation ??= node;
     if (!this.premise.operations.some(item => item.kind === kind && item.key === key && item.range.start === pos(node).start)) this.premise.operations.push({kind, key, range: pos(node)});
   }
   private variable(node: E.Node): Variable { const binding = this.context.binding(node) ?? this.fail(node, 'Initializer data must resolve to a private lexical binding.'); this.observed.add(binding); return binding; }
@@ -1327,7 +1330,7 @@ class AmbientInitializer {
     if (node.type !== 'MemberExpression' || node.optional) return this.fail(node);
     const receiver = this.evaluate(node.object, env), key = this.key(node, env);
     if (is(receiver, 'root') && key === '__STATSIG__' && value === this.ambient) { this.record('root-write', key, node); this.writeback.add(receiver.name); return value; }
-    if (!is(receiver, 'data') || ['__proto__', 'prototype', 'constructor'].includes(key) || receiver.getters.has(key)) return this.fail(node, 'Unknown, accessor or special-key assignment is outside the exact premise.');
+    if (!is(receiver, 'data') || ['__proto__', 'prototype', 'constructor'].includes(key) || receiver.getters.has(key) || receiver.fixed.has(key) || receiver.prototype) return this.fail(node, 'Unknown, accessor, fixed-descriptor, inherited or special-key assignment is outside the exact premise.');
     receiver.fields.set(key, value); receiver.enumerable.add(key); return value;
   }
   private key(node: E.MemberExpression, env: Map<Variable, Value>): string {
@@ -1383,13 +1386,13 @@ class AmbientInitializer {
         }
         return result;
       }
-      case 'ArrayExpression': { const result = data(); for (const [index, item] of node.elements.entries()) if (item) { result.fields.set(String(index), this.evaluate(item, env)); result.enumerable.add(String(index)); } return result; }
+      case 'ArrayExpression': return this.fail(node, 'Array property and iteration semantics are outside the finite ambient grammar.');
       case 'SequenceExpression': { let value: Value; for (const item of node.expressions) value = this.evaluate(item, env); return value; }
       case 'AssignmentExpression': if (node.operator !== '=') return this.fail(node); return this.set(node.left, this.evaluate(node.right, env), env);
       case 'MemberExpression': if (node.optional) return this.fail(node); return this.field(this.evaluate(node.object, env), this.key(node, env), node);
       case 'UnaryExpression': {
         const value = this.evaluate(node.argument, env);
-        if (node.operator === 'typeof') return is(value, 'closure') || is(value, 'native') ? 'function' : value === null || typeof value === 'object' ? 'object' : typeof value;
+        if (node.operator === 'typeof') return is(value, 'closure') || is(value, 'native') || is(value, 'factory') || is(value, 'data') && value.class ? 'function' : value === null || typeof value === 'object' ? 'object' : typeof value;
         if (node.operator === '!') return !value;
         if (node.operator === 'void') return undefined;
         if (node.operator === '-') return -Number(this.scalar(value, node));
@@ -1401,10 +1404,13 @@ class AmbientInitializer {
       }
       case 'BinaryExpression': {
         const left = this.evaluate(node.left, env), right = this.evaluate(node.right, env);
-        if (node.operator === 'in') { if (!is(right, 'data')) return this.fail(node); return right.fields.has(String(this.scalar(left, node))) || right.getters.has(String(left)); }
+        if (node.operator === 'in') { if (!is(right, 'data') || right.prototype) return this.fail(node, 'Inherited membership is outside the finite ambient grammar.'); return right.fields.has(String(this.scalar(left, node))) || right.getters.has(String(left)); }
         if (['===', '!==', '==', '!='].includes(node.operator)) {
           if ((is(left, 'ambient') || is(right, 'ambient')) && !(left == null || right == null)) return this.fail(node);
-          const equal = node.operator === '==' || node.operator === '!=' ? left == right : left === right;
+          const loose = node.operator === '==' || node.operator === '!=';
+          const object = (value: Value): boolean => value !== null && typeof value === 'object';
+          if (loose && object(left) !== object(right) && left != null && right != null) return this.fail(node, 'Object-to-scalar equality coercion is outside the finite proof.');
+          const equal = loose ? left == right : left === right;
           return node.operator === '!==' || node.operator === '!=' ? !equal : equal;
         }
         const a = this.scalar(left, node), b = this.scalar(right, node);
@@ -1480,6 +1486,15 @@ class AmbientInitializer {
       this.record('name-read', '__STATSIG__', value.node); return this.ambientTarget;
     }
     this.invoked.add(value.node);
+    walk(value.node.body, node => {
+      if (node.type === 'Identifier') {
+        const binding = this.context.binding(node);
+        if (!this.forwardingGetters.has(value.node) && binding && value.env.has(binding) && binding.scope.block !== value.node && (is(value.env.get(binding), 'data') || binding.references.some(reference => reference.isWrite() && !reference.init)) && binding.references.some(reference => reference.identifier === node)) this.fail(node, 'Invoked closures cannot capture mutable outer initializer data; finite forwarding getters are verified separately.');
+      }
+      if (node.type !== 'AssignmentExpression' || node.left.type !== 'Identifier') return;
+      const binding = this.context.binding(node.left);
+      if (binding && binding.scope.block !== value.node) this.fail(node.left, 'Captured lexical writes require shared cells and are outside the finite initializer grammar.');
+    });
     const env = new Map(value.env);
     for (const [index, parameter] of value.node.params.entries()) env.set(this.variable(parameter), args[index]);
     if (value.node.body.type !== 'BlockStatement') return this.evaluate(value.node.body, env);
@@ -1509,7 +1524,7 @@ class AmbientInitializer {
     if (node.type === 'ForOfStatement' || node.type === 'ForInStatement') {
       const right = this.evaluate(node.right, env); if (!is(right, 'data')) return this.fail(node);
       const values = node.type === 'ForInStatement' ? [...right.enumerable] : [...right.fields.values()];
-      if (node.left.type !== 'VariableDeclaration' || node.left.declarations.length !== 1 || node.left.declarations[0]?.id.type !== 'Identifier') return this.fail(node);
+      if (node.left.type !== 'VariableDeclaration' || node.left.kind !== 'let' || node.left.declarations.length !== 1 || node.left.declarations[0]?.id.type !== 'Identifier') return this.fail(node, 'Finite iteration requires a fresh per-iteration let binding; var shared scope is unsupported.');
       for (const value of values) {
         const local = new Map(env); local.set(this.variable(node.left.declarations[0].id), value);
         const result = this.statement(node.body, local); if (result) return result;
@@ -1544,12 +1559,15 @@ class AmbientInitializer {
       if (args.length !== 2 || !is(args[0], 'data') || typeof args[1] !== 'string') return this.fail(site);
       const [target, key] = args; if (!target.fields.has(key) && !target.getters.has(key)) return undefined;
       const result = data(); result.fields.set('enumerable', target.enumerable.has(key));
-      if (target.getters.has(key)) result.fields.set('get', target.getters.get(key)); else { result.fields.set('value', target.fields.get(key)); result.fields.set('writable', true); result.fields.set('configurable', true); }
+      if (target.getters.has(key)) result.fields.set('get', target.getters.get(key)); else { result.fields.set('value', target.fields.get(key)); result.fields.set('writable', !target.fixed.has(key)); result.fields.set('configurable', !target.fixed.has(key)); }
       return result;
     }
     if (name === 'Object.defineProperty') {
       if (args.length !== 3 || !is(args[0], 'data') || typeof args[1] !== 'string' || !is(args[2], 'data') || ['__proto__', 'constructor', 'prototype'].includes(args[1])) return this.fail(site);
       const [target, key, descriptor] = args;
+      if (target.fields.has(key) || target.getters.has(key) || target.prototype || descriptor.prototype || descriptor.getters.size) return this.fail(site, 'Descriptor redefinition, inherited descriptors and accessor descriptor fields are unsupported.');
+      if (descriptor.fields.has('writable') || descriptor.fields.has('configurable')) return this.fail(site, 'Explicit descriptor flags are outside the finite default-only descriptor grammar.');
+      target.fixed.add(key);
       if ([...descriptor.fields.keys()].some(key => !['value', 'get', 'enumerable', 'writable', 'configurable'].includes(key))) return this.fail(site);
       const getter = descriptor.fields.get('get');
       if (getter !== undefined) {
@@ -1557,7 +1575,19 @@ class AmbientInitializer {
         const body = getter.node.body;
         const expression = body.type === 'BlockStatement' && body.body.length === 1 && body.body[0]?.type === 'ReturnStatement' ? body.body[0].argument : body;
         if (expression?.type !== 'MemberExpression') return this.fail(site, 'Export getter must forward one proven property unchanged.');
-        this.evaluate(expression, getter.env);
+        if (expression.optional || expression.object.type !== 'Identifier') return this.fail(site, 'Forwarding getter requires a static lexical data receiver; installation cannot execute its body.');
+        const receiverBinding = this.context.binding(expression.object);
+        const receiver = receiverBinding && getter.env.get(receiverBinding);
+        if (!is(receiver, 'data')) return this.fail(site, 'Forwarding getter receiver must already have finite data provenance.');
+        this.reads.add(expression.object); this.observed.add(receiverBinding!);
+        if (expression.computed) {
+          if (expression.property.type === 'Identifier') {
+            const propertyBinding = this.context.binding(expression.property);
+            if (!propertyBinding || typeof getter.env.get(propertyBinding) !== 'string') return this.fail(site);
+            this.reads.add(expression.property); this.observed.add(propertyBinding);
+          } else if (expression.property.type !== 'Literal' || typeof expression.property.value !== 'string') return this.fail(site);
+        }
+        this.forwardingGetters.add(getter.node);
         target.getters.set(key, getter); target.fields.delete(key);
       }
       else { target.fields.set(key, descriptor.fields.get('value')); target.getters.delete(key); }
@@ -1578,13 +1608,16 @@ class AmbientInitializer {
   provedCall(node: E.Node): boolean { return this.provedCalls.has(node); }
   private readonly provedCalls = new Set<E.Node>();
   close(): void {
+    const kinds = this.premise.operations;
+    const count = (kind: AmbientPremise['operations'][number]['kind'], key: string): number => kinds.filter(item => item.kind === kind && item.key === key).length;
+    if (count('root-read', '__STATSIG__') !== 3 || count('root-write', '__STATSIG__') !== 3 || count('name-read', '__STATSIG__') !== 1 || !['Log', 'SDK_VERSION', 'StatsigClient'].every(key => count('target-write', key) === 1) || kinds.length !== 10) this.fail(this.firstOperation!, 'Ambient premise requires the complete exact root/getter/writeback and target assignment association.');
     for (const binding of new Set([...this.env.keys(), ...this.observed])) {
       for (const reference of binding.references) if (!reference.isWrite() && !this.reads.has(reference.identifier)) {
         let enclosing = this.context.parent(reference.identifier);
         while (enclosing && !ambientFn(enclosing)) enclosing = this.context.parent(enclosing);
         // An unvisited branch of an actually interpreted synchronous invocation
         // is unreachable for that invocation. Nested deferred closures are not.
-        if (!enclosing || !ambientFn(enclosing) || !this.invoked.has(enclosing)) this.fail(reference.identifier, 'Finite initializer dependency has an unproved alias, deferred use or escape.');
+        if (!enclosing || !ambientFn(enclosing) || !this.invoked.has(enclosing) || binding.scope.block !== enclosing) this.fail(reference.identifier, 'Finite initializer dependency has an unproved alias, deferred capture, use or escape.');
       }
       for (const reference of binding.references) if (reference.isWrite() && !reference.init && !this.writes.has(reference.identifier)) this.fail(reference.identifier, 'Finite initializer dependency is reassigned outside the proved path.');
     }

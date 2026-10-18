@@ -102,6 +102,79 @@ test('CommonJS-to-once calls retain refusal until activation and reentry share o
   }
 });
 
+test('publishes ambient premise only after complete association and successful closure', () => {
+  for (const text of [
+    ambientSource.replace('interop(loadPackage(), 1)', '(() => __STATSIG__)()'),
+    source.replace('var once =', 'var imported;\nvar once =').replace('var initialize = once(() => {', 'var initialize = once(() => { imported = (() => window.__STATSIG__)();'),
+    ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic'; unknown();"),
+    ambientSource.replace('out.default = current;', 'out.default = current; unknown();'),
+    ambientSource + '\nvar escaped = loadPackage;',
+  ]) {
+    const result = transformSource(text);
+    assert.equal(result.analysis.compatibility, 'incompatible');
+    assert.equal(result.analysis.ambientPremise, undefined);
+    assert.equal(result.analysis.patternVersion, 'site-status-deferred-v1');
+    assert.equal(result.transformation, null);
+  }
+});
+
+test('closes every deferred capture even after a finite call skips its branch', () => {
+  const text = ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic'; out.later = flag => { if (flag) out.SDK_VERSION = unknown(); }; out.later(false);");
+  for (const value of [text, ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic'; var state = {flag: false}; out.later = () => { if (state.flag) unknown(); }; out.later(); state.flag = true;"), ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic'; var flag = false; out.later = () => { if (flag) unknown(); }; out.later(); flag = true;")]) {
+    const result = analyzeSource(value);
+    assert.equal(result.diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+    assert.equal(result.ambientPremise, undefined);
+  }
+});
+
+test('refuses captured lexical writes rather than dropping them in a copied environment', () => {
+  const text = ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic'; var flag = false; var setFlag = () => { flag = true; }; setFlag(); if (flag) unknown();");
+  assert.equal(analyzeSource(text).diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+});
+
+test('refuses var iteration scope and shared forwarding getter captures', () => {
+  for (const text of [
+    ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic'; var last = false; for (var last of [true]) {} if (last) unknown();"),
+    ambientSource.replace('for (let name of ownNames(input))', 'for (var name of ownNames(input))'),
+  ]) assert.equal(analyzeSource(text).diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+});
+
+test('refuses object coercion in loose equality while retaining scalar and null guards', () => {
+  for (const addition of [
+    'var local = {valueOf: () => unknown()}; local == 1;',
+    'var local = {toString: () => unknown()}; local != "x";',
+  ]) assert.equal(analyzeSource(ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic';" + addition)).diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+});
+
+test('keeps class and CommonJS factory callable typeof semantics', () => {
+  for (const addition of [
+    "if (typeof out.Log === 'function') unknown();",
+    "if (typeof loadClient === 'function') unknown();",
+  ]) assert.equal(analyzeSource(ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic';" + addition)).diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+});
+
+test('does not skip branches through inherited membership or array length reads', () => {
+  for (const addition of [
+    "var local = Object.create({x: 1}); if ('x' in local) unknown();",
+    'var local = [true]; if (local.length) unknown();',
+  ]) assert.equal(analyzeSource(ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic';" + addition)).diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+});
+
+test('refuses unmodeled descriptor defaults, redefinition and inherited descriptor fields', () => {
+  for (const addition of [
+    "Object.defineProperty(out, 'x', {value: 1}); out.x = 2;",
+    "Object.defineProperty(out, 'x', {value: 1}); Object.defineProperty(out, 'x', {value: 2});",
+    "Object.defineProperty(out, 'x', {value: 1}); if (!Object.getOwnPropertyDescriptor(out, 'x').writable) unknown();",
+    "Object.defineProperty(out, 'x', Object.create({get: () => unknown(), enumerable: true}));",
+    "var d = {}; Object.defineProperty(d, 'value', {get: () => out.SDK_VERSION}); Object.defineProperty(out, 'x', d);",
+  ]) assert.equal(analyzeSource(ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic';" + addition)).diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+});
+
+test('does not execute a getter receiver while installing its descriptor', () => {
+  const addition = "var state = {flag: false}; var touch = () => {state.flag = true; return {x: 1};}; Object.defineProperty(out, 'x', {get: () => touch().x}); if (!state.flag) unknown();";
+  assert.equal(analyzeSource(ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic';" + addition)).diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+});
+
 // Execute only this independently authored fixture. The exposed callable boundary
 // and host clock/fetch adapters do not expose analyzer internals or AST state.
 function fixtureRuntime(text = source) {
