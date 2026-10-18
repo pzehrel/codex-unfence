@@ -98,7 +98,7 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
   const [output] = JSON.parse(pack.stdout);
   const files = output.files.map((file) => file.path);
   assert.deepEqual(files.filter((path) => !path.startsWith('node_modules/')).sort(), [
-    'README.md', 'dist/analysis.js', 'dist/cli.js', 'dist/deferred-analysis.js', 'dist/dependency-analysis.js', 'dist/dependency-contracts.js', 'dist/dependency-source.js', 'dist/discovery.js', 'dist/integrity.js', 'dist/plan.js', 'dist/processes.js', 'dist/resource-provenance.js', 'dist/result.js',
+    'README.md', 'dist/analysis.js', 'dist/cli.js', 'dist/deferred-analysis.js', 'dist/dependency-analysis.js', 'dist/dependency-contracts.js', 'dist/dependency-source.js', 'dist/descriptor-provenance.js', 'dist/discovery.js', 'dist/integrity.js', 'dist/plan.js', 'dist/processes.js', 'dist/resource-provenance.js', 'dist/result.js',
     'dist/source-context.js', 'dist/transaction-locks.js', 'dist/transaction-storage.js', 'dist/transactions.js', 'package.json',
   ]);
   const dependencies = new Set();

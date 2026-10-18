@@ -184,7 +184,7 @@ test('a registered inert resource exposes measurements but never skips an unprov
   const directory = await mkdtemp(join(tmpdir(), 'dependency-test-build-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await mkdir(join(directory, 'dist'));
-  for (const file of ['analysis.js', 'deferred-analysis.js', 'dependency-analysis.js', 'dependency-source.js', 'resource-provenance.js', 'source-context.js']) await copyFile(new URL(`../dist/${file}`, import.meta.url), join(directory, 'dist', file));
+  for (const file of ['analysis.js', 'deferred-analysis.js', 'dependency-analysis.js', 'dependency-source.js', 'descriptor-provenance.js', 'resource-provenance.js', 'source-context.js']) await copyFile(new URL(`../dist/${file}`, import.meta.url), join(directory, 'dist', file));
   await writeFile(join(directory, 'package.json'), JSON.stringify({ type: 'module' }));
   // Resolve the unchanged parser dependencies from the repository installation.
   const { symlink } = await import('node:fs/promises');
@@ -194,7 +194,7 @@ test('a registered inert resource exposes measurements but never skips an unprov
   await t.test('registry identity cannot replace a mismatched independently decoded interface', async () => {
     const second = join(directory, 'mismatch');
     await mkdir(second);
-    for (const file of ['analysis.js', 'deferred-analysis.js', 'dependency-analysis.js', 'dependency-source.js', 'resource-provenance.js', 'source-context.js']) await copyFile(new URL(`../dist/${file}`, import.meta.url), join(second, file));
+    for (const file of ['analysis.js', 'deferred-analysis.js', 'dependency-analysis.js', 'dependency-source.js', 'descriptor-provenance.js', 'resource-provenance.js', 'source-context.js']) await copyFile(new URL(`../dist/${file}`, import.meta.url), join(second, file));
     await writeFile(join(second, 'dependency-contracts.js'), `export const dependencyContracts = [${JSON.stringify({ id: 'zxing-reader-lifetime-noninterference', revision: 1, size: 24, sha256: digest(resource), binaryVersion: 1, relativePath: './zxing_reader.wasm', imports: 'a.F:i>i' })}];`);
     const mismatch = await import(pathToFileURL(join(second, 'analysis.js')).href);
     const result = mismatch.analyzeSource(source, evidenceFor());
