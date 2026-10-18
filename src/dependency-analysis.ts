@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { isUint8Array } from 'node:util/types';
 import { dependencyContracts } from './dependency-contracts.js';
 import { proveDependencySource } from './dependency-source.js';
+import { parseSourceContext } from './source-context.js';
+import type { ParsedSource } from './source-context.js';
 import type { AnalysisDiagnostic, StructuralEvidence } from './analysis.js';
 
 /** Explicit snapshots only. Paths describe association; they are never opened. */
@@ -137,6 +139,15 @@ function measure(bytes: Uint8Array): MeasuredDependencyResource {
 
 /** Verify bytes and approval independently; no caller claim can approve a resource. */
 export function inspectDependency(source: string, input: DependencyEvidenceInput): DependencyProof {
+  return inspectDependencySource(source, input, () => parseSourceContext(source));
+}
+
+/** Private shared-context path; callers of analyzeSource cannot supply AST facts. */
+export function inspectDependencyInContext(parsed: ParsedSource, input: DependencyEvidenceInput): DependencyProof {
+  return inspectDependencySource(parsed.source, input, () => parsed);
+}
+
+function inspectDependencySource(source: string, input: DependencyEvidenceInput, parsed: () => ParsedSource): DependencyProof {
   const proof: DependencyProof = { status: 'rejected', resource: null, registeredContract: null, acceptedContract: null, association: null, evidence: [], diagnostics: [], runtime: 'not-verified' };
   const fail = (code: string, message: string): DependencyProof => { proof.diagnostics.push({ code, severity: 'error', message }); return proof; };
   const fields = (value: unknown, names: string[]): boolean => !!value && typeof value === 'object' && Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name));
@@ -159,7 +170,7 @@ export function inspectDependency(source: string, input: DependencyEvidenceInput
   if (imports !== contract.imports) return fail('DEPENDENCY_IMPORT_INTERFACE', 'Measured import names and signatures do not match the approved resource interface.');
   proof.registeredContract = { id: contract.id, revision: contract.revision, assumption: 'The approved resource preserves relevant host capabilities, prototypes, site-status bindings and configuration throughout verified initialization and decoding, including delayed effects.' };
   proof.status = 'incomplete';
-  const structural = proveDependencySource(source, proof.resource);
+  const structural = proveDependencySource(parsed(), proof.resource);
   proof.evidence = structural.evidence;
   proof.diagnostics.push(...structural.diagnostics);
   return proof;

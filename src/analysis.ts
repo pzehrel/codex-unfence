@@ -1,9 +1,10 @@
 import { parse } from 'acorn';
-import { inspectDependency } from './dependency-analysis.js';
+import { inspectDependencyInContext } from './dependency-analysis.js';
+import { parseSourceContext } from './source-context.js';
+import type { ParsedSource, SourceContext } from './source-context.js';
 import type { DependencyEvidenceInput, DependencyProof } from './dependency-analysis.js';
 export type { DependencyEvidenceInput, DependencyProof } from './dependency-analysis.js';
 import { analyzeDeferredStage } from './deferred-analysis.js';
-import { analyze } from 'eslint-scope';
 import type { Variable } from 'eslint-scope';
 import type * as E from 'estree';
 
@@ -143,27 +144,26 @@ function objectProperty(node: E.Node | null | undefined, name: string): E.Expres
 
 /** Pure, finite structural proof. Never evaluates source or reads an installation. */
 export function analyzeSource(source: string, dependencyEvidence?: DependencyEvidenceInput): SourceAnalysis {
-  const analysis = analyzeSourceOnly(source);
+  const parsed = parseSourceContext(source);
+  const analysis = analyzeSourceOnly(parsed);
   if (dependencyEvidence === undefined) return analysis;
-  const dependencyProof = inspectDependency(source, dependencyEvidence);
+  const dependencyProof = inspectDependencyInContext(parsed, dependencyEvidence);
   // Until the complete operation graph is proved, evidence can only add a
   // rejection. It never suppresses the source-only capability/effect gates.
   return { ...analysis, compatibility: 'incompatible', target: null, dependencyProof, diagnostics: [...analysis.diagnostics, ...dependencyProof.diagnostics] };
 }
 
-function analyzeSourceOnly(source: string): SourceAnalysis {
+function analyzeSourceOnly(parsed: ParsedSource): SourceAnalysis {
   const result: SourceAnalysis = {
     patternVersion: 'site-status-v1', compatibility: 'incompatible', runtime: 'not-verified',
     evidence: [], diagnostics: [], target: null,
   };
-  let program: E.Program;
-  try {
-    program = parse(source, { ecmaVersion: 2022, sourceType: 'module', ranges: true }) as unknown as E.Program;
-  } catch (error) {
-    result.diagnostics.push({ code: 'PARSE_ERROR', severity: 'error', message: error instanceof Error ? error.message : 'Invalid JavaScript.' });
+  if (!parsed.context) {
+    result.diagnostics.push({ code: 'PARSE_ERROR', severity: 'error', message: parsed.parseError });
     return result;
   }
-  const deferredStage = analyzeDeferredStage(program);
+  const context = parsed.context, program = context.program;
+  const deferredStage = analyzeDeferredStage(context);
   if (deferredStage) {
     if (deferredStage.compatibility === 'compatible') {
       // A deferred candidate must not hide another legacy or unknown blocking
@@ -181,7 +181,7 @@ function analyzeSourceOnly(source: string): SourceAnalysis {
     return deferredStage;
   }
   try {
-    const proof = new Proof(program);
+    const proof = new Proof(context);
     const candidates: { target: E.Node; evidence: StructuralEvidence[]; patched: boolean }[] = [];
     const failures: Unproven[] = [];
     const classes: (E.ClassDeclaration | E.ClassExpression)[] = [];
@@ -221,14 +221,17 @@ function analyzeSourceOnly(source: string): SourceAnalysis {
 
 class Proof {
   private readonly bindings = new Map<E.Node, Variable>();
-  private readonly nodes: E.Node[] = [];
+  private readonly nodes: readonly E.Node[];
+  private readonly program: E.Program;
   private readonly provenFunctions = new Set<FunctionNode>();
   private readonly provenCalls = new Set<E.Node>();
   private readonly provenConstructors = new Set<E.Node>();
   private readonly globals = new Set<E.Identifier>();
 
-  constructor(private readonly program: E.Program) {
-    const scopes = analyze(program, { ecmaVersion: 2022, sourceType: 'module', optimistic: false, ignoreEval: false });
+  constructor(context: SourceContext) {
+    this.program = context.program;
+    this.nodes = context.nodes;
+    const scopes = context.scopeManager;
     for (const scope of scopes.scopes) {
       for (const reference of scope.through) {
         if (!reference.resolved) this.globals.add(reference.identifier);
@@ -243,8 +246,7 @@ class Proof {
         for (const reference of variable.references) this.bindings.set(reference.identifier, variable);
       }
     }
-    walk(program, (node) => {
-      this.nodes.push(node);
+    for (const node of this.nodes) {
       need(!(call(node) && node.callee.type === 'Identifier' && node.callee.name === 'eval'), 'eval is unsupported.', node, 'UNSUPPORTED_SCOPE');
       const written = node.type === 'AssignmentExpression' ? node.left : node.type === 'UpdateExpression' ? node.argument :
         node.type === 'UnaryExpression' && node.operator === 'delete' ? node.argument : null;
@@ -254,7 +256,7 @@ class Proof {
       }
       need(!(call(node) && ['defineProperty', 'defineProperties', 'setPrototypeOf', 'assign', 'set'].some((name) => member(node.callee, name)) &&
         !(member(node.callee, 'set') && member(node.callee.object, 'searchParams'))), 'Reflective mutation is outside the finite proof.', node, 'UNSUPPORTED_MUTATION');
-    });
+    }
   }
 
   /** Close effects over the entire source, including aliases outside the matched bodies. */

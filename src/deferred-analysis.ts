@@ -1,4 +1,4 @@
-import { analyze } from 'eslint-scope';
+import type { SourceContext } from './source-context.js';
 import type { Variable } from 'eslint-scope';
 import type * as E from 'estree';
 import type { SourceAnalysis, SourceRange, StructuralEvidence } from './analysis.js';
@@ -74,8 +74,9 @@ const stateRoles = ['now', 'getTurnMetadata', 'cache', 'inflightRequests'] as co
 type StateRole = typeof stateRoles[number];
 
 /** A separate finite proof; compatibility requires every stage and relevant effect gate. */
-export function analyzeDeferredStage(program: E.Program): SourceAnalysis | null {
-  const proof = new DeferredProof(program);
+export function analyzeDeferredStage(context: SourceContext): SourceAnalysis | null {
+  const program = context.program;
+  const proof = new DeferredProof(context);
   const candidates = proof.candidates();
   if (!candidates.length) return null;
   const result: SourceAnalysis = {
@@ -127,9 +128,10 @@ class DeferredProof {
     },
     fail: (message, node) => { throw new UnprovenStage('DEFERRED_INITIALIZER_EFFECT', message, node); },
   });
-  private readonly bindings = new Map<E.Node, Variable>();
-  private readonly parents = new Map<E.Node, E.Node>();
-  private readonly nodes: E.Node[] = [];
+  private readonly bindings: ReadonlyMap<E.Node, Variable>;
+  private readonly parents: ReadonlyMap<E.Node, E.Node>;
+  private readonly nodes: readonly E.Node[];
+  private readonly program: E.Program;
   private readonly tracked = new Set<Variable>();
   private readonly allowedReads = new Set<E.Node>();
   private readonly allowedWrites = new Set<E.Node>();
@@ -163,13 +165,11 @@ class DeferredProof {
     }
   }
 
-  constructor(private readonly program: E.Program) {
-    const scopes = analyze(program, { ecmaVersion: 2022, sourceType: 'module', optimistic: false, ignoreEval: false });
-    for (const scope of scopes.scopes) for (const variable of scope.variables) {
-      for (const identifier of variable.identifiers) this.bindings.set(identifier, variable);
-      for (const reference of variable.references) this.bindings.set(reference.identifier, variable);
-    }
-    walk(program, (node, parent) => { this.nodes.push(node); if (parent) this.parents.set(node, parent); });
+  constructor(context: SourceContext) {
+    this.program = context.program;
+    this.bindings = context.bindings;
+    this.parents = context.parents;
+    this.nodes = context.nodes;
   }
 
   private binding(node: E.Node | null | undefined): Variable | undefined { return node ? this.bindings.get(node) : undefined; }

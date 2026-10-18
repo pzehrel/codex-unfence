@@ -184,7 +184,7 @@ test('a registered inert resource exposes measurements but never skips an unprov
   const directory = await mkdtemp(join(tmpdir(), 'dependency-test-build-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await mkdir(join(directory, 'dist'));
-  for (const file of ['analysis.js', 'deferred-analysis.js', 'dependency-analysis.js', 'dependency-source.js', 'resource-provenance.js']) await copyFile(new URL(`../dist/${file}`, import.meta.url), join(directory, 'dist', file));
+  for (const file of ['analysis.js', 'deferred-analysis.js', 'dependency-analysis.js', 'dependency-source.js', 'resource-provenance.js', 'source-context.js']) await copyFile(new URL(`../dist/${file}`, import.meta.url), join(directory, 'dist', file));
   await writeFile(join(directory, 'package.json'), JSON.stringify({ type: 'module' }));
   // Resolve the unchanged parser dependencies from the repository installation.
   const { symlink } = await import('node:fs/promises');
@@ -194,12 +194,29 @@ test('a registered inert resource exposes measurements but never skips an unprov
   await t.test('registry identity cannot replace a mismatched independently decoded interface', async () => {
     const second = join(directory, 'mismatch');
     await mkdir(second);
-    for (const file of ['analysis.js', 'deferred-analysis.js', 'dependency-analysis.js', 'dependency-source.js', 'resource-provenance.js']) await copyFile(new URL(`../dist/${file}`, import.meta.url), join(second, file));
+    for (const file of ['analysis.js', 'deferred-analysis.js', 'dependency-analysis.js', 'dependency-source.js', 'resource-provenance.js', 'source-context.js']) await copyFile(new URL(`../dist/${file}`, import.meta.url), join(second, file));
     await writeFile(join(second, 'dependency-contracts.js'), `export const dependencyContracts = [${JSON.stringify({ id: 'zxing-reader-lifetime-noninterference', revision: 1, size: 24, sha256: digest(resource), binaryVersion: 1, relativePath: './zxing_reader.wasm', imports: 'a.F:i>i' })}];`);
     const mismatch = await import(pathToFileURL(join(second, 'analysis.js')).href);
     const result = mismatch.analyzeSource(source, evidenceFor());
     assert.equal(result.dependencyProof.diagnostics[0].code, 'DEPENDENCY_IMPORT_INTERFACE');
     assert.equal(result.dependencyProof.registeredContract, null);
+  });
+  await t.test('malformed source retains source and dependency parse diagnostics in public order', () => {
+    const malformed = 'function {';
+    const sourceDiagnostic = { code: 'PARSE_ERROR', severity: 'error', message: 'Unexpected token (1:9)' };
+    const dependencyDiagnostic = { code: 'DEPENDENCY_SOURCE_PARSE', severity: 'error', message: 'Dependency source must parse as an ECMAScript module.' };
+    assert.deepEqual(isolated.analyzeSource(malformed), {
+      patternVersion: 'site-status-v1', compatibility: 'incompatible', runtime: 'not-verified',
+      evidence: [], diagnostics: [sourceDiagnostic], target: null,
+    });
+    const result = isolated.transformSource(malformed, evidenceFor(malformed));
+    assert.deepEqual(result.analysis.diagnostics, [sourceDiagnostic, dependencyDiagnostic]);
+    assert.deepEqual(result.analysis.dependencyProof.diagnostics, [dependencyDiagnostic]);
+    assert.equal(result.analysis.dependencyProof.status, 'incomplete');
+    assert.equal(result.analysis.dependencyProof.acceptedContract, null);
+    assert.equal(result.transformation, null);
+    const invalidEvidence = isolated.analyzeSource(malformed, {});
+    assert.deepEqual(invalidEvidence.diagnostics.map(entry => entry.code), ['PARSE_ERROR', 'DEPENDENCY_EVIDENCE_FORMAT']);
   });
   const analysis = isolated.analyzeSource(source, evidenceFor());
   assert.equal(analysis.compatibility, 'incompatible');
@@ -208,6 +225,31 @@ test('a registered inert resource exposes measurements but never skips an unprov
   assert.equal(analysis.dependencyProof.status, 'incomplete');
   assert.equal(analysis.dependencyProof.acceptedContract, null);
   assert.equal(analysis.dependencyProof.diagnostics[0].code, 'DEPENDENCY_LOADER_UNPROVEN');
+  await t.test('interleaved public analyses keep ordinary evidence, diagnostics and invocation state independent', async () => {
+    const ambient = await readFile(new URL('./fixtures/ambient-initializer.js.txt', import.meta.url), 'utf8');
+    const ambientSource = source.replace('var once =', ambient + '\nvar once =').replace('var initialize = once(() => {', 'var initialize = once(() => { imported = interop(loadPackage(), 1);');
+    const texts = [source, ambientSource, 'function {', source + '\nObject.prototype.preRun = unknown;'];
+    const historical = texts.map(text => ({ ordinary: isolated.analyzeSource(text), withEvidence: isolated.analyzeSource(text, evidenceFor(text)) }));
+    for (const { ordinary, withEvidence } of historical) {
+      const { dependencyProof, ...sourceAnalysis } = withEvidence;
+      assert.deepEqual(sourceAnalysis, { ...ordinary, compatibility: 'incompatible', target: null, diagnostics: [...ordinary.diagnostics, ...dependencyProof.diagnostics] });
+      assert.equal(dependencyProof.acceptedContract, null);
+    }
+    for (const text of [...texts].reverse()) {
+      const returned = isolated.analyzeSource(text, evidenceFor(text));
+      returned.evidence.length = 0;
+      returned.diagnostics.length = 0;
+      returned.dependencyProof.evidence.length = 0;
+      returned.dependencyProof.diagnostics.length = 0;
+      if (returned.ambientPremise) returned.ambientPremise.operations.length = 0;
+    }
+    for (const [index, text] of texts.entries()) {
+      assert.deepEqual(isolated.analyzeSource(text), historical[index].ordinary);
+      const transformed = isolated.transformSource(text, evidenceFor(text));
+      assert.deepEqual(transformed.analysis, historical[index].withEvidence);
+      assert.equal(transformed.transformation, null);
+    }
+  });
   await t.test('measured import signatures must match the compiled contract interface', () => {
     const changed = resource.slice();
     changed[14] = 126; // A valid different result type, i64 instead of i32.

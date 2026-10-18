@@ -1,5 +1,4 @@
-import { parse } from 'acorn';
-import { analyze } from 'eslint-scope';
+import type { ParsedSource, SourceContext } from './source-context.js';
 import { resourceProvenance } from './resource-provenance.js';
 import type { Variable } from 'eslint-scope';
 import type * as E from 'estree';
@@ -26,12 +25,11 @@ function call(node: E.Node | undefined | null): node is E.CallExpression { retur
 function body(node: Fn): E.Statement[] { return node.body.type === 'BlockStatement' ? node.body.body : []; }
 
 /** No capability exception is granted by this partial structural proof. */
-export function proveDependencySource(source: string, resource: Parameters<typeof resourceProvenance>[2]): SourceProof {
+export function proveDependencySource(parsed: ParsedSource, resource: Parameters<typeof resourceProvenance>[2]): SourceProof {
   const proof: SourceProof = { evidence: [], diagnostics: [] };
-  let program: E.Program;
-  try { program = parse(source, { ecmaVersion: 2022, sourceType: 'module', ranges: true }) as unknown as E.Program; }
-  catch { proof.diagnostics.push({ code: 'DEPENDENCY_SOURCE_PARSE', severity: 'error', message: 'Dependency source must parse as an ECMAScript module.' }); return proof; }
-  const graph = new SourceGraph(program);
+  if (!parsed.context) { proof.diagnostics.push({ code: 'DEPENDENCY_SOURCE_PARSE', severity: 'error', message: 'Dependency source must parse as an ECMAScript module.' }); return proof; }
+  const program = parsed.context.program;
+  const graph = new SourceGraph(parsed.context);
   const fail = (code: string, message: string, node: E.Node): SourceProof => { proof.diagnostics.push({ code, severity: 'error', message, range: position(node) }); return proof; };
   const loaders = graph.nodes.filter((node): node is Fn => fn(node) && graph.loader(node));
   if (loaders.length !== 1) return fail('DEPENDENCY_LOADER_UNPROVEN', 'A unique finite adjacent-resource loader with an explicit fallback branch has not been proven.', loaders[1] ?? program);
@@ -55,16 +53,15 @@ export function proveDependencySource(source: string, resource: Parameters<typeo
 }
 
 class SourceGraph {
-  readonly nodes: E.Node[] = [];
-  readonly parents = new Map<E.Node, E.Node>();
-  readonly bindings = new Map<E.Node, Variable>();
-  constructor(readonly program: E.Program) {
-    const scopes = analyze(program, { ecmaVersion: 2022, sourceType: 'module', optimistic: false, ignoreEval: false });
-    for (const scope of scopes.scopes) for (const variable of scope.variables) {
-      for (const identifier of variable.identifiers) this.bindings.set(identifier, variable);
-      for (const reference of variable.references) this.bindings.set(reference.identifier, variable);
-    }
-    walk(program, (node, parent) => { this.nodes.push(node); if (parent) this.parents.set(node, parent); });
+  readonly nodes: readonly E.Node[];
+  readonly parents: ReadonlyMap<E.Node, E.Node>;
+  readonly bindings: ReadonlyMap<E.Node, Variable>;
+  readonly program: E.Program;
+  constructor(readonly context: SourceContext) {
+    this.program = context.program;
+    this.nodes = context.nodes;
+    this.parents = context.parents;
+    this.bindings = context.bindings;
   }
   same(a: E.Node | undefined | null, b: E.Node | undefined | null): boolean {
     return a?.type === 'Identifier' && b?.type === 'Identifier' && !!this.bindings.get(a) && this.bindings.get(a) === this.bindings.get(b);

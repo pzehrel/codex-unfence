@@ -11,9 +11,9 @@ interface ResourceInterface {
   exports: { name: string; kind: number; index: number }[];
 }
 interface Graph {
-  nodes: E.Node[];
-  parents: Map<E.Node, E.Node>;
-  bindings: Map<E.Node, Variable>;
+  readonly nodes: readonly E.Node[];
+  readonly parents: ReadonlyMap<E.Node, E.Node>;
+  readonly bindings: ReadonlyMap<E.Node, Variable>;
   definition(node: E.Node): Fn | null;
   same(a: E.Node | null | undefined, b: E.Node | null | undefined): boolean;
   standard(node: E.Node, name: string): boolean;

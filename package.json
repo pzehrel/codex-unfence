@@ -11,6 +11,7 @@
   },
   "files": [
     "dist/analysis.js",
+    "dist/source-context.js",
     "dist/deferred-analysis.js",
     "dist/dependency-analysis.js",
     "dist/dependency-contracts.js",
