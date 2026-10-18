@@ -46,7 +46,8 @@ export function proveDependencySource(source: string, resource: Parameters<typeo
   const privateEscape = graph.cacheEscape(cache);
   if (privateEscape) return fail('DEPENDENCY_PRIVATE_STATE_ESCAPE', 'WeakMap state may only be accessed by the matched cache operations; aliases, extra accesses, writes and exports are unproven.', privateEscape);
   proof.evidence.push({ kind: 'cache', range: position(cache), description: 'Finite WeakMap cache syntax replaces selected overrides rather than merging, reuses a module only through its equality parameter, and invokes initialization with a new spread object. WeakMap references close over these operations. Equality/default provenance, other binding references and inherited options remain unproven.' });
-  proof.evidence.push(...resourceProvenance(graph, initialization.factory, resource));
+  const resources = resourceProvenance(graph, initialization.factory, resource);
+  proof.evidence.push(...resources.evidence.map(entry => ({ ...entry, range: { ...entry.range } })));
   const glue = graph.prototypeEffects(initialization.factory);
   proof.evidence.push(...glue.evidence);
   if (glue.blocker) return fail('DEPENDENCY_GLUE_EFFECT_UNPROVEN', 'A directly reached JavaScript glue prototype operation lacks a finite private constructor, receiver or method-effect proof. The resource contract does not cover this JavaScript write.', glue.blocker);

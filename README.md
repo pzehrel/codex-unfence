@@ -21,7 +21,7 @@ codex-browser-patch --help
 
 `npm ci` 需要获取锁定的开发依赖；tarball 已包含运行依赖，后续本地安装可离线完成。本流程不需要公共 npm 发布。安装 CLI 本身不应用补丁。
 
-包使用逐文件白名单：十个 `dist/*.js` 运行文件，以及 npm 自动包含的 `package.json`、本 README 和 Acorn/eslint-scope 的依赖闭包（`acorn`、`eslint-scope`、`esrecurse`、`estraverse`）。测试、源码、研究报告、真实应用 bundle、提取工件、本机方案、备份和操作存储不进入包。构建目录中额外遗留的本机状态也不在白名单内。
+包使用 `package.json` 中的逐文件白名单，包含明确列出的 `dist/*.js` 运行文件，以及 npm 自动包含的 `package.json`、本 README 和 Acorn/eslint-scope 的依赖闭包（`acorn`、`eslint-scope`、`esrecurse`、`estraverse`）。测试、源码、研究报告、真实应用 bundle、提取工件、本机方案、备份和操作存储不进入包。构建目录中额外遗留的本机状态也不在白名单内。
 
 ## 工作流程
 
@@ -171,7 +171,11 @@ status 对发现的待恢复冲突返回 4；否则所选目标不兼容返回 3
 
 **缓存与运行边界：** 每次调用先启动新请求，再查询旧缓存或旧 inflight promise；命中时为丢弃的新请求处理拒绝。新结果按完成时钟记录，24 小时到期，仅清理同一 inflight promise。修改磁盘副本不会立即清除已缓存的禁止结果，也不证明运行中模块已经重载。真实宿主加载、完整性接受、缓存清除和网站操作继续为 `not-verified`。
 
-**指定真实样本仍阻塞：** 两份 `26.1013.31256` 实际工件都存在 `globalThis` 经本地 handle 存储暴露给不透明 Wasm/可选回调的未解决影响路径，detect 保留 `DEFERRED_HOST_MUTATION`。没有为该桥接扩展信任或添加白名单；合成完整证明不能替代真实工件静态验收。真实源码仅作文本读取与解析，从不执行或 import。
+**指定真实样本仍阻塞：** 两份 `26.1013.31256` 实际工件中的 `globalThis` 可经本地句柄桥交给 ZXing 资源。用户已批准 [ADR 0003](docs/adr/0003-specific-zxing-dependency-contract.md) 的特定资源生命周期非干扰契约，以及 [ADR 0004](docs/adr/0004-specific-ambient-property-premise.md) 的特定初始化环境属性前提；二者都是明确接受的外部语义假设，不是对实际资源行为或 live 属性描述符的验证。
+
+纯源码边界可接收显式依赖证据 `analyzeSource(source, dependencyEvidence)` / `transformSource(source, dependencyEvidence)`。当前检查点核对封闭契约、实际字节身份、二进制接口和有限加载/回调来源；`registeredContract` 仅表示资源身份及接口匹配。JavaScript glue 的句柄、描述符、调度、消费及生命周期证明尚未闭合，`acceptedContract` 仍为空，提供依赖证据时也保持 incompatible、无目标和无变换。CLI 依赖解析及依赖方案支持尚未交付。相关源码效果继续检查，不能凭资源摘要、函数区间或生成代码标记获得豁免。
+
+合成完整证明不能替代两份真实工件的最终 detect/prepare 静态验收。真实源码和资源仅作数据读取与解析，不执行、import、编译或实例化，不修改安装；运行时继续 `not-verified`。
 
 ## 开发与验证
 
