@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { isUint8Array } from 'node:util/types';
 import { dependencyContracts } from './dependency-contracts.js';
 import { proveDependencySource } from './dependency-source.js';
-import { parseSourceContext } from './source-context.js';
+import { isParsedSource, parseSourceContext } from './source-context.js';
 import type { ParsedSource } from './source-context.js';
 import type { AnalysisDiagnostic, StructuralEvidence } from './analysis.js';
 
@@ -144,6 +144,10 @@ export function inspectDependency(source: string, input: DependencyEvidenceInput
 
 /** Private shared-context path; callers of analyzeSource cannot supply AST facts. */
 export function inspectDependencyInContext(parsed: ParsedSource, input: DependencyEvidenceInput): DependencyProof {
+  if (!isParsedSource(parsed)) return {
+    status: 'rejected', resource: null, registeredContract: null, acceptedContract: null, association: null,
+    evidence: [], diagnostics: [{ code: 'DEPENDENCY_SOURCE_CONTEXT', severity: 'error', message: 'Dependency source context must be the original analysis-local parsed source record.' }], runtime: 'not-verified',
+  };
   return inspectDependencySource(parsed.source, input, () => parsed);
 }
 

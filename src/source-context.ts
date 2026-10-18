@@ -40,10 +40,24 @@ class SourceContext {
 export type { SourceContext };
 export type ParsedSource = Readonly<{ source: string; context: SourceContext; parseError: null } | { source: string; context: null; parseError: string }>;
 
+const parsedSources = new WeakSet<object>();
+function retainParsedSource(parsed: ParsedSource): ParsedSource {
+  Object.freeze(parsed);
+  parsedSources.add(parsed);
+  return parsed;
+}
+
+/** Internal provenance check, including parse failures; copied fields grant no identity. */
+export function isParsedSource(value: unknown): value is ParsedSource {
+  if (!value || typeof value !== 'object' || !parsedSources.has(value)) return false;
+  const parsed = value as ParsedSource;
+  return parsed.context === null || parsed.source === parsed.context.source;
+}
+
 /** Parse and bind once per invocation; retain parse failure for each diagnostic path. */
 export function parseSourceContext(source: string): ParsedSource {
   let program: E.Program;
   try { program = parse(source, { ecmaVersion: 2022, sourceType: 'module', ranges: true }) as unknown as E.Program; }
-  catch (error) { return Object.freeze({ source, context: null, parseError: error instanceof Error ? error.message : 'Invalid JavaScript.' }); }
-  return Object.freeze({ source, context: new SourceContext(source, program), parseError: null });
+  catch (error) { return retainParsedSource({ source, context: null, parseError: error instanceof Error ? error.message : 'Invalid JavaScript.' }); }
+  return retainParsedSource({ source, context: new SourceContext(source, program), parseError: null });
 }
