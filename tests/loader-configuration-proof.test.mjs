@@ -72,6 +72,15 @@ async function fixtureBuild(t) {
 }
 const records = (result, role) => result.dependencyProof.evidence.filter(entry => entry.description.startsWith(`Loader ${role}:`));
 
+test('catch binding destructuring retains its own failure instead of certifying undefined conversion', async t => {
+  const api = await fixtureBuild(t);
+  const changed = source.replace('catch { return undefined; }', 'catch ({message}) { return undefined; }');
+  const result = api.transformSource(changed, evidenceFor(changed));
+  assert.equal(records(result.analysis, 'caller errors').length, 0);
+  assert.equal(result.analysis.dependencyProof.acceptedContract, null);
+  assert.equal(result.transformation, null);
+});
+
 test('unrelated spread and throwing catch cannot certify option-copy or undefined failure records', async t => {
   const api = await fixtureBuild(t);
   const decoy = source.replace('let copied = {...options};', 'let copied = options; let noise = {...foreign};');
