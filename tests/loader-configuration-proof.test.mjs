@@ -61,7 +61,7 @@ async function fixtureBuild(t) {
   const directory = await mkdtemp(join(tmpdir(), 'loader-configuration-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await mkdir(join(directory, 'dist'));
-  for (const file of ['analysis.js', 'deferred-analysis.js', 'dependency-analysis.js', 'dependency-source.js', 'resource-provenance.js', 'loader-configuration-proof.js']) {
+  for (const file of ['analysis.js', 'deferred-analysis.js', 'dependency-analysis.js', 'dependency-source.js', 'descriptor-provenance.js', 'resource-provenance.js', 'handle-provenance.js', 'loader-configuration-proof.js']) {
     try { await copyFile(new URL(`../dist/${file}`, import.meta.url), join(directory, 'dist', file)); }
     catch (error) { if (error.code !== 'ENOENT' || file !== 'loader-configuration-proof.js') throw error; }
   }
