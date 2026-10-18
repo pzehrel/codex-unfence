@@ -1,5 +1,7 @@
 import type { ParsedSource, SourceContext } from './source-context.js';
 import { resourceProvenance } from './resource-provenance.js';
+import { loaderConfigurationProof } from './loader-configuration-proof.js';
+import { handleProvenance } from './handle-provenance.js';
 import { descriptorProvenance } from './descriptor-provenance.js';
 import type { Variable } from 'eslint-scope';
 import type * as E from 'estree';
@@ -47,8 +49,12 @@ export function proveDependencySource(parsed: ParsedSource, resource: Parameters
   proof.evidence.push({ kind: 'cache', range: position(cache), description: 'Finite WeakMap cache syntax replaces selected overrides rather than merging, reuses a module only through its equality parameter, and invokes initialization with a new spread object. WeakMap references close over these operations. Equality/default provenance, other binding references and inherited options remain unproven.' });
   const resources = resourceProvenance(graph, initialization.factory, resource);
   proof.evidence.push(...resources.evidence.map(entry => ({ ...entry, range: { ...entry.range } })));
+  const handles = handleProvenance(graph, initialization.factory, resources);
+  proof.evidence.push(...handles.evidence.map(entry => ({ ...entry, range: { ...entry.range } })));
   const descriptors = descriptorProvenance(graph, initialization.factory, resources, resource);
   proof.evidence.push(...descriptors.evidence.map(entry => ({ ...entry, range: { ...entry.range } })));
+  const loaderConfiguration = loaderConfigurationProof(graph, initialization.factory, resources, { loader, initialization: initialization.node, wrapper: initialization.wrapper, cache });
+  proof.evidence.push(...loaderConfiguration.evidence.map(entry => ({ ...entry, range: { ...entry.range } })));
   const glue = graph.prototypeEffects(initialization.factory);
   proof.evidence.push(...glue.evidence);
   if (glue.blocker) return fail('DEPENDENCY_GLUE_EFFECT_UNPROVEN', 'A directly reached JavaScript glue prototype operation lacks a finite private constructor, receiver or method-effect proof. The resource contract does not cover this JavaScript write.', glue.blocker);

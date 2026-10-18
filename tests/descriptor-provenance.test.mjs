@@ -162,7 +162,7 @@ async function fixtureBuild(t, fixtureResource=resource, fixtureImports='a.sa:ii
   const directory = await mkdtemp(join(tmpdir(), 'descriptor-provenance-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await mkdir(join(directory, 'dist'));
-  for (const file of ['analysis.js', 'deferred-analysis.js', 'dependency-analysis.js', 'dependency-source.js', 'resource-provenance.js', 'descriptor-provenance.js']) {
+  for (const file of ['analysis.js', 'deferred-analysis.js', 'dependency-analysis.js', 'dependency-source.js', 'descriptor-provenance.js', 'resource-provenance.js', 'handle-provenance.js', 'loader-configuration-proof.js', 'source-context.js']) {
     try { await copyFile(new URL(`../dist/${file}`, import.meta.url), join(directory, 'dist', file)); }
     catch (error) { if (error.code !== 'ENOENT' || !['resource-provenance.js','descriptor-provenance.js'].includes(file)) throw error; }
   }
