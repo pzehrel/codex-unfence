@@ -175,6 +175,15 @@ test('does not execute a getter receiver while installing its descriptor', () =>
   assert.equal(analyzeSource(ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic';" + addition)).diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
 });
 
+test('refuses default-prototype membership, loop outer writes and static class methods', () => {
+  for (const addition of [
+    "var local = {}; if ('toString' in local) unknown();",
+    'var last = false; for (let name of ownNames({x: 1})) {last = true;} if (last) unknown();',
+    "var obj = {x: 1}, local = {}; Object.defineProperty(local, 'x', {get: () => obj.x}); if (Object.getOwnPropertyDescriptor(local, 'x').configurable === false) unknown();",
+  ]) assert.equal(analyzeSource(ambientSource.replace("out.SDK_VERSION = 'synthetic';", "out.SDK_VERSION = 'synthetic';" + addition)).diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+  assert.equal(analyzeSource(ambientSource.replace('out.Log = class { warn() {} };', 'out.Log = class { static hasValue() {return true;} warn() {} }; if (out.Log.hasValue) unknown();')).diagnostics[0].code, 'DEFERRED_INITIALIZER_EFFECT');
+});
+
 // Execute only this independently authored fixture. The exposed callable boundary
 // and host clock/fetch adapters do not expose analyzer internals or AST state.
 function fixtureRuntime(text = source) {

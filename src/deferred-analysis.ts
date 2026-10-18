@@ -1253,7 +1253,7 @@ class DeferredProof {
 type Scalar = string | number | boolean | null | undefined;
 type Value = Scalar | Data | Closure | Native | Ambient | Root | Factory;
 interface Factory {kind: 'factory'; builder: Closure; cache?: Data; active?: boolean}
-interface Data { kind: 'data'; fields: Map<string, Value>; getters: Map<string, Closure>; enumerable: Set<string>; fixed: Set<string>; prototype?: Data; class?: boolean }
+interface Data { kind: 'data'; fields: Map<string, Value>; getters: Map<string, Closure>; enumerable: Set<string>; fixed: Set<string>; prototype?: Data; nullPrototype?: boolean; class?: boolean }
 interface Closure { kind: 'closure'; node: Fn; env: Map<Variable, Value> }
 interface Native { kind: 'native'; name: string }
 interface Ambient { kind: 'ambient' }
@@ -1404,7 +1404,10 @@ class AmbientInitializer {
       }
       case 'BinaryExpression': {
         const left = this.evaluate(node.left, env), right = this.evaluate(node.right, env);
-        if (node.operator === 'in') { if (!is(right, 'data') || right.prototype) return this.fail(node, 'Inherited membership is outside the finite ambient grammar.'); return right.fields.has(String(this.scalar(left, node))) || right.getters.has(String(left)); }
+        if (node.operator === 'in') {
+          if (!is(right, 'data') || !right.nullPrototype) return this.fail(node, 'Membership including unknown or default prototypes is outside the finite ambient grammar.');
+          const key = this.scalar(left, node); return right.fields.has(String(key)) || right.getters.has(String(key));
+        }
         if (['===', '!==', '==', '!='].includes(node.operator)) {
           if ((is(left, 'ambient') || is(right, 'ambient')) && !(left == null || right == null)) return this.fail(node);
           const loose = node.operator === '==' || node.operator === '!=';
@@ -1431,7 +1434,7 @@ class AmbientInitializer {
         if (node.superClass) { const base = this.evaluate(node.superClass, env); if (!is(base, 'data') || !base.class) return this.fail(node.superClass, 'Class inheritance requires a proven private class receiver.'); }
         const local = new Map(env); if (node.id) local.set(this.variable(node.id), result);
         for (const item of node.body.body) {
-          if (item.type === 'StaticBlock' || item.computed) return this.fail(item);
+          if (item.type === 'StaticBlock' || item.computed || item.type === 'MethodDefinition' && item.static) return this.fail(item, 'Static methods, blocks and computed class keys are outside the finite ambient class grammar.');
           if (item.static && item.type === 'PropertyDefinition' && item.value) {
             const name = item.key.type === 'Identifier' ? item.key.name : this.fail(item);
             result.fields.set(name, this.evaluate(item.value, local));
@@ -1525,9 +1528,12 @@ class AmbientInitializer {
       const right = this.evaluate(node.right, env); if (!is(right, 'data')) return this.fail(node);
       const values = node.type === 'ForInStatement' ? [...right.enumerable] : [...right.fields.values()];
       if (node.left.type !== 'VariableDeclaration' || node.left.kind !== 'let' || node.left.declarations.length !== 1 || node.left.declarations[0]?.id.type !== 'Identifier') return this.fail(node, 'Finite iteration requires a fresh per-iteration let binding; var shared scope is unsupported.');
+      const iterationBinding = this.variable(node.left.declarations[0].id);
       for (const value of values) {
-        const local = new Map(env); local.set(this.variable(node.left.declarations[0].id), value);
-        const result = this.statement(node.body, local); if (result) return result;
+        const local = new Map(env); local.set(iterationBinding, value);
+        const result = this.statement(node.body, local);
+        for (const binding of env.keys()) if (binding !== iterationBinding && local.has(binding)) env.set(binding, local.get(binding));
+        if (result) return result;
       }
       return;
     }
@@ -1547,7 +1553,7 @@ class AmbientInitializer {
     void env;
   }
   private native(name: string, args: Value[], site: E.Node): Value {
-    if (name === 'Object.create') { if (args.length !== 1 || args[0] !== null && !is(args[0], 'data')) return this.fail(site); return {...data(), ...(is(args[0], 'data') ? {prototype: args[0]} : {})}; }
+    if (name === 'Object.create') { if (args.length !== 1 || args[0] !== null && !is(args[0], 'data')) return this.fail(site); return {...data(), ...(is(args[0], 'data') ? {prototype: args[0]} : {nullPrototype: true})}; }
     if (name === 'Object.getPrototypeOf') { if (args.length !== 1 || !is(args[0], 'data')) return this.fail(site); return args[0].prototype ?? null; }
     if (name === 'Object.prototype.hasOwnProperty.call') { if (args.length !== 2 || !is(args[0], 'data') || typeof args[1] !== 'string') return this.fail(site); return args[0].fields.has(args[1]) || args[0].getters.has(args[1]); }
     if (name === 'Object.getOwnPropertyNames' || name === 'Object.keys') {
@@ -1558,8 +1564,8 @@ class AmbientInitializer {
     if (name === 'Object.getOwnPropertyDescriptor') {
       if (args.length !== 2 || !is(args[0], 'data') || typeof args[1] !== 'string') return this.fail(site);
       const [target, key] = args; if (!target.fields.has(key) && !target.getters.has(key)) return undefined;
-      const result = data(); result.fields.set('enumerable', target.enumerable.has(key));
-      if (target.getters.has(key)) result.fields.set('get', target.getters.get(key)); else { result.fields.set('value', target.fields.get(key)); result.fields.set('writable', !target.fixed.has(key)); result.fields.set('configurable', !target.fixed.has(key)); }
+      const result = data(); result.fields.set('enumerable', target.enumerable.has(key)); result.fields.set('configurable', !target.fixed.has(key));
+      if (target.getters.has(key)) { result.fields.set('get', target.getters.get(key)); result.fields.set('set', undefined); } else { result.fields.set('value', target.fields.get(key)); result.fields.set('writable', !target.fixed.has(key)); result.fields.set('configurable', !target.fixed.has(key)); }
       return result;
     }
     if (name === 'Object.defineProperty') {
