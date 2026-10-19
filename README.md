@@ -8,7 +8,9 @@
 
 当前另有一个仓库内的本地准备切片，见 [CUA 请求包装规格](docs/design/cua-request-wrapper-slice.md)：在已确认版本的专用请求通道中注入 `ok/json` 响应适配器，保留原 fetch 和判定器，仅在 JSON 数据副本中将严格为 true 的 agent 改为 false。它采用文件身份限制、定向审查及合成行为测试，不表示完成上述正式 CLI 的结构证明，也不接入其 apply/restore 方案。
 
-该切片只生成私有原始／补丁副本和核对清单，不修改安装或运行应用。真实加载、生效、撤销、旧缓存及宿主完整性接受仍未验证；未知版本拒绝，不自动跟随更新。具体命令及验证结果见 [本轮交付报告](reports/cua-request-wrapper-implementation.zh-CN.md)。该脚本仅供仓库内运行，不包含在 npm 包中。
+准备脚本只生成私有原始／补丁副本和核对清单，不修改安装或运行应用。真实加载、生效、撤销、旧缓存及宿主完整性接受仍未验证；未知版本拒绝，不自动跟随更新。具体命令及验证结果见 [副本交付报告](reports/cua-request-wrapper-implementation.zh-CN.md)。该脚本仅供仓库内运行，不包含在 npm 包中。
+
+后续的仓库内应用／恢复工具见 [应用切片](docs/design/cua-wrapper-application-slice.md)及[工具交付报告](reports/cua-wrapper-application-implementation.zh-CN.md)。它采用独立的限定版本准入，并复用文件事务保护；不把 CUA 副本作为旧结构方案传入正式 CLI。真实安装写入和宿主／站点验收须另行确定范围，步骤见 [真实验收准备](docs/design/cua-wrapper-runtime-acceptance.md)。
 
 ## 本地安装
 

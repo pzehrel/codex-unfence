@@ -26,6 +26,7 @@
     "dist/plan.js",
     "dist/processes.js",
     "dist/result.js",
+    "dist/transaction-engine.js",
     "dist/transaction-locks.js",
     "dist/transaction-storage.js",
     "dist/transactions.js"
