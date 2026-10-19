@@ -28,7 +28,7 @@
 
 ## 准备好的命令形态
 
-以下仅说明接口，`/absolute/...` 均需替换为审阅后的规范绝对路径。真实应用前先完成上述范围确认，并在仓库执行构建。工具不提供自动重启命令。当前 apply、status、restore 均须保留并提供原准备目录；recover 使用存储内保存并重新验证的方案，不需要原准备目录。操作存储和准备目录均应保留，不能手工清理锁来绕过未完成状态。
+以下仅说明接口，`/absolute/...` 均需替换为审阅后的规范绝对路径。真实应用前先完成上述范围确认，并在仓库执行构建。工具不提供自动重启命令。当前 apply、status、restore 均须保留并提供原准备目录；recover 使用存储内保存并重新验证的方案，不需要原准备目录。操作存储和准备目录必须互不包含，且均应保留；不能手工清理锁来绕过未完成状态。
 
 ```bash
 npm run build
@@ -46,6 +46,8 @@ node scripts/cua-wrapper-operations.mjs apply --preparation /absolute/private-pr
 node scripts/cua-wrapper-operations.mjs restore --preparation /absolute/private-preparation --target /absolute/browser-service.mjs --store /absolute/private-operation-store
 ```
 
+CUA status 以 `state: original` 表示当前字节是原始内容；存在可信、实际完成的恢复历史时，另给出 `action: restored`。首次未应用或只执行空操作 restore 不应显示该恢复标记。`state: tool-applied` 表示本工具可信应用状态；外部内容／身份变化返回冲突。
+
 中断恢复回到该未完成操作之前的内容；这与普通 restore 返回原始内容的目的不同。只有状态报告存在未完成事务时，按提示对同一存储执行：
 
 ```bash
@@ -56,4 +58,4 @@ node scripts/cua-wrapper-operations.mjs recover --store /absolute/private-operat
 
 分别记录：安装应用、活跃模块加载、目标响应改写、选定站点访问、其他权限行为、恢复原文、恢复后加载。每项使用 `verified`、`failed`、`not-verified`，并附时间和最小证据。部分通过不能汇总为全部完成。
 
-当前这些真实运行项目均为 `not-verified`。本轮只完成工具和合成验证时，保持该结论。
+当前这些真实运行项目均为 `not-verified`。本轮只完成工具和合成验证时，保持该结论。2026-10-19 的新工具只读 status 已确认安装为 original、没有创建操作存储；这项预检不表示已应用或加载补丁。
