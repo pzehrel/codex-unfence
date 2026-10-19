@@ -473,7 +473,14 @@ async function status(options: Options): Promise<OperationResult> {
       const trusted = history.filter((entry) => entry.journal.targets.some((target) => target.path === path)).at(-1);
       const item = plan?.targets.find((target) => target.target.identity.path === path) ?? trusted?.plan.targets.find((target) => target.target.identity.path === path);
       if (item) {
-        try { targets.push({ path, state: (await classify(item, history)).state }); }
+        try {
+          const state = (await classify(item, history)).state;
+          // CUA status retains the last actual committed content change across
+          // no-op records. A restore of an already-original file proves no restore.
+          const changed = adapter.scheme === 'structural' ? undefined : history.filter((entry) => entry.journal.phase === 'committed' && entry.journal.targets.some((target) => target.path === path && (target.before.sha256 !== target.afterHash || target.before.size !== target.afterSize))).at(-1);
+          const restored = state === 'original' && changed?.journal.operation === 'restore';
+          targets.push({ path, state, ...(restored ? { action: 'restored' as const } : {}) });
+        }
         catch (error) {
           if (!(error instanceof TransactionError)) throw error;
           targets.push({ path, state: 'conflict' });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { access, chmod, link, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -210,4 +210,51 @@ test('CUA durable backup precedes target rename, cross-store concurrency blocks,
     assert.deepEqual(await readFile(box.target), command === 'apply' ? patched : original);
     response(run(box, 'recover'));
   }
+});
+
+test('CUA preparation and operation store cannot contain each other or share a directory', async t => {
+  for (const selection of ['store-child', 'preparation-child', 'same-directory']) {
+    const box = await sandbox(t);
+    if (selection === 'store-child') box.store = join(box.preparation, 'operations');
+    if (selection === 'preparation-child') {
+      await mkdir(box.store, { mode: 0o700 });
+      const nested = join(box.store, 'prepared');
+      await rename(box.preparation, nested);
+      box.preparation = nested;
+    }
+    if (selection === 'same-directory') box.store = box.preparation;
+    const parent = selection === 'preparation-child' ? box.store : box.preparation;
+    const before = await readdir(parent);
+    for (const command of ['apply', 'restore']) {
+      const refused = response(run(box, command), 4);
+      assert.equal(refused.diagnostics[0].code, 'PATH_ALIAS');
+      assert.deepEqual(await readFile(box.target), original);
+      assert.deepEqual(await readdir(parent), before);
+    }
+    if (selection === 'store-child') await assert.rejects(access(box.store), { code: 'ENOENT' });
+  }
+});
+
+test('CUA status distinguishes a trusted completed restore from initial and no-op original states', async t => {
+  const box = await sandbox(t);
+  const initial = response(run(box, 'status'));
+  assert.equal(initial.data.targets[0].state, 'original');
+  assert.equal(initial.data.targets[0].action, undefined);
+  response(run(box, 'restore'));
+  assert.equal(response(run(box, 'status')).data.targets[0].action, undefined);
+  response(run(box, 'apply'));
+  response(run(box, 'restore'));
+  const restored = response(run(box, 'status'));
+  assert.equal(restored.data.targets[0].state, 'original');
+  assert.equal(restored.data.targets[0].action, 'restored');
+  // A later no-op does not invent a restore, or erase the verified actual restore.
+  response(run(box, 'restore'));
+  assert.equal(response(run(box, 'status')).data.targets[0].action, 'restored');
+  const human = runCli(['status', '--preparation', box.preparation, '--target', box.target, '--store', box.store], { binary, fixture, directory: box.directory, env: box.env });
+  assert.equal(human.status, 0, human.stdout + human.stderr);
+  assert.match(human.stdout, /original \(restored\)/);
+  response(run(box, 'apply'));
+  assert.equal(response(run(box, 'status')).data.targets[0].action, undefined);
+  await writeFile(box.target, original);
+  assert.equal(response(run(box, 'status'), 4).data.targets[0].action, undefined);
 });

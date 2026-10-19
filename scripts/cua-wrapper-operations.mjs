@@ -90,6 +90,7 @@ function executorFor(target, store) {
       absolute(directory);
       absolute(target);
       absolute(store);
+      check(store !== directory && !store.startsWith(directory + sep) && !directory.startsWith(store + sep), 'PATH_ALIAS', 'Preparation and operation store must be separate directories without containment.');
       check(target !== directory && !target.startsWith(directory + sep) && target !== store && !target.startsWith(store + sep), 'PATH_ALIAS', 'Target cannot be a preparation or operation-store artifact.');
       const preparation = await preparationAt(directory);
       check(await realpath(target) === target, 'PATH_ALIAS', 'Target must be canonical.');
