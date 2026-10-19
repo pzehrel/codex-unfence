@@ -134,8 +134,8 @@ test('CUA writes reject process failure, actual standalone node_repl and host bl
   const box = await sandbox(t);
   const failure = response(run(box, 'apply', { CODEX_TEST_PROCESS_FAILURE: '1' }), 1);
   assert.equal(failure.diagnostics[0].code, 'PROCESS_ENUMERATION_FAILED');
-  for (const executable of ['/Applications/ChatGPT.app/Contents/MacOS/ChatGPT', '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl', '/tmp/helpers/node_repl', '/usr/local/bin/browser-service']) {
-    const rejected = response(run(box, 'apply', { CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ pid: 12345, executable, command: executable }]) }), 4);
+  for (const executable of ['/Applications/ChatGPT.app/Contents/MacOS/ChatGPT', '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl', '/tmp/helpers/node_repl', '/usr/local/bin/browser-service', '/usr/local/bin/node']) {
+    const rejected = response(run(box, 'apply', { CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ pid: 12345, executable, command: executable.endsWith('/node') ? `${executable} /tmp/browser-service.mjs` : executable }]) }), 4);
     assert.equal(rejected.diagnostics[0].code, 'PROCESSES_RUNNING');
   }
   // Merely mentioning helper names in unrelated shell text does not identify a helper.

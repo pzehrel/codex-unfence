@@ -14,7 +14,7 @@ childProcess.execFile = function (file, args, ...rest) {
   const callback = rest.at(-1);
   const started = 'Fri Oct 16 10:00:00 2026';
   const rows = process.env.CODEX_TEST_PROCESS_ROWS ? JSON.parse(process.env.CODEX_TEST_PROCESS_ROWS) : [];
-  const all = [{ pid: process.pid, start: started, executable: process.execPath, command: `${process.execPath} synthetic-cli` }, ...rows];
+  const all = [{ pid: process.pid, start: started, executable: process.execPath, command: process.argv.map(argument => /\s/.test(argument) ? JSON.stringify(argument) : argument).join(' ') }, ...rows];
   const output = args.includes('pid=,lstart=,comm=')
     ? all.map((row) => `${row.pid} ${row.start ?? started} ${row.executable}\n`).join('') + `999991 ${started} /bin/ps\n`
     : all.map((row) => `${row.pid} ${row.command}\n`).join('') + '999992 /bin/ps -axww -o pid=,command=\n';

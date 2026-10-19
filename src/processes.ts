@@ -47,6 +47,8 @@ export async function processTable(): Promise<ProcessIdentity[]> {
 /** Match actual app executables, not arbitrary mentions of Codex in shell/test commands. */
 export function blockingProcesses(table: ProcessIdentity[]): ProcessIdentity[] {
   return table.filter((entry) => {
+    // This transaction process names the target in CLI arguments but never loads it.
+    if (entry.pid === process.pid) return false;
     const executable = entry.executable;
     if (/\/(?:Codex|ChatGPT)\.app\/Contents\/MacOS\/(?:Codex|ChatGPT)$/.test(executable)) return true;
     if (basename(executable) === 'browser-service' || basename(executable) === 'browser-service.mjs') return true;
