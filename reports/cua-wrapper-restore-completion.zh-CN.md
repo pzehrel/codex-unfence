@@ -25,6 +25,16 @@ CUA 替换使用从包外暂存到目标的原子 rename，并同步源、目标
 
 ## 证据边界
 
-本轮验证目录布局与事务行为，不能替代真实 macOS 签名校验。前一真实验收的原文及签名恢复已通过，见 [真实验收记录](cua-wrapper-runtime-acceptance.zh-CN.md)；该现场曾需要一次性离线清理，不能算作本轮新协调协议的真实运行证据。新协议尚未在真实安装再次演练。
+实现阶段的合成验证不能替代真实 macOS 签名校验。前一真实验收的原文及签名恢复已通过，见 [真实验收记录](cua-wrapper-runtime-acceptance.zh-CN.md)；该现场曾需要一次性离线清理。以下独立记录新协议在真实安装的往返验证，不将其混同于宿主或站点功能复测。
+
+## 新协议真实往返验证
+
+2026-10-20，用户明确要求“我退出了，你做一次验证把”，授权在当前安装执行一次应用和恢复。使用提交 `1ee78d0`，重新构建工具后，06:06:45Z 预检无阻断进程；安装仍为固定原始摘要、1,938,669 bytes，严格签名校验 exit 0，status 为 original／restored、无未完成事务。home 与目标父目录设备号均为 16777233。
+
+apply 成功，事务 `2c981d39-be6e-47a5-8789-12dfcd52cd45` 已提交。06:07:11Z 独立核对补丁为 1,939,582 bytes、SHA-256 `705bfdb0d8e1793a5c3760a97d9c3eaf2bf6959cc5cbbfe31914bb24cbcf1940`，备份与准备原文逐字节一致。包外协调目录为 0700，租约已释放。目标 scripts 目录仍仅有原先四个文件：browser-accessibility.wasm.br、browser-client.mjs、browser-service.mjs、zxing_reader.wasm。
+
+随即 restore 成功，事务 `80a17b8b-2899-419f-a33f-366b3da3828b` 已提交。06:07:38Z 核对安装恢复为 1,938,669 bytes、SHA-256 `44594ea0a8238c09dfb46e28acdd610e5053a05011047e1c78fb98f210195a4e`，与准备原文逐字节一致；status 为 original／restored、groupState=complete、pendingTransactions 为空。两份 journal 均为 committed，包外租约末项为 released=true，完整后继历史保留。应用内目录布局与预检一致，严格签名校验 exit 0。
+
+本次无需手工归档或删除任何应用内文件，没有重新签名、关闭验证、启动宿主或访问站点。真实文件事务与自动收尾验证通过；最终保持原版状态。用户此前已确认补丁功能，本次未重复验证宿主加载或字段改写。
 
 规格见 [恢复收尾切片](../docs/design/cua-wrapper-restore-completion.md)。
