@@ -160,7 +160,7 @@ async function main(): Promise<CommandResult | null> {
   } catch (error) {
     return {
       schemaVersion: 1,
-      command: args[0] === 'detect' || args[0] === 'prepare' || args[0] === 'apply' || args[0] === 'restore' || args[0] === 'status' || args[0] === 'recover' ? args[0] : null,
+      command: args[0] === 'check' || args[0] === 'detect' || args[0] === 'prepare' || args[0] === 'apply' || args[0] === 'restore' || args[0] === 'status' || args[0] === 'recover' ? args[0] : null,
       outcome: 'usage-error',
       exitCode: EXIT_CODES.usageError,
       data: null,

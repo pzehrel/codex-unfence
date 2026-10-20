@@ -39,6 +39,10 @@ test('offline npm exec runs the packed public bin from an unrelated cwd with iso
   assert.equal(observed.home, join(box.directory, 'home'));
   assert.equal(observed.stdinTTY, false);
   assert.equal(observed.stdoutTTY, false);
+  for (const args of [[], ['--json'], ['apply'], ['restore'], ['recover']]) {
+    const rejected = npmPackage.runNpmExec(args, box);
+    assert.equal(rejected.status, 2, rejected.stdout + rejected.stderr);
+  }
 });
 
 test('packed npm exec check uses genuine structural admission and remains read-only', async (t) => {
@@ -146,6 +150,7 @@ test('npm exec refuses a target changed after inspection instead of applying to 
   ] });
   assert.equal(child.status, 4, child.stdout + child.stderr);
   assert.match(child.stdout, /INSPECTION_CHANGED/);
+  assert.doesNotMatch(child.stdout, /Reopen the host manually/);
   assert.deepEqual(await readFile(target), changed);
 });
 
@@ -226,6 +231,7 @@ test('default npm exec guide displays the selected target and cancels without ch
   assert.ok(child.stdout.includes(target));
   assert.doesNotMatch(child.stdout, /Select installation number/);
   assert.match(child.stdout, /signature/);
+  assert.match(child.stdout, /Assumption:.*host contracts/);
   assert.match(child.stdout, /Cancelled/);
   assert.deepEqual(await readFile(target), source);
 });

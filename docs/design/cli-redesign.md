@@ -1,6 +1,52 @@
 # 浏览器补丁 CLI 重构设计
 
-状态：Q1–Q11 已逐轮确认，等待整份设计的最终共识确认。以下选择不表示允许修改已安装插件；实现及真实安装验证分别记录。
+状态：下面保留 2026-10-16 原结构 CLI 的设计背景。2026-10-20 的[规格 #18](https://github.com/pzehrel/codex-browser-liberation-patch/issues/18)新增托管 CUA 结构方案与临时 npm 交互入口；当前普通使用流程见[README](../../README.md)。新旧方案身份与来源验证分开，历史固定配方不因新入口放宽。
+
+## 当前开发与本地交付
+
+Node.js >=22.13.0；无需真实安装即可测试。构建并生成带 bundled 运行依赖的本地产物：
+
+```bash
+npm ci --ignore-scripts
+npm run build
+npm pack --ignore-scripts
+```
+
+以 `npm pack` 实际返回的文件名为准。当前版本 `0.2.0` 未公共发布；运行已构建本地包：
+
+```bash
+npm exec --offline --yes --package /absolute/path/codex-browser-liberation-patch-0.2.0.tgz -- codex-browser-patch --help
+```
+
+新入口按准确安装路径检查、选择和明确确认。准备副本、目标记录、工具版本及可信 store 由 managed 层管理，位于账户主目录的 `Library/Application Support/codex-browser-liberation-patch/`，独立于临时代码和 npm cache。check 完全只读；`support`、`state`、`writeReadiness`、`allowedActions` 与 `runtime` 各有含义。incomplete 时可以只允许 recover，不能用全局 blocked 状态推断 recover 永不可用。新写命令拒绝非 TTY、EOF 自动确认和 `--json` 自动化写入；旧显式语法保留原契约。
+
+### 高级旧入口
+
+以下命令继续使用原结构分析、review plan 和显式 store，不会自动转为 CUA 托管方案。所有文件选择用绝对路径，完整说明见 `--help`。
+
+```text
+codex-browser-patch detect [--plugin-root DIRECTORY] [--json]
+codex-browser-patch prepare [--plugin-root DIRECTORY] --target ABSOLUTE_ARTIFACT --output NEW_PLAN [--json]
+codex-browser-patch prepare [--plugin-root DIRECTORY] --all-compatible --output NEW_PLAN [--json]
+codex-browser-patch apply --plan ABSOLUTE_PLAN --store ABSOLUTE_STORE [--json]
+codex-browser-patch restore --plan ABSOLUTE_PLAN --store ABSOLUTE_STORE [--json]
+codex-browser-patch status --plan ABSOLUTE_PLAN --store ABSOLUTE_STORE [--json]
+codex-browser-patch status --target ABSOLUTE_ARTIFACT --store ABSOLUTE_STORE [--json]
+codex-browser-patch recover --store ABSOLUTE_STORE [--json]
+```
+
+`--target` 可重复。`--plan`／`--store` 包括等号形式均触发严格旧解析，缺项、空值、重复和与新参数混搭会拒绝，不回退自动管理。旧固定 CUA 仓库脚本仍使用其原准备与存储入口，见[准备切片](cua-request-wrapper-slice.md)和[应用恢复切片](cua-wrapper-application-slice.md)。未知旧记录不自动迁移或接管。
+
+### 验证边界
+
+```bash
+npm run check -- --base <implementation-base>
+npm run test:package
+```
+
+默认测试包含真实离线 npm exec 本地 tarball、独立 config/cache、外部最终 bin 系统夹具及合成 `.app`。macOS PTY 使用系统 expect，Linux 使用 util-linux script；Linux 通过夹具模拟 macOS 产品边界，核心场景不因无产品安装而 skip。测试不执行真实插件、不发业务请求。包文件逐项白名单并保留安装产物回归；preload、测试、源码、真实材料不进入包。测试通过不表示当前真实 bundle 已支持或运行生效。
+
+以下原设计保留其当时的范围和术语。
 
 ## 已确认的产品边界
 
