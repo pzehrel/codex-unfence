@@ -6,7 +6,19 @@
 
 面向桌面 `26.1013.40934 / build 20770` 中 `@oai/browser-desktop@0.1.1` 的 service，仅生成私有本地原始副本、补丁副本及核对清单。工具不提供安装写入、应用、恢复或启动宿主命令；本次不执行真实源码/Wasm，不改变现有正式 CLI 的结构准入、历史方案格式与事务门禁。它是仓库内限定版本的准备工具，不作为正式 CLI 已兼容的证据。
 
-目标为应用内 `Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs`，原始文件 1,938,669 bytes、SHA-256 `44594ea0a8238c09dfb46e28acdd610e5053a05011047e1c78fb98f210195a4e`。身份不同、文件已有补丁、定位不唯一或结构不符时拒绝，不跟随升级。配置高置信选择 CUA，但活跃加载仍未确认。具体定位与来源见 [注入点报告](../../reports/request-wrapper-injection-point.zh-CN.md)。
+目标为应用内 `Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs`，原始文件 1,938,669 bytes、SHA-256 `44594ea0a8238c09dfb46e28acdd610e5053a05011047e1c78fb98f210195a4e`。身份不同、文件已有补丁、定位不唯一或结构不符时拒绝，不跟随升级。配置高置信选择 CUA，但活跃加载路径仍未独立确认。固定源码的 AST 核对发现专用运输函数 `sR` 仅有一处声明和一处调用，唯一消费者为 `Xy.fetchBlocked`，只读取 `ok` 并等待 `json()`；这是有限源码引用核对，不是完整动态非干扰证明。原 await 替换区间为零基 UTF-16 半开区间 `[1084567,1084585)`。
+
+## 准备命令与工件
+
+在仓库根目录运行；`evidence/` 必须已存在，输出只能是其中尚不存在的直接子目录：
+
+```bash
+node scripts/cua-request-wrapper.mjs --source /absolute/browser-service.mjs --output-dir /absolute/repository/evidence/new-preparation
+```
+
+输出为 `source.original.mjs`、`source.patched.mjs`、`manifest.json` 和 `local-diff.txt`，目录权限 0700、文件 0600。已有路径、符号链接、`.app` 路径及身份不匹配的源文件均拒绝。真实原文、补丁及源码差异只保存在 Git/npm 排除的私有目录。
+
+固定原文变换后为 1,939,582 bytes，SHA-256 `705bfdb0d8e1793a5c3760a97d9c3eaf2bf6959cc5cbbfe31914bb24cbcf1940`；补丁区间为 UTF-16 `[1084567,1085498)`。原文与补丁均通过语法解析，区间外字符及 UTF-8 字节一致；准备操作不改变安装文件。
 
 ## 行为
 
@@ -20,4 +32,4 @@
 
 最终本地工件必须位于 Git/npm 排除的目录，目录 0700、文件0600，不覆盖已有输出或源文件。核对输出语法、唯一替换范围、区间外原文及 UTF-8 字节保持、前后哈希与安装文件未变化。报告只公开身份和非源码证据，不提交真实原文、差异上下文或补丁副本。
 
-切片完成表示本地副本与关键合成行为通过审查和检查。真实加载、生效、缓存影响、宿主完整性接受、应用／撤销仍为 `not-verified`，需要后续明确范围，不以本次副本成功代替。
+切片完成表示本地副本与关键合成行为通过审查和检查，不以本次副本成功代替真实运行验收。后续应用、恢复、签名及运行证据的当前边界见 [真实验收](cua-wrapper-runtime-acceptance.md)。

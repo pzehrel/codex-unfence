@@ -8,11 +8,11 @@
 
 当前另有一个仓库内的本地准备切片，见 [CUA 请求包装规格](docs/design/cua-request-wrapper-slice.md)：在已确认版本的专用请求通道中注入 `ok/json` 响应适配器，保留原 fetch 和判定器，仅在 JSON 数据副本中将严格为 true 的 agent 改为 false。它采用文件身份限制、定向审查及合成行为测试，不表示完成上述正式 CLI 的结构证明，也不接入其 apply/restore 方案。
 
-准备脚本只生成私有原始／补丁副本和核对清单，不修改安装或运行应用。真实加载、生效、撤销、旧缓存及宿主完整性接受仍未验证；未知版本拒绝，不自动跟随更新。具体命令及验证结果见 [副本交付报告](reports/cua-request-wrapper-implementation.zh-CN.md)。该脚本仅供仓库内运行，不包含在 npm 包中。
+准备脚本只生成私有原始／补丁副本和核对清单，不修改安装或运行应用。未知版本拒绝，不自动跟随更新。命令及固定文件身份见 [CUA 请求包装规格](docs/design/cua-request-wrapper-slice.md)。该脚本仅供仓库内运行，不包含在 npm 包中。
 
-后续的仓库内应用／恢复工具见 [应用切片](docs/design/cua-wrapper-application-slice.md)及[工具交付报告](reports/cua-wrapper-application-implementation.zh-CN.md)。它采用独立的限定版本准入，并复用文件事务保护；不把 CUA 副本作为旧结构方案传入正式 CLI。2026-10-20 已在获准范围完成真实应用、用户试用、原文及签名恢复，具体证据与未验证项见 [真实验收记录](reports/cua-wrapper-runtime-acceptance.zh-CN.md)。
+仓库内应用／恢复工具见 [应用切片](docs/design/cua-wrapper-application-slice.md)。它采用独立的限定版本准入，并复用文件事务保护；不把 CUA 副本作为旧结构方案传入正式 CLI。2026-10-20 已完成固定版本的真实应用、用户试用、原文及签名恢复；活跃模块路径、目标字段改写、具体站点访问和旧缓存影响仍未独立验证。执行流程、验收结论与限制见 [真实验收](docs/design/cua-wrapper-runtime-acceptance.md)。
 
-CUA 的目标协调历史及替换暂存位于操作系统账户 home 下的 `.codex-browser-patch/target-leases/<父目录摘要>/`，不在应用包内；恢复后无需删除应用内锁链。该位置不随 `HOME`、XDG 或 `--store` 改变，必须与操作存储、准备副本一起保留。替换要求该位置与目标支持原子 rename；跨文件系统时拒绝，不降级复制。旧版目标旁锁、孤立后继或临时文件返回 `LEGACY_TARGET_ARTIFACTS`，需要独立离线维护，工具不在线删除。准备目录、操作存储和目标不得与该固定协调目录重合或互相包含。协调协议只约束使用当前引擎的并发写入者；不要同时运行旧二进制。机制见 [恢复收尾规格](docs/design/cua-wrapper-restore-completion.md)，实现与验证见 [恢复收尾报告](reports/cua-wrapper-restore-completion.zh-CN.md)。
+CUA 的目标协调历史及替换暂存位于操作系统账户 home 下的 `.codex-browser-patch/target-leases/<父目录摘要>/`，不在应用包内；恢复后无需删除应用内锁链。该位置不随 `HOME`、XDG 或 `--store` 改变，必须与操作存储、准备副本一起保留。替换要求该位置与目标支持原子 rename；跨文件系统时拒绝，不降级复制。旧版目标旁锁、孤立后继或临时文件返回 `LEGACY_TARGET_ARTIFACTS`，需要独立离线维护，工具不在线删除。准备目录、操作存储和目标不得与该固定协调目录重合或互相包含。协调协议只约束使用当前引擎的并发写入者；不要同时运行旧二进制。机制及验证边界见 [恢复收尾规格](docs/design/cua-wrapper-restore-completion.md)，真实往返结果见 [真实验收](docs/design/cua-wrapper-runtime-acceptance.md)。
 
 ## 本地安装
 
@@ -210,15 +210,14 @@ npm run test:package
 
 macOS 身份和可控 `ps`/文件系统边界仅通过显式外部 `node --require tests/fixtures/*.cjs` 注入测试子进程。预加载 fixture 不进入 tarball，生产 CLI 不提供平台、进程检查或故障注入绕过选项。权限测试需要非 root 执行用户。
 
-GitHub Actions 在无 Codex 的 Linux/macOS 上，以最低 Node **22.13.0** 和 Node 24 运行依赖安装、类型检查、静态检查、全部测试（含安装产物验收）及构建。本地结果及证据边界见仓库内 [交付验证记录](reports/package-verification.md)；该报告不进入 npm 包。
+GitHub Actions 在无 Codex 的 Linux/macOS 上，以最低 Node **22.13.0** 和 Node 24 运行依赖安装、类型检查、静态检查、全部测试（含安装产物验收）及构建。合成测试与安装产物验收证明对应测试场景，不替代真实插件加载或站点访问验证。
 
 ## 历史 Python 研究原型
 
 `scripts/site_status_patch.py` 保留为针对固定旧样本的研究原型，**不是正式 CLI**。它使用固定版本/哈希与字节锚点，其测试依赖历史本机副本，可能跳过；不能作为新 CLI 的兼容性或真实运行证据。不要按旧脚本流程替代上述方案与持久事务流程。
 
-研究资料保留在仓库，不进入 npm 分发：
+相关实现与决策：
 
-- [网站限制逆向报告](reports/codex-browser-restrictions.zh-CN.md)
-- [历史静态证据](reports/static-evidence.md) 与 [结构化证据](reports/static-evidence.json)
 - [Python 研究原型](scripts/site_status_patch.py) 与 [历史测试](tests/test_site_status_patch.py)
 - [结构兼容性决策](docs/adr/0001-structural-compatibility.md)
+- [限定版本适配决策](docs/adr/0005-version-scoped-empirical-validation.md)

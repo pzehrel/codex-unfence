@@ -74,4 +74,4 @@
 
 - [结构兼容性决策](../adr/0001-structural-compatibility.md)
 - [领域术语](../../GLOSSARY.md)
-- [现有实现与逆向报告](../../reports/codex-browser-restrictions.zh-CN.md)
+- [当前实现与使用说明](../../README.md)
