@@ -20,6 +20,7 @@ export interface Inspection {
   source: { sha256: string; size: number } | null;
   writeReadiness: 'ready' | 'blocked' | 'unknown';
   blockers: Diagnostic[];
+  allowedActions: ('apply' | 'restore' | 'recover')[];
   diagnostics: Diagnostic[];
   inspectionToken: string | null;
   runtime: 'not-verified';
@@ -88,7 +89,9 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
       const running = cuaBlockingProcesses(await processTable());
       if (running.length) blockers.push({ code: 'PROCESSES_RUNNING', severity: 'error', message: `Exit related processes before writing: ${running.map((entry) => `PID ${entry.pid} ${entry.executable}`).join('; ')}` });
     } catch (error) { blockers.push({ code: 'PROCESS_ENUMERATION_FAILED', severity: 'error', message: error instanceof Error ? error.message : 'Cannot safely enumerate processes.' }); }
-    const inspection: Inspection = { candidate, support: derivation?.support ?? 'unsupported', state, derivation, source, writeReadiness: blockers.some((entry) => entry.code === 'PROCESS_ENUMERATION_FAILED') ? 'unknown' : blockers.length ? 'blocked' : 'ready', blockers, diagnostics, inspectionToken, operation, recovery, runtime: 'not-verified' };
+    const actionBlocked = blockers.some((entry) => entry.code !== 'INCOMPLETE_TRANSACTION');
+    const allowedActions: Inspection['allowedActions'] = actionBlocked || !inspectionToken ? [] : state === 'incomplete' && recovery ? ['recover'] : derivation?.support === 'supported' && state === 'original' ? ['apply', ...(recovery ? ['restore' as const] : [])] : state === 'tool-applied' && recovery ? ['apply', 'restore'] : [];
+    const inspection: Inspection = { candidate, support: derivation?.support ?? 'unsupported', state, derivation, source, writeReadiness: blockers.some((entry) => entry.code === 'PROCESS_ENUMERATION_FAILED') ? 'unknown' : blockers.length ? 'blocked' : 'ready', blockers, allowedActions, diagnostics, inspectionToken, operation, recovery, runtime: 'not-verified' };
     if (snapshot) inspectedSources.set(inspection, snapshot);
     return inspection;
   }
@@ -97,8 +100,9 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
       if (selection.confirmed !== true) throw new TransactionError('CONFIRMATION_REQUIRED', 'Explicit confirmation of the inspected target is required.', 'usage-error');
       const current = await inspect(selection.candidate);
       check(typeof selection.inspectionToken === 'string' && current.inspectionToken === selection.inspectionToken, 'INSPECTION_CHANGED', 'Target, preparation or trusted state changed after inspection; inspect and confirm again.');
-      if (current.writeReadiness !== 'ready') {
-        const blocker = current.blockers[0];
+      const blocking = current.blockers.filter((entry) => !(command === 'recover' && current.allowedActions.includes('recover') && entry.code === 'INCOMPLETE_TRANSACTION'));
+      if (blocking.length) {
+        const blocker = blocking[0];
         throw new TransactionError(blocker?.code ?? 'WRITE_BLOCKED', blocker?.message ?? 'Writing is blocked.', current.writeReadiness === 'unknown' ? 'runtime-error' : 'conflict');
       }
       let record = await managedRecord(current.candidate.targetPath, derive);

@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { runCli } from './helpers/cli.mjs';
+import { runCli, startCli } from './helpers/cli.mjs';
+import { once } from 'node:events';
+import { setTimeout } from 'node:timers';
 
 const binary = fileURLToPath(new URL('./fixtures/managed-patches-driver.mjs', import.meta.url));
 const fixture = fileURLToPath(new URL('./fixtures/managed-boundaries.cjs', import.meta.url));
@@ -133,6 +135,55 @@ test('apply rejects a supported original changed after confirmation token valida
   assert.equal(refused.exitCode, 4);
   assert.ok(refused.diagnostics.some(entry => ['INSPECTION_CHANGED', 'TARGET_CHANGED'].includes(entry.code)));
   assert.deepEqual(await readFile(candidate.targetPath), changed);
+});
+
+async function pauseOperation(t, box, candidate, command, boundary) {
+  const child = startCli([command, JSON.stringify(candidate)], { directory: box.directory, binary, fixture, env: { CODEX_TEST_PAUSE: boundary, CODEX_TEST_TARGET: candidate.targetPath }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  await Promise.race([
+    once(child, 'message').then(([message]) => assert.equal(message.boundary, boundary)),
+    once(child, 'exit').then(([code, signal]) => { throw new Error(`Driver exited before ${boundary}: ${code}/${signal} ${stdout} ${stderr}`); }),
+    new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error(`No boundary ${boundary}: ${stdout} ${stderr}`)), 15000); timer.unref(); }),
+  ]);
+  return { async kill() { const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited; } };
+}
+
+test('interrupted managed apply is discoverable and recover rolls back without continuing application', async t => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  const interrupted = await pauseOperation(t, box, candidate, 'apply', 'after-target-rename');
+  const root = join(box.directory, 'home/Library/Application Support/codex-browser-liberation-patch');
+  assert.equal((await readdir(join(root, 'targets'))).length, 1);
+  await interrupted.kill();
+  assert.notDeepEqual(await readFile(candidate.targetPath), original);
+  const pending = run(box, 'inspect', candidate);
+  assert.equal(pending.state, 'incomplete');
+  assert.equal(pending.writeReadiness, 'blocked');
+  assert.deepEqual(pending.allowedActions, ['recover']);
+  const recovered = run(box, 'recover', candidate);
+  assert.equal(recovered.exitCode, 0, JSON.stringify(recovered));
+  assert.equal(recovered.data.targets[0].action, 'rolled-back');
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+  assert.equal(run(box, 'status', candidate).data.targets[0].state, 'original');
+  assert.deepEqual(await readdir(join(candidate.targetPath, '..')), ['browser-service.mjs']);
+});
+
+test('a locator with a missing preparation directory is a blocked conflict rather than an undiscovered patch', async t => {
+  const box = await sandbox(t);
+  const { candidate } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const inspection = run(box, 'inspect', candidate);
+  const patched = await readFile(candidate.targetPath);
+  await rm(join(inspection.recovery.preparation, '..'), { recursive: true });
+  const missing = run(box, 'inspect', candidate);
+  assert.equal(missing.state, 'conflict');
+  assert.equal(missing.writeReadiness, 'blocked');
+  assert.deepEqual(missing.allowedActions, []);
+  assert.deepEqual(await readFile(candidate.targetPath), patched);
 });
 
 test('inspection surfaces damaged preparation as conflict and refuses every write without trusting its locator', async t => {
