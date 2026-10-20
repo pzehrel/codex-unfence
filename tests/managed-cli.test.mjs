@@ -74,7 +74,7 @@ test('human check explains structural evidence and semantic assumptions without 
 
 test('help documents managed commands and accepts command-specific help', async t => {
   const box = await sandbox(t);
-  for (const command of ['check', 'apply', 'status', 'restore', 'recover']) {
+  for (const command of ['install', 'uninstall', 'check', 'apply', 'status', 'restore', 'recover']) {
     const child = runCli([command, '--help'], { directory: box.directory, fixture });
     assert.equal(child.status, 0, child.stdout + child.stderr);
     assert.match(child.stdout, /check \[--app/);
@@ -85,7 +85,7 @@ test('help documents managed commands and accepts command-specific help', async 
 
 test('managed writes require real confirmation and missing status preserves its command', async t => {
   const box = await sandbox(t);
-  for (const command of ['apply', 'restore', 'recover']) {
+  for (const command of ['install', 'uninstall', 'apply', 'restore', 'recover']) {
     const child = run(box, [command, '--app', box.app]);
     assert.equal(child.code, 2, JSON.stringify(child));
     assert.equal(child.result.command, command);
@@ -95,4 +95,40 @@ test('managed writes require real confirmation and missing status preserves its 
   assert.equal(missing.result.command, 'status');
   assert.equal(missing.result.data, null);
   assert.deepEqual(await readFile(box.target), box.source);
+});
+
+
+test('new product namespace leaves old recovery records untouched', async t => {
+  const box = await sandbox(t);
+  const oldRoot = join(box.directory, 'home/Library/Application Support/codex-browser-liberation-patch');
+  await mkdir(oldRoot, { recursive: true });
+  const previous = Buffer.from('old recovery data must not be read or migrated');
+  await writeFile(join(oldRoot, 'key'), previous);
+  const { code, result } = run(box, ['check', '--app', box.app]);
+  assert.equal(code, 0, JSON.stringify(result));
+  assert.equal(result.data.inspections[0].state, 'original');
+  assert.deepEqual(await readFile(join(oldRoot, 'key')), previous);
+  assert.deepEqual(await readdir(join(box.directory, 'home/Library/Application Support')), ['codex-browser-liberation-patch']);
+});
+
+test('check reports all installations including unsupported sources without creating recovery state', async t => {
+  const box = await sandbox(t);
+  const unsupported = join(box.directory, 'home/Applications/Unsupported.app', service);
+  await mkdir(join(unsupported, '..'), { recursive: true });
+  await writeFile(unsupported, 'const unsupported = true;');
+  const { code, result } = run(box, ['check']);
+  assert.equal(code, 3, JSON.stringify(result));
+  assert.equal(result.data.inspections.length, 2);
+  assert.deepEqual(result.data.inspections.map(entry => entry.support), ['supported', 'unsupported']);
+  assert.equal(result.data.inspection, null);
+  assert.equal(result.data.discovery.selection, 'required');
+  assert.ok(result.diagnostics.length > 0);
+  assert.ok(result.diagnostics.every(entry => entry.path === unsupported));
+  assert.deepEqual(await readdir(join(box.directory, 'home')), ['Applications']);
+  const human = runCli(['check'], { directory: box.directory, fixture });
+  assert.equal(human.status, 3, human.stdout + human.stderr);
+  assert.ok(human.stdout.includes(box.app));
+  assert.ok(human.stdout.includes('Unsupported.app'));
+  assert.match(human.stdout, /Can install: yes/);
+  assert.match(human.stdout, /Can install: no/);
 });

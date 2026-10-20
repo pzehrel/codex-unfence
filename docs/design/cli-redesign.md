@@ -2,6 +2,16 @@
 
 状态：下面保留 2026-10-16 原结构 CLI 的设计背景。2026-10-20 的[规格 #18](https://github.com/pzehrel/codex-browser-liberation-patch/issues/18)新增托管 CUA 结构方案与临时 npm 交互入口；当前普通使用流程见[README](../../README.md)。新旧方案身份与来源验证分开，历史固定配方不因新入口放宽。
 
+## codex-unfence 命令约定
+
+项目、npm 包和可执行文件统一命名为 `codex-unfence`。公开主入口为 `npx codex-unfence install`、`npx codex-unfence check` 和 `npx codex-unfence uninstall`；`apply`／`restore`／`status`／`recover` 保留为高级入口。
+
+- `check` 只读检查全部发现的安装，逐项报告结构支持、文件状态、写入条件和阻断原因；`--app` 可缩小为一个安装。JSON 的 `data.inspections` 为完整结果，单一安装时保留 `data.inspection`。混合结果按运行失败、冲突、不兼容、成功的顺序聚合退出码。
+- `install`／`uninstall` 在多个安装时交互选择，写前精确输入 `yes`。遇到未完成事务时，先单独确认回滚；成功后重新检查，再确认继续原请求。拒绝或恢复失败时停止，未知内容不能覆盖。
+- 重复安装／卸载保持幂等；受支持的原版文件无需先有备份才能报告已卸载。所有托管写入保留进程检查、来源校验、备份与事务门禁。
+- 新恢复根目录为 `~/Library/Application Support/codex-unfence/`，协调目录为 `~/.codex-unfence/`。不发现、不读取或迁移旧产品名的恢复记录；旧补丁由原工具处理。历史 GitHub issue 和验收记录保留原地址及身份。
+- 公共 npm 发布及 GitHub 仓库改名属于后续外部交付；本地实现和测试不表示二者已执行。
+
 ## 当前开发与本地交付
 
 Node.js >=22.13.0；无需真实安装即可测试。构建并生成带 bundled 运行依赖的本地产物：
@@ -21,10 +31,10 @@ npm pack --ignore-scripts
 以 `npm pack` 实际返回的文件名为准。当前版本 `0.2.0` 未公共发布；运行已构建本地包：
 
 ```bash
-npm exec --offline --yes --package /absolute/path/codex-browser-liberation-patch-0.2.0.tgz -- codex-browser-patch --help
+npx --offline --package /absolute/path/codex-unfence-0.2.0.tgz codex-unfence --help
 ```
 
-新入口按准确安装路径检查、选择和明确确认。准备副本、目标记录、工具版本及可信 store 由 managed 层管理，位于账户主目录的 `Library/Application Support/codex-browser-liberation-patch/`，独立于临时代码和 npm cache。check 完全只读；`support`、`state`、`writeReadiness`、`allowedActions` 与 `runtime` 各有含义。incomplete 时可以只允许 recover，不能用全局 blocked 状态推断 recover 永不可用。新写命令拒绝非 TTY、EOF 自动确认和 `--json` 自动化写入；旧显式语法保留原契约。
+新入口按准确安装路径检查、选择和明确确认。准备副本、目标记录、工具版本及可信 store 由 managed 层管理，位于账户主目录的 `Library/Application Support/codex-unfence/`，独立于临时代码和 npm cache。check 完全只读；`support`、`state`、`writeReadiness`、`allowedActions` 与 `runtime` 各有含义。incomplete 时可以只允许 recover，不能用全局 blocked 状态推断 recover 永不可用。新写命令拒绝非 TTY、EOF 自动确认和 `--json` 自动化写入；旧显式语法保留原契约。
 
 ### 结构模式与假设
 
@@ -45,14 +55,14 @@ npm exec --offline --yes --package /absolute/path/codex-browser-liberation-patch
 以下命令继续使用原结构分析、review plan 和显式 store，不会自动转为 CUA 托管方案。所有文件选择用绝对路径，完整说明见 `--help`。
 
 ```text
-codex-browser-patch detect [--plugin-root DIRECTORY] [--json]
-codex-browser-patch prepare [--plugin-root DIRECTORY] --target ABSOLUTE_ARTIFACT --output NEW_PLAN [--json]
-codex-browser-patch prepare [--plugin-root DIRECTORY] --all-compatible --output NEW_PLAN [--json]
-codex-browser-patch apply --plan ABSOLUTE_PLAN --store ABSOLUTE_STORE [--json]
-codex-browser-patch restore --plan ABSOLUTE_PLAN --store ABSOLUTE_STORE [--json]
-codex-browser-patch status --plan ABSOLUTE_PLAN --store ABSOLUTE_STORE [--json]
-codex-browser-patch status --target ABSOLUTE_ARTIFACT --store ABSOLUTE_STORE [--json]
-codex-browser-patch recover --store ABSOLUTE_STORE [--json]
+codex-unfence detect [--plugin-root DIRECTORY] [--json]
+codex-unfence prepare [--plugin-root DIRECTORY] --target ABSOLUTE_ARTIFACT --output NEW_PLAN [--json]
+codex-unfence prepare [--plugin-root DIRECTORY] --all-compatible --output NEW_PLAN [--json]
+codex-unfence apply --plan ABSOLUTE_PLAN --store ABSOLUTE_STORE [--json]
+codex-unfence restore --plan ABSOLUTE_PLAN --store ABSOLUTE_STORE [--json]
+codex-unfence status --plan ABSOLUTE_PLAN --store ABSOLUTE_STORE [--json]
+codex-unfence status --target ABSOLUTE_ARTIFACT --store ABSOLUTE_STORE [--json]
+codex-unfence recover --store ABSOLUTE_STORE [--json]
 ```
 
 `--target` 可重复。`--plan`／`--store` 包括等号形式均触发严格旧解析，缺项、空值、重复和与新参数混搭会拒绝，不回退自动管理。旧固定 CUA 仓库脚本仍使用其原准备与存储入口，见[准备切片](cua-request-wrapper-slice.md)和[应用恢复切片](cua-wrapper-application-slice.md)。未知旧记录不自动迁移或接管。
@@ -67,7 +77,7 @@ npm run check -- --base <implementation-base>
 npm run test:package
 ```
 
-默认测试包含真实离线 npm exec 本地 tarball、独立 config/cache、外部最终 bin 系统夹具及合成 `.app`。macOS PTY 使用系统 expect，Linux 使用 util-linux script；Linux 通过夹具模拟 macOS 产品边界，核心场景不因无产品安装而 skip。测试不执行真实插件、不发业务请求。包文件逐项白名单并保留安装产物回归；preload、测试、源码、真实材料不进入包。测试通过不表示当前真实 bundle 已支持或运行生效。
+默认测试包含真实离线 npx 本地 tarball、独立 config/cache、外部最终 bin 系统夹具及合成 `.app`。macOS PTY 使用系统 expect，Linux 使用 util-linux script；Linux 通过夹具模拟 macOS 产品边界，核心场景不因无产品安装而 skip。测试不执行真实插件、不发业务请求。包文件逐项白名单并保留安装产物回归；preload、测试、源码、真实材料不进入包。测试通过不表示当前真实 bundle 已支持或运行生效。
 
 以下原设计保留其当时的范围和术语。
 

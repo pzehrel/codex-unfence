@@ -1,10 +1,10 @@
 {
-  "name": "codex-browser-liberation-patch",
+  "name": "codex-unfence",
   "version": "0.2.0",
   "description": "Structural review plans and recoverable transactions for Codex browser plugins on macOS",
   "type": "module",
   "bin": {
-    "codex-browser-patch": "dist/cli.js"
+    "codex-unfence": "dist/cli.js"
   },
   "engines": {
     "node": ">=22.13.0"

@@ -511,7 +511,7 @@ test('group target locks use canonical order independent of plan order, exclude 
   const reversePlan = join(box.directory, 'reverse-plan');
   response(run(box, ['prepare', '--plugin-root', join(box.directory, 'plugins'), ...[...box.targets].reverse().flatMap((path) => ['--target', path]), '--output', reversePlan]));
   const holder = await paused(t, { ...box, plan: reversePlan }, 'apply', 'target-lock-acquired');
-  const firstLock = join(box.target, '../.codex-browser-patch.lock');
+  const firstLock = join(box.target, '../.codex-unfence.lock');
   const lock = JSON.parse(await readFile(firstLock, 'utf8'));
   const live = { pid: holder.child.pid, start: lock.owner.start, executable: process.execPath, command: `${process.execPath} synthetic-cli` };
   const other = { ...box, store: join(box.directory, 'other-store') };
@@ -755,7 +755,7 @@ test('status accepts explicit targets, distinguishes incompatibility and untrust
 test('SIGKILL between lease link and staging unlink permits safe dead-owner retry without an intent', async (t) => {
   for (const scope of ['operation', 'target']) {
     const box = await sandbox(t);
-    const root = scope === 'operation' ? join(box.store, 'operation.lock') : join(box.target, '../.codex-browser-patch.lock');
+    const root = scope === 'operation' ? join(box.store, 'operation.lock') : join(box.target, '../.codex-unfence.lock');
     const holder = await paused(t, box, 'apply', `after-${scope}-lock-link`);
     assert.equal((await stat(root)).nlink, 2);
     const record = JSON.parse(await readFile(root, 'utf8'));
@@ -789,7 +789,7 @@ test('lease successor and release link interruptions preserve terminal provenanc
 test('unexplained hardlinked lease files remain conflicts', async (t) => {
   const box = await sandbox(t);
   response(apply(box));
-  const root = join(box.target, '../.codex-browser-patch.lock');
+  const root = join(box.target, '../.codex-unfence.lock');
   await link(root, join(box.directory, 'external-lease-alias'));
   assert.equal(response(status(box), 4).diagnostics[0].code, 'PATH_ALIAS');
   assert.equal(response(restore(box), 4).diagnostics[0].code, 'PATH_ALIAS');
@@ -830,7 +830,7 @@ test('held locks exclude concurrent stores; dead owners without an intent can be
   const box = await sandbox(t);
   const holder = await paused(t, box, 'apply', 'target-lock-acquired');
   const other = { ...box, store: join(box.directory, 'other-store') };
-  const lock = JSON.parse(await readFile(join(box.directory, 'plugins/browser/synthetic/scripts/.codex-browser-patch.lock'), 'utf8'));
+  const lock = JSON.parse(await readFile(join(box.directory, 'plugins/browser/synthetic/scripts/.codex-unfence.lock'), 'utf8'));
   const live = { pid: holder.child.pid, start: lock.owner.start, executable: process.execPath, command: `${process.execPath} synthetic-cli` };
   const rejected = response(apply(other, { CODEX_TEST_PROCESS_ROWS: JSON.stringify([live]) }), 4);
   assert.equal(rejected.diagnostics[0].code, 'LOCK_HELD');
@@ -858,10 +858,10 @@ test('restore holds the same operation and target locks; a dead pre-intent owner
 test('unprovable owner and aliased operation stores fail closed without touching targets', async (t) => {
   const box = await sandbox(t);
   const root = join(box.directory, 'plugins/browser/synthetic/scripts');
-  await writeFile(join(root, '.codex-browser-patch.lock'), '{}', { mode: 0o600 });
+  await writeFile(join(root, '.codex-unfence.lock'), '{}', { mode: 0o600 });
   assert.equal(response(apply(box), 4).diagnostics[0].code, 'INVALID_LOCK');
   assert.equal(await readFile(box.target, 'utf8'), source);
-  await rm(join(root, '.codex-browser-patch.lock'));
+  await rm(join(root, '.codex-unfence.lock'));
   const actual = join(box.directory, 'actual-store');
   await mkdir(actual, { mode: 0o700 }); await symlink(actual, box.store);
   assert.equal(response(apply(box), 4).diagnostics[0].code, 'PATH_ALIAS');

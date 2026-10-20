@@ -9,8 +9,8 @@ const root = fs.realpathSync(process.env.CODEX_NPX_SANDBOX);
 const entry = fs.realpathSync(process.argv[1]);
 const suffix = relative(join(root, 'npm-cache'), entry);
 if (!suffix || suffix.startsWith('..') || isAbsolute(suffix)
-  || !entry.endsWith('/node_modules/codex-browser-liberation-patch/dist/cli.js')) {
-  throw new Error('Test preload may only affect this sandbox npm exec public bin.');
+  || !entry.endsWith('/node_modules/codex-unfence/dist/cli.js')) {
+  throw new Error('Test preload may only affect this sandbox npx public bin.');
 }
 const userInfo = os.userInfo;
 require('./managed-boundaries.cjs');

@@ -93,7 +93,7 @@ promises.rename = async function (from, to) {
   return result;
 };
 promises.open = async function (path, ...args) {
-  if (String(path).includes('.codex-browser-patch-') && String(path).endsWith('.tmp') && args[0] === 'wx') {
+  if (String(path).includes('.codex-unfence-') && String(path).endsWith('.tmp') && args[0] === 'wx') {
     if (fault === 'write-failure' && dirname(String(path)) === dirname(target ?? '')) throw ioError();
     if (fault === 'prewrite-change') fs.writeFileSync(target, 'external boundary change');
     if (fault === 'parent-replaced') {
@@ -116,7 +116,7 @@ promises.link = async function (from, to) {
   const scope = String(to).includes('operation.lock') ? 'operation' : String(to).includes('target-leases') ? 'coordination' : 'target';
   if (record.released) await boundary(`after-${scope}-release-link`);
   else await boundary(`after-${scope}-${String(to).endsWith('.next') ? 'successor' : 'lock'}-link`);
-  if ((String(to).endsWith('.codex-browser-patch.lock') || String(to).includes('.codex-browser-patch.lock.')) && !JSON.parse(fs.readFileSync(from, 'utf8')).released) targetLeasePublished = true;
+  if ((String(to).endsWith('.codex-unfence.lock') || String(to).includes('.codex-unfence.lock.')) && !JSON.parse(fs.readFileSync(from, 'utf8')).released) targetLeasePublished = true;
   return result;
 };
 promises.rm = async function (path, ...args) {

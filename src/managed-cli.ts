@@ -17,9 +17,9 @@ export async function managedCli(args: string[]): Promise<CheckResult | Operatio
     if (seen.has(token.name)) throw new Error(`Duplicate option: --${token.name}`);
     seen.add(token.name);
   }
-  if (positionals.length > 1 || positionals.length === 1 && !['check', 'status', 'apply', 'restore', 'recover'].includes(positionals[0] ?? '')) throw new Error('Expected command: check, status, apply, restore or recover.');
+  if (positionals.length > 1 || positionals.length === 1 && !['check', 'install', 'uninstall', 'status', 'apply', 'restore', 'recover'].includes(positionals[0] ?? '')) throw new Error('Expected command: install, check or uninstall.');
   const command = positionals[0];
-  const interactive = command === undefined || command === 'apply' || command === 'restore' || command === 'recover';
+  const interactive = command !== 'check' && command !== 'status';
   if (interactive && (values.json || !process.stdin.isTTY || !process.stdout.isTTY)) throw new Error('Managed changes and the default guide require interactive stdin/stdout without --json.');
   if (values.app !== undefined && !isAbsolute(values.app)) throw new Error('--app requires an absolute installation path.');
   const metadata = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
@@ -30,14 +30,18 @@ export async function managedCli(args: string[]): Promise<CheckResult | Operatio
   if (interactive) { const result = await guide(managed, selection, command); if (result) process.exitCode = result.exitCode; return null; }
   const discovery = await managed.discover(selection);
   const candidate = discovery.selection === 'single' ? discovery.candidates[0] : undefined;
-  if (positionals[0] === 'status' && candidate) return managed.status(candidate);
-  const inspection = candidate ? await managed.inspect(candidate) : null;
-  const diagnostics = [...discovery.diagnostics, ...(inspection?.diagnostics ?? [])];
-  if (!candidate) diagnostics.push({ code: discovery.selection === 'required' ? 'SELECTION_REQUIRED' : 'NO_INSTALLATIONS', severity: 'error', message: discovery.selection === 'required' ? 'Select one installation with --app.' : 'No CUA installation found; provide --app with its absolute path.' });
-  const outcome = !candidate ? (discovery.selection === 'required' ? 'usage-error' : 'runtime-error')
-    : inspection?.operation && inspection.operation.exitCode !== 0 ? inspection.operation.outcome
-      : inspection?.support !== 'supported' ? 'incompatible' : 'success';
-  const exitCode = { success: 0, 'runtime-error': 1, 'usage-error': 2, incompatible: 3, conflict: 4 }[outcome];
-  if (command === 'status') return { schemaVersion: 1, command, outcome, exitCode, diagnostics, data: null };
-  return { schemaVersion: 1, command: 'check', outcome, exitCode, diagnostics, data: { discovery, inspection, runtime: 'not-verified' } };
+  if (command === 'status') {
+    if (candidate) return managed.status(candidate);
+    const multiple = discovery.selection === 'required';
+    return { schemaVersion: 1, command, outcome: multiple ? 'usage-error' : 'runtime-error', exitCode: multiple ? 2 : 1, diagnostics: [...discovery.diagnostics, { code: multiple ? 'SELECTION_REQUIRED' : 'NO_INSTALLATIONS', severity: 'error', message: multiple ? 'Select one installation with --app.' : 'No CUA installation found; provide --app with its absolute path.' }], data: null };
+  }
+  const inspections = [];
+  for (const installation of discovery.candidates) inspections.push(await managed.inspect(installation));
+  const diagnostics = [...discovery.diagnostics, ...inspections.flatMap(inspection => inspection.diagnostics.map(entry => ({ ...entry, path: entry.path ?? inspection.candidate.targetPath })))];
+  if (!inspections.length) diagnostics.push({ code: 'NO_INSTALLATIONS', severity: 'error', message: 'No CUA installation found; provide --app with its absolute path.' });
+  const outcome = !inspections.length || discovery.diagnostics.some(entry => entry.severity === 'error') || inspections.some(inspection => inspection.operation?.outcome === 'runtime-error') ? 'runtime-error'
+    : inspections.some(inspection => inspection.state === 'conflict' || inspection.operation?.outcome === 'conflict') ? 'conflict'
+      : inspections.some(inspection => inspection.support !== 'supported') ? 'incompatible' : 'success';
+  const exitCode = { success: 0, 'runtime-error': 1, incompatible: 3, conflict: 4 }[outcome];
+  return { schemaVersion: 1, command: 'check', outcome, exitCode, diagnostics, data: { discovery, inspections, inspection: candidate ? inspections[0] ?? null : null, runtime: 'not-verified' } };
 }

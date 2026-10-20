@@ -28,10 +28,10 @@ function execInvocation(args, { directory, cwd, tarball }) {
   const archive = realpathSync(tarball);
   if (!contained(realpathSync(tmpdir()), root) || !contained(root, working)
     || !contained(root, archive) || !archive.endsWith('.tgz')) {
-    throw new Error('npm exec requires a local tarball and cwd inside its temporary sandbox.');
+    throw new Error('npx requires a local tarball and cwd inside its temporary sandbox.');
   }
   if (!Array.isArray(args) || args.some((value) => typeof value !== 'string' || value.includes('\0'))) {
-    throw new Error('npm exec requires CLI string arguments.');
+    throw new Error('npx requires CLI string arguments.');
   }
   const home = join(root, 'home');
   mkdirSync(home, { recursive: true });
@@ -43,12 +43,12 @@ function execInvocation(args, { directory, cwd, tarball }) {
   const fixture = fileURLToPath(new URL('../fixtures/npx-final-bin.cjs', import.meta.url));
   const inherited = Object.fromEntries(['PATH', 'SystemRoot', 'TMPDIR', 'TMP', 'TEMP', 'LANG'].flatMap((key) =>
     process.env[key] === undefined ? [] : [[key, process.env[key]]]));
-  return ['npm', [
+  return ['npx', [
     '--userconfig', userconfig, '--globalconfig', globalconfig,
     '--cache', join(root, 'npm-cache'), '--prefix', join(root, 'npm-prefix'),
     `--node-options=--require=${JSON.stringify(fixture)}`,
-    'exec', '--offline', '--yes', '--ignore-scripts', '--no-audit', '--no-fund',
-    '--package', archive, '--', 'codex-browser-patch', ...args,
+    '--offline', '--yes', '--ignore-scripts', '--no-audit', '--no-fund',
+    '--package', archive, 'codex-unfence', ...args,
   ], {
     cwd: working, encoding: 'utf8', shell: false, timeout: 30_000,
     env: {
@@ -83,7 +83,7 @@ export function runNpmExecPty(args, options) {
     const steps = options.steps ?? [];
     const timer = setTimeout(() => {
       process.kill(-child.pid, 'SIGKILL');
-      reject(new Error(`npm exec PTY timed out: ${stdout}${stderr}`));
+      reject(new Error(`npx PTY timed out: ${stdout}${stderr}`));
     }, 30_000);
     let sending = false;
     async function respond() {
@@ -113,7 +113,7 @@ export function runNpmExecPty(args, options) {
   });
 }
 
-// Fixed offline package operations and the public npm exec bin, never arbitrary commands.
+// Fixed offline package operations and the public npx bin, never arbitrary commands.
 export function packPackage(directory) {
   const metadata = JSON.parse(readFileSync(join(repository, 'package.json'), 'utf8'));
   const missing = metadata.bundleDependencies.filter(name => !existsSync(join(repository, 'node_modules', name, 'package.json')));

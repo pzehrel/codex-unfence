@@ -48,7 +48,7 @@ function validTool(tool: unknown): asserts tool is ToolIdentity {
 export function managedPaths(target: string) {
   absolute(target);
   const home = userInfo().homedir;
-  const root = join(home, 'Library/Application Support/codex-browser-liberation-patch');
+  const root = join(home, 'Library/Application Support/codex-unfence');
   const key = digest(target);
   checkCoordinationPaths([root, target]);
   check(!target.startsWith(root + sep) && !root.startsWith(target + sep), 'PATH_ALIAS', 'Managed state and installation must be separate.');

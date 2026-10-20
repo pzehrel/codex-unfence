@@ -8,7 +8,7 @@ if (command === 'discover') result = await discoverInstallations(selection);
 else {
   const { deriveCua } = await import('../../dist/cua-analysis.js');
   const { createManagedPatches } = await import('../../dist/managed-patches.js');
-  const manager = createManagedPatches({ derive: deriveCua, tool: { packageName: 'codex-browser-liberation-patch', version: '9.8.7-synthetic', executable: 'codex-browser-patch' } });
+  const manager = createManagedPatches({ derive: deriveCua, tool: { packageName: 'codex-unfence', version: '9.8.7-synthetic', executable: 'codex-unfence' } });
   if (command === 'inspect' || command === 'status') result = await manager[command](selection);
   else if (['apply', 'restore', 'recover'].includes(command)) {
     const inspection = await manager.inspect(selection);

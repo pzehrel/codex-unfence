@@ -263,7 +263,7 @@ async function targetRoots(paths: string[], create = false): Promise<string[]> {
 async function checkTargetArtifacts(path: string): Promise<void> {
   if (!sealedTarget) return;
   const names = await readdir(dirname(path));
-  check(!names.some((name) => name.startsWith('.codex-browser-patch') || name.startsWith('.publish-')), 'LEGACY_TARGET_ARTIFACTS', 'Target directory contains old or interrupted transaction artifacts; offline maintenance is required. No artifacts were removed.', path);
+  check(!names.some((name) => name.startsWith('.codex-unfence') || name.startsWith('.codex-browser-patch') || name.startsWith('.publish-')), 'LEGACY_TARGET_ARTIFACTS', 'Target directory contains old or interrupted transaction artifacts; offline maintenance is required. No artifacts were removed.', path);
 }
 
 async function pendingAtLease(root: string, path: string): Promise<RecordEntry | null> {
@@ -309,7 +309,7 @@ async function replaceTarget(path: string, bytes: Buffer, expected: Snapshot): P
   // CUA staging also stays outside sealed resources, including after SIGKILL.
   // rename across filesystems fails closed rather than falling back to a copy.
   const stagingDirectory = sealedTarget ? dirname(await externalTargetLock(path, true)) : dirname(path);
-  const temporary = join(stagingDirectory, `.codex-browser-patch-${randomUUID()}.tmp`);
+  const temporary = join(stagingDirectory, `.codex-unfence-${randomUUID()}.tmp`);
   try {
     await writeExclusive(temporary, bytes, expected.mode);
     check(same(await snapshot(path), expected), 'TARGET_CHANGED', 'Target changed while staging replacement.', path);

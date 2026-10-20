@@ -74,7 +74,7 @@ export interface PendingTransaction {
   targets: OperationTarget[];
 }
 export interface OperationResult extends ResultBase {
-  command: TransactionCommand;
+  command: TransactionCommand | 'install' | 'uninstall';
   data: {
     store: string;
     transaction: string | null;
@@ -88,7 +88,7 @@ export interface OperationResult extends ResultBase {
 
 export interface CheckResult extends ResultBase {
   command: 'check';
-  data: { discovery: DiscoveryReport; inspection: Inspection | null; runtime: 'not-verified' } | null;
+  data: { discovery: DiscoveryReport; inspections: Inspection[]; inspection: Inspection | null; runtime: 'not-verified' } | null;
 }
 
 export type CommandResult = DetectionResult | PreparationResult | OperationResult | CheckResult | (ResultBase & { command: null; data: null });
@@ -98,12 +98,12 @@ export function renderHuman(result: CommandResult): string {
   if (result.data) {
     if ('pluginRoot' in result.data) lines.push(`Plugin root: ${result.data.pluginRoot}`);
     if (result.command === 'check') {
-      for (const candidate of result.data.discovery.candidates) lines.push(`Installation: ${candidate.appPath}; target: ${candidate.targetPath}`);
-      const inspection = result.data.inspection;
-      if (inspection) {
+      for (const inspection of result.data.inspections) {
+        lines.push(`Installation: ${inspection.candidate.appPath}; target: ${inspection.candidate.targetPath}`);
         lines.push(`Structural support: ${inspection.support}; file state: ${inspection.state}; write readiness: ${inspection.writeReadiness}`);
         for (const evidence of inspection.derivation?.evidence ?? []) lines.push(`Support: ${evidence.description}`);
         for (const assumption of inspection.derivation?.assumptions ?? []) lines.push(`Assumption: ${assumption}`);
+        lines.push(`Can install: ${inspection.allowedActions.includes('apply') ? 'yes' : 'no'}; available actions: ${inspection.allowedActions.map(action => action === 'apply' ? 'install' : action === 'restore' ? 'uninstall' : action).join(', ') || 'none'}`);
         for (const blocker of inspection.blockers) lines.push(`[${blocker.code}] ${blocker.message}`);
       }
     }

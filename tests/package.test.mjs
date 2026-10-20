@@ -110,12 +110,12 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
   const prefix = join(directory, 'installation');
   const install = installPackage(directory, prefix, join(directory, output.filename));
   assert.equal(install.status, 0, install.stderr);
-  const binary = join(prefix, 'bin/codex-browser-patch');
-  const installed = join(prefix, 'lib/node_modules/codex-browser-liberation-patch');
+  const binary = join(prefix, 'bin/codex-unfence');
+  const installed = join(prefix, 'lib/node_modules/codex-unfence');
   assert.equal(await realpath(binary), join(installed, 'dist/cli.js'));
   const metadata = JSON.parse(await readFile(join(installed, 'package.json'), 'utf8'));
   assert.equal(metadata.engines.node, '>=22.13.0');
-  assert.deepEqual(metadata.bin, { 'codex-browser-patch': 'dist/cli.js' });
+  assert.deepEqual(metadata.bin, { 'codex-unfence': 'dist/cli.js' });
   await assert.rejects(access(join(installed, 'src')));
   await assert.rejects(access(join(installed, 'tests')));
   const installation = { directory, binary };
@@ -177,7 +177,7 @@ test('installed tarball public bin satisfies package and full CLI acceptance wit
     assert.equal(help.status, 0, help.stderr);
     assert.equal(help.stderr, '');
     assert.match(help.stdout, /macOS/);
-    for (const command of ['detect', 'prepare', 'apply', 'status', 'restore', 'recover']) assert.match(help.stdout, new RegExp(`codex-browser-patch ${command}`));
+    for (const command of ['detect', 'prepare', 'apply', 'status', 'restore', 'recover']) assert.match(help.stdout, new RegExp(`codex-unfence ${command}`));
     assert.match(help.stdout, /2 invalid arguments, 3 incompatible .*4 conflict/);
     assert.match(help.stdout, /never continues apply or restore/);
   });

@@ -18,7 +18,7 @@ async function packageBox(t) {
 
 function help(result) {
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /codex-browser-patch/);
+  assert.match(result.stdout, /codex-unfence/);
   assert.match(result.stdout, /macOS/);
   assert.match(result.stdout, /--help/);
 }
@@ -28,12 +28,12 @@ function inside(root, path) {
   assert.ok(suffix && !suffix.startsWith('..') && !isAbsolute(suffix), path);
 }
 
-test('offline npm exec runs the packed public bin from an unrelated cwd with isolated final-bin boundaries', async (t) => {
+test('offline npx runs the packed public bin from an unrelated cwd with isolated final-bin boundaries', async (t) => {
   const box = await packageBox(t);
   help(npmPackage.runNpmExec(['--help'], box));
   const observed = JSON.parse(await readFile(join(box.directory, 'final-bin.json'), 'utf8'));
   inside(join(box.directory, 'npm-cache'), observed.entry);
-  assert.ok(observed.entry.endsWith('/node_modules/codex-browser-liberation-patch/dist/cli.js'));
+  assert.ok(observed.entry.endsWith('/node_modules/codex-unfence/dist/cli.js'));
   assert.ok(Number.isSafeInteger(observed.pid) && observed.pid > 0);
   assert.equal(observed.cwd, box.cwd);
   assert.equal(observed.home, join(box.directory, 'home'));
@@ -45,7 +45,7 @@ test('offline npm exec runs the packed public bin from an unrelated cwd with iso
   }
 });
 
-test('packed npm exec check uses genuine structural admission and remains read-only', async (t) => {
+test('packed npx check uses genuine structural admission and remains read-only', async (t) => {
   const box = await packageBox(t);
   const app = join(box.directory, 'home/Applications/Synthetic.app');
   const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
@@ -58,10 +58,10 @@ test('packed npm exec check uses genuine structural admission and remains read-o
   assert.equal(result.data.inspection.support, 'supported');
   assert.equal(result.data.inspection.state, 'original');
   assert.deepEqual(await readFile(target), source);
-  await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-browser-liberation-patch/key')), { code: 'ENOENT' });
+  await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
 });
 
-test('offline npm exec exposes help through a real PTY and propagates the public bin exit status', async (t) => {
+test('offline npx exposes help through a real PTY and propagates the public bin exit status', async (t) => {
   const box = await packageBox(t);
   help(await npmPackage.runNpmExecPty(['--help'], box));
   const observed = JSON.parse(await readFile(join(box.directory, 'final-bin.json'), 'utf8'));
@@ -72,7 +72,7 @@ test('offline npm exec exposes help through a real PTY and propagates the public
   assert.equal(invalid.status, 2, invalid.stdout + invalid.stderr);
 });
 
-test('confirmed npm exec changes survive code-cache removal and repeated apply/restore', async t => {
+test('confirmed npx changes survive code-cache removal and repeated apply/restore', async t => {
   const box = await packageBox(t);
   const app = join(box.directory, 'home/Applications/Lifecycle.app');
   const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
@@ -99,7 +99,7 @@ test('confirmed npm exec changes survive code-cache removal and repeated apply/r
   assert.match((await change('restore')).stdout, /already-original/);
 });
 
-test('npm exec discovers interrupted apply after reacquisition and can recover after recovery is interrupted again', async t => {
+test('npx discovers interrupted apply after reacquisition and can recover after recovery is interrupted again', async t => {
   const box = await packageBox(t);
   const app = join(box.directory, 'home/Applications/Interrupted.app');
   const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
@@ -137,7 +137,7 @@ test('npm exec discovers interrupted apply after reacquisition and can recover a
   assert.deepEqual(await readFile(target), source);
 });
 
-test('npm exec refuses a target changed after inspection instead of applying to new bytes', async t => {
+test('npx refuses a target changed after inspection instead of applying to new bytes', async t => {
   const box = await packageBox(t);
   const app = join(box.directory, 'home/Applications/Changed.app');
   const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
@@ -154,7 +154,7 @@ test('npm exec refuses a target changed after inspection instead of applying to 
   assert.deepEqual(await readFile(target), changed);
 });
 
-test('npm exec check reports process failures and a blocked guide can recheck after the host exits', async t => {
+test('npx check reports process failures and a blocked guide can recheck after the host exits', async t => {
   const box = await packageBox(t);
   const app = join(box.directory, 'home/Applications/Blocked.app');
   const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
@@ -173,7 +173,7 @@ test('npm exec check reports process failures and a blocked guide can recheck af
   assert.deepEqual(inspected.allowedActions, []);
   const guided = await npmPackage.runNpmExecPty([], { ...box, steps: [
     { waitFor: 'Action (recheck', beforeSend: () => writeFile(scenario, '{}'), send: 'recheck\n' },
-    { waitFor: 'Action (apply', send: 'apply\n' },
+    { waitFor: 'Action (install', send: 'apply\n' },
     { waitFor: 'Type yes', send: 'yes\n' },
   ] });
   assert.equal(guided.status, 0, guided.stdout + guided.stderr);
@@ -192,8 +192,8 @@ test('multiple installations require selection and confirmation EOF leaves the s
     targets.push(target);
   }
   const ambiguous = npmPackage.runNpmExec(['check', '--json'], box);
-  assert.equal(ambiguous.status, 2, ambiguous.stdout + ambiguous.stderr);
-  assert.equal(JSON.parse(ambiguous.stdout).diagnostics.at(-1).code, 'SELECTION_REQUIRED');
+  assert.equal(ambiguous.status, 0, ambiguous.stdout + ambiguous.stderr);
+  assert.equal(JSON.parse(ambiguous.stdout).data.inspections.length, 2);
   const guided = await npmPackage.runNpmExecPty([], { ...box, steps: [
     { waitFor: 'Select installation', send: '2\n' },
     { waitFor: 'Action', send: 'apply\n' },
@@ -217,7 +217,7 @@ test('guide offers only admitted actions and EOF never confirms a write', async 
   assert.equal(await readFile(target, 'utf8'), 'const unknown = true;');
 });
 
-test('default npm exec guide displays the selected target and cancels without changing installation', async t => {
+test('default npx guide displays the selected target and cancels without changing installation', async t => {
   const box = await packageBox(t);
   const app = join(box.directory, 'home/Applications/Guide.app');
   const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
@@ -234,4 +234,101 @@ test('default npm exec guide displays the selected target and cancels without ch
   assert.match(child.stdout, /Assumption:.*host contracts/);
   assert.match(child.stdout, /Cancelled/);
   assert.deepEqual(await readFile(target), source);
+});
+
+
+test('npx install and uninstall are repeatable and original uninstall needs no backup', async t => {
+  const box = await packageBox(t);
+  const app = join(box.directory, 'home/Applications/Public.app');
+  const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
+  await mkdir(join(target, '..'), { recursive: true });
+  const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
+  await writeFile(target, source);
+  const change = command => npmPackage.runNpmExecPty([command, '--app', app], {
+    ...box, steps: [{ waitFor: 'Type yes', send: 'yes\n' }],
+  });
+  const original = await change('uninstall');
+  assert.equal(original.status, 0, original.stdout + original.stderr);
+  assert.match(original.stdout, /Already uninstalled/);
+  await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
+  const installed = await change('install');
+  assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+  assert.match(installed.stdout, /install: success/);
+  assert.notDeepEqual(await readFile(target), source);
+  assert.match((await change('install')).stdout, /already-applied/);
+  const state = npmPackage.runNpmExec(['check', '--json'], box);
+  assert.equal(JSON.parse(state.stdout).data.inspections[0].state, 'tool-applied');
+  const removed = await change('uninstall');
+  assert.equal(removed.status, 0, removed.stdout + removed.stderr);
+  assert.match(removed.stdout, /uninstall: success/);
+  assert.deepEqual(await readFile(target), source);
+  assert.match((await change('uninstall')).stdout, /already-original/);
+});
+
+test('npx install and uninstall guide rollback then continue after interruptions', async t => {
+  const box = await packageBox(t);
+  const app = join(box.directory, 'home/Applications/Resume.app');
+  const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
+  await mkdir(join(target, '..'), { recursive: true });
+  const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
+  await writeFile(target, source);
+  const scenario = join(box.directory, 'boundary.json');
+  const change = (command, steps = [{ waitFor: 'Type yes', send: 'yes\n' }]) =>
+    npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps });
+  await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
+  assert.notEqual((await change('install')).status, 0);
+  await rm(scenario);
+  const patched = await readFile(target);
+  const cancelled = await change('install', [{ waitFor: 'Type yes to recover', send: 'no\n' }]);
+  assert.equal(cancelled.status, 0, cancelled.stdout + cancelled.stderr);
+  assert.deepEqual(await readFile(target), patched);
+  const steps = command => [
+    { waitFor: 'Type yes to recover', send: 'yes\n' },
+    { waitFor: `Type yes to ${command},`, send: 'yes\n' },
+  ];
+  const installed = await change('install', steps('install'));
+  assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+  assert.match(installed.stdout, /rolled-back/);
+  assert.match(installed.stdout, /install: success/);
+  assert.deepEqual(await readFile(target), patched);
+  await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
+  assert.notEqual((await change('uninstall')).status, 0);
+  await rm(scenario);
+  const removed = await change('uninstall', steps('uninstall'));
+  assert.equal(removed.status, 0, removed.stdout + removed.stderr);
+  assert.match(removed.stdout, /rolled-back/);
+  assert.match(removed.stdout, /uninstall: success/);
+  assert.deepEqual(await readFile(target), source);
+});
+
+
+test('blocked install exits unsuccessfully and cancelled continuation reports completed recovery', async t => {
+  const box = await packageBox(t);
+  const app = join(box.directory, 'home/Applications/Cancelled.app');
+  const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
+  await mkdir(join(target, '..'), { recursive: true });
+  await writeFile(target, 'const unsupported = true;');
+  const rejected = await npmPackage.runNpmExecPty(['install', '--app', app], {
+    ...box, steps: [{ waitFor: 'Action (recheck, cancel)', send: 'cancel\n' }],
+  });
+  assert.equal(rejected.status, 3, rejected.stdout + rejected.stderr);
+  const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
+  await writeFile(target, source);
+  const change = (command, steps = [{ waitFor: 'Type yes', send: 'yes\n' }]) =>
+    npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps });
+  assert.equal((await change('install')).status, 0);
+  const patched = await readFile(target);
+  const scenario = join(box.directory, 'boundary.json');
+  await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
+  assert.notEqual((await change('uninstall')).status, 0);
+  await rm(scenario);
+  assert.deepEqual(await readFile(target), source);
+  const cancelled = await change('uninstall', [
+    { waitFor: 'Type yes to recover', send: 'yes\n' },
+    { waitFor: 'Type yes to uninstall,', send: 'no\n' },
+  ]);
+  assert.equal(cancelled.status, 0, cancelled.stdout + cancelled.stderr);
+  assert.match(cancelled.stdout, /Recovery completed; subsequent action cancelled/);
+  assert.doesNotMatch(cancelled.stdout, /installation unchanged/);
+  assert.deepEqual(await readFile(target), patched);
 });
