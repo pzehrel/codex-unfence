@@ -8,10 +8,10 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Interactive stdin and stdout terminals are required for managed changes.');
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const lines = input[Symbol.asyncIterator]();
-  async function ask(prompt: string) {
+  async function ask(prompt: string, exact = false) {
     process.stdout.write(prompt);
     const line = await lines.next();
-    return line.done ? null : line.value.trim();
+    return line.done ? null : exact ? line.value : line.value.trim();
   }
   const publicName = (command: string) => command === 'apply' ? 'install' : command === 'restore' ? 'uninstall' : command;
   let recoveredOperation = false;
@@ -21,7 +21,13 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
   try {
     const discovery = await managed.discover(selection);
     for (const diagnostic of discovery.diagnostics) process.stdout.write(`[${diagnostic.code}] ${diagnostic.message}\n`);
-    if (!discovery.candidates.length) throw new Error('No CUA installation found; provide --app with its absolute path.');
+    if (!discovery.candidates.length) {
+      if (action !== 'install' && action !== 'uninstall') throw new Error('No CUA installation found; provide --app with its absolute path.');
+      const conflict = discovery.diagnostics.some(entry => ['PATH_ALIAS', 'IDENTITY_CHANGED', 'TARGET_CHANGED', 'UNTRUSTED_STORE'].includes(entry.code));
+      const result: OperationResult = { schemaVersion: 1, command: action, outcome: conflict ? 'conflict' : 'runtime-error', exitCode: conflict ? 4 : 1, data: null, diagnostics: [...discovery.diagnostics, { code: 'NO_INSTALLATIONS', severity: 'error', message: 'No CUA installation found; provide --app with its absolute path.' }] };
+      process.stdout.write(renderHuman(result));
+      return result;
+    }
     let candidate: Candidate | undefined = discovery.candidates[0];
     if (discovery.candidates.length > 1) {
       discovery.candidates.forEach((entry, index) => process.stdout.write(`${index + 1}. ${entry.appPath}\n`));
@@ -56,7 +62,7 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
         inspection = await managed.inspect(candidate);
         continue;
       }
-      if (requested === 'uninstall' && inspection.state === 'original' && !inspection.recovery && inspection.support === 'supported') {
+      if (requested === 'uninstall' && inspection.state === 'original' && !inspection.recovery && inspection.support === 'supported' && inspection.writeReadiness === 'ready') {
         process.stdout.write('uninstall: success\nAlready uninstalled; original file unchanged.\nRuntime: not-verified.\n');
         return null;
       }
@@ -77,7 +83,7 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
       for (const evidence of inspection.derivation?.evidence ?? []) process.stdout.write(`Support: ${evidence.description}\n`);
       for (const assumption of inspection.derivation?.assumptions ?? []) process.stdout.write(`Assumption: ${assumption}\n`);
       process.stdout.write(`Target: ${inspection.candidate.targetPath}\nScope: site-status response only; original request and predicate stay.\nBackups and recovery data remain private outside npm cache.\nChanging sealed resources invalidates the application signature; this tool does not sign it.\nExit the host and related services yourself before writing.\n${command === 'recover' ? 'Recover rolls back to the interrupted operation before state; it never continues apply or restore.\n' : ''}`);
-      const confirmed = await ask(`Type yes to ${publicName(command)}, anything else cancels: `);
+      const confirmed = await ask(`Type yes to ${publicName(command)}, anything else cancels: `, true);
       if (confirmed !== 'yes') { cancelled(); return null; }
       if (!inspection.inspectionToken) throw new Error('No verified inspection token; inspect again.');
       const result = await managed[command]({ candidate: inspection.candidate, inspectionToken: inspection.inspectionToken, confirmed: true });

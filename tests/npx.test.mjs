@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import test from 'node:test';
@@ -14,6 +14,26 @@ async function packageBox(t) {
   const cwd = join(directory, 'unrelated working directory');
   await mkdir(cwd);
   return { directory, cwd, tarball: join(directory, metadata.filename) };
+}
+
+async function syntheticInstallation(box, name) {
+  const app = join(box.directory, 'home/Applications', `${name}.app`);
+  const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
+  const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
+  await mkdir(join(target, '..'), { recursive: true });
+  await writeFile(target, source, { mode: 0o640 });
+  return { app, target, source };
+}
+
+async function snapshotFiles(directory) {
+  const snapshot = {};
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    snapshot[entry.name] = entry.isDirectory() ? await snapshotFiles(path) : {
+      bytes: await readFile(path), mode: (await stat(path)).mode & 0o7777,
+    };
+  }
+  return snapshot;
 }
 
 function help(result) {
@@ -72,7 +92,7 @@ test('offline npx exposes help through a real PTY and propagates the public bin 
   assert.equal(invalid.status, 2, invalid.stdout + invalid.stderr);
 });
 
-test('confirmed npx changes survive code-cache removal and repeated apply/restore', async t => {
+test('confirmed npx install and uninstall survive code-cache removal and repeated operations', async t => {
   const box = await packageBox(t);
   const app = join(box.directory, 'home/Applications/Lifecycle.app');
   const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
@@ -82,21 +102,21 @@ test('confirmed npx changes survive code-cache removal and repeated apply/restor
   const change = command => npmPackage.runNpmExecPty([command, '--app', app], {
     ...box, steps: [{ waitFor: 'Type yes', send: 'yes\n' }],
   });
-  const applied = await change('apply');
+  const applied = await change('install');
   assert.equal(applied.status, 0, applied.stdout + applied.stderr);
   assert.match(applied.stdout, /tool-applied \(applied\)/);
   const patched = await readFile(target);
   assert.notDeepEqual(patched, source);
-  assert.match((await change('apply')).stdout, /already-applied/);
+  assert.match((await change('install')).stdout, /already-applied/);
   const previous = JSON.parse(await readFile(join(box.directory, 'final-bin.json'), 'utf8')).entry;
   await rm(join(box.directory, 'npm-cache'), { recursive: true });
   await assert.rejects(readFile(previous), { code: 'ENOENT' });
   const status = npmPackage.runNpmExec(['status', '--app', app, '--json'], box);
   assert.equal(status.status, 0, status.stdout + status.stderr);
   assert.equal(JSON.parse(status.stdout).data.targets[0].state, 'tool-applied');
-  assert.match((await change('restore')).stdout, /original \(restored\)/);
+  assert.match((await change('uninstall')).stdout, /original \(restored\)/);
   assert.deepEqual(await readFile(target), source);
-  assert.match((await change('restore')).stdout, /already-original/);
+  assert.match((await change('uninstall')).stdout, /already-original/);
 });
 
 test('npx discovers interrupted apply after reacquisition and can recover after recovery is interrupted again', async t => {
@@ -145,7 +165,7 @@ test('npx refuses a target changed after inspection instead of applying to new b
   const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
   await writeFile(target, source);
   const changed = Buffer.concat([source, Buffer.from('\n// external change\n')]);
-  const child = await npmPackage.runNpmExecPty(['apply', '--app', app], { ...box, steps: [
+  const child = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [
     { waitFor: 'Type yes', beforeSend: () => writeFile(target, changed), send: 'yes\n' },
   ] });
   assert.equal(child.status, 4, child.stdout + child.stderr);
@@ -263,6 +283,250 @@ test('npx install and uninstall are repeatable and original uninstall needs no b
   assert.match(removed.stdout, /uninstall: success/);
   assert.deepEqual(await readFile(target), source);
   assert.match((await change('uninstall')).stdout, /already-original/);
+});
+
+test('npx uninstall of an original refuses running processes instead of reporting success', async t => {
+  const box = await packageBox(t);
+  const app = join(box.directory, 'home/Applications/BlockedOriginal.app');
+  const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
+  await mkdir(join(target, '..'), { recursive: true });
+  const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
+  await writeFile(target, source);
+  await writeFile(join(box.directory, 'boundary.json'), JSON.stringify({
+    processRows: [{ pid: 998877, executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' }],
+  }));
+  const child = await npmPackage.runNpmExecPty(['uninstall', '--app', app], {
+    ...box, steps: [{ waitFor: 'Action (recheck, cancel)', send: 'cancel\n' }],
+  });
+  assert.equal(child.status, 4, child.stdout + child.stderr);
+  assert.match(child.stdout, /PROCESSES_RUNNING/);
+  assert.doesNotMatch(child.stdout, /uninstall: success/);
+  assert.deepEqual(await readFile(target), source);
+  await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
+});
+
+test('npx install and uninstall report a missing explicit installation as runtime failure', async t => {
+  const box = await packageBox(t);
+  const app = join(box.directory, 'missing.app');
+  for (const command of ['install', 'uninstall']) {
+    const child = await npmPackage.runNpmExecPty([command, '--app', app], box);
+    assert.equal(child.status, 1, child.stdout + child.stderr);
+    assert.match(child.stdout, new RegExp(`${command}: runtime-error`));
+    assert.match(child.stdout, /ENOENT/);
+  }
+});
+
+test('npx install requires the exact yes confirmation and preserves bytes for other input and EOF', async t => {
+  const box = await packageBox(t);
+  const app = join(box.directory, 'home/Applications/Confirmation.app');
+  const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
+  await mkdir(join(target, '..'), { recursive: true });
+  const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
+  await writeFile(target, source);
+  for (const send of [' yes \n', 'YES\n', 'yes please\n', '\n', 'no\n', '\u0004']) {
+    const child = await npmPackage.runNpmExecPty(['install', '--app', app], {
+      ...box, steps: [{ waitFor: 'Type yes to install,', send }],
+    });
+    assert.equal(child.status, 0, child.stdout + child.stderr);
+    assert.match(child.stdout, /Cancelled; installation unchanged/);
+    assert.match(child.stdout, /Support:/);
+    assert.match(child.stdout, /Assumption:.*host contracts/);
+    assert.match(child.stdout, /signature/);
+    assert.ok(child.stdout.includes(`Target: ${target}`));
+    assert.deepEqual(await readFile(target), source);
+    await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
+  }
+});
+
+test('npx install and uninstall reject an aliased explicit installation as a conflict', async t => {
+  const box = await packageBox(t);
+  const app = join(box.directory, 'home/Applications/Canonical.app');
+  const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
+  await mkdir(join(target, '..'), { recursive: true });
+  const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
+  await writeFile(target, source);
+  const alias = join(box.directory, 'Alias.app');
+  await symlink(app, alias);
+  for (const command of ['install', 'uninstall']) {
+    const child = await npmPackage.runNpmExecPty([command, '--app', alias], box);
+    assert.equal(child.status, 4, child.stdout + child.stderr);
+    assert.match(child.stdout, /PATH_ALIAS/);
+    assert.doesNotMatch(child.stdout, /Type yes/);
+    assert.deepEqual(await readFile(target), source);
+  }
+});
+
+test('npx install and uninstall select among multiple installations and auto-select a single installation', async t => {
+  const box = await packageBox(t);
+  const first = await syntheticInstallation(box, 'First');
+  const second = await syntheticInstallation(box, 'Second');
+  const change = command => npmPackage.runNpmExecPty([command], { ...box, steps: [
+    { waitFor: 'Select installation number', send: '2\n' },
+    { waitFor: `Type yes to ${command},`, send: 'yes\n' },
+  ] });
+  const installed = await change('install');
+  assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+  assert.ok(installed.stdout.includes(`Target: ${second.target}`));
+  assert.deepEqual(await readFile(first.target), first.source);
+  assert.notDeepEqual(await readFile(second.target), second.source);
+  const removed = await change('uninstall');
+  assert.equal(removed.status, 0, removed.stdout + removed.stderr);
+  assert.deepEqual(await readFile(second.target), second.source);
+  await rm(second.app, { recursive: true });
+  const single = await npmPackage.runNpmExecPty(['install'], { ...box, steps: [
+    { waitFor: 'Type yes to install,', send: 'yes\n' },
+  ] });
+  assert.equal(single.status, 0, single.stdout + single.stderr);
+  assert.doesNotMatch(single.stdout, /Select installation number/);
+  assert.ok(single.stdout.includes(`Target: ${first.target}`));
+  assert.notDeepEqual(await readFile(first.target), first.source);
+});
+
+test('npx public writes reject pipes, JSON and relative app paths without creating recovery state', async t => {
+  const box = await packageBox(t);
+  const { app, target, source } = await syntheticInstallation(box, 'Noninteractive');
+  for (const command of ['install', 'uninstall']) {
+    const piped = npmPackage.runNpmExec([command, '--app', app], box);
+    assert.equal(piped.status, 2, piped.stdout + piped.stderr);
+    assert.match(piped.stdout, /interactive stdin\/stdout/);
+    const json = await npmPackage.runNpmExecPty([command, '--app', app, '--json'], box);
+    assert.equal(json.status, 2, json.stdout + json.stderr);
+    assert.equal(JSON.parse(json.stdout).outcome, 'usage-error');
+    const relative = await npmPackage.runNpmExecPty([command, '--app', 'Relative.app'], box);
+    assert.equal(relative.status, 2, relative.stdout + relative.stderr);
+    assert.match(relative.stdout, /absolute installation path/);
+  }
+  assert.deepEqual(await readFile(target), source);
+  await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
+});
+
+test('npx public writes refuse permissions and unknown process state with accurate exit codes', async t => {
+  const box = await packageBox(t);
+  const { app, target, source } = await syntheticInstallation(box, 'Readiness');
+  const scenario = join(box.directory, 'boundary.json');
+  const parent = join(target, '..');
+  const blocked = command => npmPackage.runNpmExecPty([command, '--app', app], {
+    ...box, steps: [{ waitFor: 'Action (recheck, cancel)', send: 'cancel\n' }],
+  });
+  await chmod(parent, 0o500);
+  try {
+    for (const command of ['install', 'uninstall']) {
+      const child = await blocked(command);
+      assert.equal(child.status, 4, child.stdout + child.stderr);
+      assert.match(child.stdout, /TARGET_NOT_WRITABLE/);
+    }
+  } finally { await chmod(parent, 0o700); }
+  await writeFile(scenario, JSON.stringify({ processFailure: true }));
+  for (const command of ['install', 'uninstall']) {
+    const child = await blocked(command);
+    assert.equal(child.status, 1, child.stdout + child.stderr);
+    assert.match(child.stdout, /PROCESS_ENUMERATION_FAILED/);
+  }
+  assert.deepEqual(await readFile(target), source);
+  await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
+});
+
+test('npx public writes preserve an externally replaced identity even when bytes are unchanged', async t => {
+  const box = await packageBox(t);
+  const { app, target, source } = await syntheticInstallation(box, 'Identity');
+  const before = await stat(target);
+  const installed = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [{
+    waitFor: 'Type yes to install,', send: 'yes\n', beforeSend: async () => {
+      await rename(target, join(box.directory, 'retained-original.mjs'));
+      await writeFile(target, source, { mode: 0o640 });
+    },
+  }] });
+  assert.equal(installed.status, 4, installed.stdout + installed.stderr);
+  assert.match(installed.stdout, /INSPECTION_CHANGED/);
+  assert.notEqual((await stat(target)).ino, before.ino);
+  assert.deepEqual(await readFile(target), source);
+  const confirmed = await npmPackage.runNpmExecPty(['install', '--app', app], {
+    ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }],
+  });
+  assert.equal(confirmed.status, 0, confirmed.stdout + confirmed.stderr);
+  const patched = await readFile(target);
+  const appliedIdentity = await stat(target);
+  await rename(target, join(box.directory, 'retained-patched.mjs'));
+  await writeFile(target, patched, { mode: 0o640 });
+  assert.notEqual((await stat(target)).ino, appliedIdentity.ino);
+  const refused = await npmPackage.runNpmExecPty(['uninstall', '--app', app], {
+    ...box, steps: [{ waitFor: 'Action (recheck, cancel)', send: 'cancel\n' }],
+  });
+  assert.equal(refused.status, 4, refused.stdout + refused.stderr);
+  assert.match(refused.stdout, /TARGET_CONFLICT/);
+  assert.deepEqual(await readFile(target), patched);
+});
+
+test('npx install and uninstall keep independent private recovery and coordination namespaces', async t => {
+  const box = await packageBox(t);
+  const { app, target, source } = await syntheticInstallation(box, 'Namespaces');
+  const oldRecovery = join(box.directory, 'home/Library/Application Support/codex-browser-liberation-patch');
+  const oldCoordination = join(box.directory, 'home/.codex-browser-patch');
+  for (const directory of [oldRecovery, oldCoordination]) {
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, 'key'), 'unreadable old recovery data');
+    await chmod(directory, 0);
+  }
+  try {
+    const change = command => npmPackage.runNpmExecPty([command, '--app', app], {
+      ...box, steps: [{ waitFor: `Type yes to ${command},`, send: 'yes\n' }],
+    });
+    const installed = await change('install');
+    assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+    assert.equal((await stat(target)).mode & 0o7777, 0o640);
+    const state = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
+    assert.equal(state.status, 0, state.stdout + state.stderr);
+    const recovery = JSON.parse(state.stdout).data.inspection.recovery;
+    assert.deepEqual(recovery.tool, { packageName: 'codex-unfence', version: '0.2.0', executable: 'codex-unfence' });
+    assert.equal(recovery.command, 'npx --package codex-unfence@0.2.0 codex-unfence');
+    const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
+    inside(root, recovery.preparation);
+    inside(root, recovery.store);
+    assert.equal((await stat(root)).mode & 0o777, 0o700);
+    assert.equal((await stat(join(root, 'key'))).mode & 0o777, 0o600);
+    assert.deepEqual(await readFile(join(recovery.preparation, 'source.original.mjs')), source);
+    assert.deepEqual(await readdir(join(target, '..')), ['browser-service.mjs']);
+    const leases = join(box.directory, 'home/.codex-unfence/target-leases');
+    assert.equal((await stat(leases)).mode & 0o777, 0o700);
+    assert.equal((await readdir(leases)).length, 1);
+    const removed = await change('uninstall');
+    assert.equal(removed.status, 0, removed.stdout + removed.stderr);
+    assert.deepEqual(await readFile(target), source);
+    assert.equal((await stat(target)).mode & 0o7777, 0o640);
+  } finally {
+    for (const directory of [oldRecovery, oldCoordination]) await chmod(directory, 0o700);
+  }
+  for (const directory of [oldRecovery, oldCoordination]) {
+    assert.deepEqual(await readdir(directory), ['key']);
+    assert.equal(await readFile(join(directory, 'key'), 'utf8'), 'unreadable old recovery data');
+  }
+});
+
+test('npx uninstall cancellation preserves patched bytes and every recovery artifact', async t => {
+  const box = await packageBox(t);
+  const { app, target } = await syntheticInstallation(box, 'CancelUninstall');
+  const installed = await npmPackage.runNpmExecPty(['install', '--app', app], {
+    ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }],
+  });
+  assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+  const patched = await readFile(target);
+  const identity = await stat(target);
+  const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
+  const before = await snapshotFiles(root);
+  for (const send of [' yes \n', 'YES\n', 'no\n', '\u0004']) {
+    const child = await npmPackage.runNpmExecPty(['uninstall', '--app', app], {
+      ...box, steps: [{ waitFor: 'Type yes to uninstall,', send }],
+    });
+    assert.equal(child.status, 0, child.stdout + child.stderr);
+    assert.match(child.stdout, /Cancelled; installation unchanged/);
+    assert.match(child.stdout, /Recovery tool: codex-unfence@0.2.0; executable: codex-unfence/);
+    for (const notice of ['Support:', 'Assumption:', 'Scope:', 'signature']) {
+      assert.ok(child.stdout.indexOf(notice) >= 0 && child.stdout.indexOf(notice) < child.stdout.indexOf('Type yes to uninstall,'), notice);
+    }
+    assert.deepEqual(await readFile(target), patched);
+    assert.equal((await stat(target)).ino, identity.ino);
+    assert.deepEqual(await snapshotFiles(root), before);
+  }
 });
 
 test('npx install and uninstall guide rollback then continue after interruptions', async t => {
