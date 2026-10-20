@@ -81,7 +81,10 @@ async function stateRoot(target: string, create: boolean): Promise<ReturnType<ty
     const path = join(paths.root, name);
     if (create) await privateDirectory(path);
     if (await exists(path)) await stateDirectory(path);
-    else return null;
+    else {
+      check(!await exists(paths.locator), 'RECOVERY_MATERIAL_MISSING', 'A managed target record exists but its recovery directories are missing.', path);
+      return null;
+    }
   }
   const keyPath = join(paths.root, 'key');
   if (create && !await exists(keyPath)) {
