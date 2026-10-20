@@ -8,7 +8,13 @@ Node.js >=22.13.0；无需真实安装即可测试。构建并生成带 bundled 
 
 ```bash
 npm ci --ignore-scripts
+```
+
+```bash
 npm run build
+```
+
+```bash
 npm pack --ignore-scripts
 ```
 
@@ -19,6 +25,20 @@ npm exec --offline --yes --package /absolute/path/codex-browser-liberation-patch
 ```
 
 新入口按准确安装路径检查、选择和明确确认。准备副本、目标记录、工具版本及可信 store 由 managed 层管理，位于账户主目录的 `Library/Application Support/codex-browser-liberation-patch/`，独立于临时代码和 npm cache。check 完全只读；`support`、`state`、`writeReadiness`、`allowedActions` 与 `runtime` 各有含义。incomplete 时可以只允许 recover，不能用全局 blocked 状态推断 recover 永不可用。新写命令拒绝非 TTY、EOF 自动确认和 `--json` 自动化写入；旧显式语法保留原契约。
+
+### 结构模式与假设
+
+当前新方案只接受有限的专用站点状态模式：请求来源与运输调用、同一响应的 `ok` 与无参 await `json()`、原 body 到 agent 严格 true 判定，再到原缓存／inflight 和对应阻断消费链。相关绑定、接收者与可见写入必须满足模式；未知相关语义、多个候选和额外消费会拒绝。不按变量名、桌面版本或历史整文件哈希准入。
+
+对于包含 ZXing 的关联形态，仅识别同一 local factory 的有限资源加载与解码接口：configure／decoder wrapper 绑定、明确 `./zxing_reader.wasm` 及既有 `node_modules/zxing-wasm/dist/reader/zxing_reader.wasm` fallback、读取字节经 `Uint8Array` 拷贝到 `overrides.wasmBinary`、factory 内两方法 handle table、global-selector arrow 唯一作为 imports slot，并将 imports 关联到同一 factory 的 instantiate／instantiateStreaming（直接或有限 builder）。decoder 等待同一 prepare(factory,...)，再使用同一 module 的 `_malloc`、`HEAPU8`、`readBarcodesFromPixmap` 或 `readBarcodesFromImage`、`_free`。这不是对任意 ZXing 桥的普遍准入。
+
+标准 URL／Map／Date／Object／Reflect／Error／JSON、runtime.fetch 和 response.json 按宿主契约行为；有限终端 formatter、bypass、display、origin、log 和 Error 构造保留原调用与返回用途，但展示和遥测行为不递归审计。文件内可见相关修改仍拒绝。特定资源与桥的核心前提按公开派生结果原文为：
+
+> Only the linked finite ZXing reader resource and host bridge are assumed not to mutate the site-status chain, its configuration or standard capabilities throughout their lifetime; this noninterference is not proved. Resource bytes are not read or executed.
+
+即只对已关联的有限资源与桥假设生命周期非干扰；没有证明完整依赖生命周期，也不读取或执行 Wasm。人类 check 和写前确认都会显示依据与假设。
+
+结构任务在 `9756b61` 上通过 30 个纯行为测试，并仅以数据读取和解析既存历史私有副本：1,938,669 bytes，SHA-256 `44594ea0a8238c09dfb46e28acdd610e5053a05011047e1c78fb98f210195a4e`，结果为 supported、7 项 evidence，动态 UTF-16 半开范围 `[1084567,1084585)`。该结果由结构任务报告，不代表重新读取当前安装；不执行真实插件或资源，不验证当前安装、签名、宿主加载和网站行为，runtime 仍为 not-verified。哈希与区间仅记录该次样本事实，不成为准入常量。
 
 ### 高级旧入口
 
@@ -41,6 +61,9 @@ codex-browser-patch recover --store ABSOLUTE_STORE [--json]
 
 ```bash
 npm run check -- --base <implementation-base>
+```
+
+```bash
 npm run test:package
 ```
 
