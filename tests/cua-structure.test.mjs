@@ -123,6 +123,46 @@ test('refuses destructured and global-root aliases that modify standard capabili
   }
 });
 
+test('refuses standard capability mutation through aliases formed by ordinary assignment', () => {
+  for (const prefix of [
+    'let standard; standard = URL; standard.prototype.toString = () => "changed";',
+    'let globals; globals = globalThis; globals.URL.prototype.toString = () => "changed";',
+    'let first, second; second = first; first = URL; second.prototype.toString = () => "changed";',
+  ]) {
+    const result = deriveCua(prefix + fixture);
+    assert.equal(result.support, 'unsupported', prefix);
+    assert.equal(result.change, null);
+    assert.equal(result.diagnostics[0].code, 'CAPABILITY_MUTATION');
+  }
+});
+
+test('refuses standard capability mutation through destructuring assignments', () => {
+  for (const prefix of [
+    'let standard; ({URL: standard} = globalThis); standard.prototype.toString = () => "changed";',
+    'let original; ({prototype: original} = URL); original.toString = () => "changed";',
+    'let globals; ({globalThis: globals} = globalThis); globals.URL.prototype.toString = () => "changed";',
+    'let globals, standard; globals = globalThis; ({URL: standard} = globals); standard.prototype.toString = () => "changed";',
+  ]) {
+    const result = deriveCua(prefix + fixture);
+    assert.equal(result.support, 'unsupported', prefix);
+    assert.equal(result.change, null);
+    assert.equal(result.diagnostics[0].code, 'CAPABILITY_MUTATION');
+  }
+});
+
+test('permits assignments that do not mutate or expose related capabilities', () => {
+  for (const prefix of [
+    'let local; local = {}; local.syntheticFlag = true;',
+    'let standard; standard = URL;',
+    'let globals; globals = globalThis; globals.syntheticFlag = true;',
+    'let local; ({syntheticState: local} = globalThis); local.syntheticFlag = true;',
+    'let standard; ({URL: standard} = globalThis);',
+  ]) {
+    const result = deriveCua(prefix + fixture);
+    assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+  }
+});
+
 function renamed(source, prefix) {
   const program = parse(source, { ecmaVersion: 2022, sourceType: 'module', ranges: true });
   const scopes = analyze(program, { ecmaVersion: 2022, sourceType: 'module' });
@@ -170,6 +210,14 @@ test('refuses another plausible site-status channel even when only one is fully 
   assert.equal(result.change, null);
 });
 
+test('refuses a second site-status chain with a statically computed transport property', () => {
+  const second = renamed(fixture.replaceAll('runtime.fetch', 'runtime["fetch"]'), 'computedFetch').replace("import { basename } from 'node:path';", '');
+  const result = deriveCua(fixture + '\n' + second);
+  assert.equal(result.support, 'unsupported');
+  assert.equal(result.change, null);
+  assert.equal(result.diagnostics[0].code, 'UNPROVEN_CANDIDATE');
+});
+
 test('refuses ambiguity, unknown response interfaces, changed provenance, receivers and boolean semantics', () => {
   const cases = [
     fixture + renamed(fixture, 'another').replace("import { basename } from 'node:path';", ''),
@@ -192,6 +240,21 @@ test('refuses ambiguity, unknown response interfaces, changed provenance, receiv
     assert.equal(result.change, null);
     assert.ok(result.diagnostics.length);
   }
+});
+
+test('refuses wrapper standard names captured by bindings at the injection scope', () => {
+  for (const name of ['Object', 'Reflect']) {
+    for (const source of [
+      `const ${name} = {};\n` + fixture,
+      fixture.replace('async function transport(runtime, endpoint, options)', `async function transport(runtime, endpoint, ${name})`).replace('return await runtime.fetch(endpoint, options)', `return await runtime.fetch(endpoint, ${name})`),
+    ]) {
+      const result = deriveCua(source);
+      assert.equal(result.support, 'unsupported', name);
+      assert.equal(result.change, null);
+      assert.equal(result.diagnostics[0].code, 'WRAPPER_BINDING');
+    }
+  }
+  assert.equal(deriveCua('function unrelatedScope(Object, Reflect) { return [Object, Reflect]; }\n' + fixture).support, 'supported');
 });
 
 test('returns parse diagnostics for invalid and unsupported syntax without throwing', () => {
@@ -331,6 +394,16 @@ test('rejects disconnected or changed reader bridges and additional capability e
   }
   const renamedResult = deriveCua(fixture + renamed(readerFixture, 'reader'));
   assert.equal(renamedResult.support, 'supported', JSON.stringify(renamedResult.diagnostics));
+});
+
+test('refuses dynamic reader calls whose property binding only resembles instantiation', () => {
+  for (const name of ['instantiate', 'instantiateStreaming']) {
+    const reader = readerFixture.replace('const module = await WebAssembly.instantiate(', `const ${name} = "notInstantiation"; const module = await WebAssembly[${name}](`);
+    const result = deriveCua(fixture + reader);
+    assert.equal(result.support, 'unsupported', name);
+    assert.equal(result.change, null);
+    assert.equal(result.diagnostics[0].code, 'CAPABILITY_ESCAPE');
+  }
 });
 
 test('refuses reader imports detached from resource instantiation', () => {

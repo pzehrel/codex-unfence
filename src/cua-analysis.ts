@@ -441,7 +441,7 @@ class Match {
     // Slot must be inside the factory's imports object, not returned independently.
     while (imports && context.parents.get(imports)?.type === 'Property') imports = context.parents.get(context.parents.get(imports)!);
     if (imports?.type !== 'ObjectExpression') return false;
-    const instantiate = (node: E.Node): boolean => node.type === 'CallExpression' && node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier' && node.callee.object.name === 'WebAssembly' && !binding(node.callee.object) && node.callee.property.type === 'Identifier' && ['instantiate', 'instantiateStreaming'].includes(node.callee.property.name) && node.arguments.length === 2;
+    const instantiate = (node: E.Node): boolean => node.type === 'CallExpression' && node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier' && node.callee.object.name === 'WebAssembly' && !binding(node.callee.object) && !node.callee.computed && node.callee.property.type === 'Identifier' && ['instantiate', 'instantiateStreaming'].includes(node.callee.property.name) && node.arguments.length === 2;
     const importsDeclaration = context.parents.get(imports);
     let linkedImports = false;
     if (importsDeclaration?.type === 'VariableDeclarator' && importsDeclaration.id.type === 'Identifier') {
@@ -568,20 +568,22 @@ class Match {
     while (changed) {
       changed = false;
       for (const node of this.context.nodes) {
-        if (node.type !== 'VariableDeclarator' || !node.init) continue;
-        if (node.id.type === 'Identifier') {
-          const binding = this.context.bindings.get(node.id);
-          if (binding && root(node.init) && !capabilities.has(binding)) { capabilities.add(binding); changed = true; }
-          if (binding && globalRoot(node.init) && !globalAliases.has(binding)) { globalAliases.add(binding); changed = true; }
-        } else if (node.id.type === 'ObjectPattern' && (root(node.init) || globalRoot(node.init))) {
-          for (const item of node.id.properties) {
+        const target = node.type === 'VariableDeclarator' ? node.id : node.type === 'AssignmentExpression' && node.operator === '=' ? node.left : null;
+        const value = node.type === 'VariableDeclarator' ? node.init : node.type === 'AssignmentExpression' && node.operator === '=' ? node.right : null;
+        if (!target || !value) continue;
+        if (target.type === 'Identifier') {
+          const binding = this.context.bindings.get(target);
+          if (binding && root(value) && !capabilities.has(binding)) { capabilities.add(binding); changed = true; }
+          if (binding && globalRoot(value) && !globalAliases.has(binding)) { globalAliases.add(binding); changed = true; }
+        } else if (target.type === 'ObjectPattern' && (root(value) || globalRoot(value))) {
+          for (const item of target.properties) {
             need(item.type === 'Property' && !item.computed && item.value.type === 'Identifier', 'CAPABILITY_ALIAS', 'Dynamic capability destructuring is unsupported.', item);
             const name = item.key.type === 'Identifier' ? item.key.name : item.key.type === 'Literal' ? item.key.value : null;
-            if (globalRoot(node.init) && ['globalThis', 'global', 'window', 'self'].includes(String(name))) {
+            if (globalRoot(value) && ['globalThis', 'global', 'window', 'self'].includes(String(name))) {
               const binding = this.context.bindings.get(item.value);
               if (binding && !globalAliases.has(binding)) { globalAliases.add(binding); changed = true; }
             }
-            if (root(node.init) || standards.has(String(name))) {
+            if (root(value) || standards.has(String(name))) {
               const binding = this.context.bindings.get(item.value);
               if (binding && !capabilities.has(binding)) { capabilities.add(binding); changed = true; }
             }
@@ -592,7 +594,7 @@ class Match {
     for (const node of this.context.nodes) {
       if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && ['eval', 'Function'].includes(node.callee.name) && !this.context.bindings.has(node.callee)) throw new Unsupported('DYNAMIC_SCOPE', 'Dynamic code can mutate the related chain.', node);
       const written = node.type === 'AssignmentExpression' ? node.left : node.type === 'UpdateExpression' ? node.argument : node.type === 'UnaryExpression' && node.operator === 'delete' ? node.argument : null;
-      need(!written || !root(written), 'CAPABILITY_MUTATION', 'Visible mutation of a standard capability or its alias is unsupported.', written ?? undefined);
+      need(!written || written.type === 'Identifier' && this.context.bindings.has(written) || !root(written), 'CAPABILITY_MUTATION', 'Visible mutation of a standard capability or its alias is unsupported.', written ?? undefined);
       if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression') {
         const key = node.callee.computed ? node.callee.property.type === 'Literal' ? node.callee.property.value : null : node.callee.property.type === 'Identifier' ? node.callee.property.name : null;
         const reflective = ['defineProperty', 'defineProperties', 'setPrototypeOf', 'assign', 'set', 'deleteProperty'].includes(String(key));
@@ -686,6 +688,11 @@ function prove(context: SourceContext, transport: E.FunctionDeclaration): { targ
   match.closeReferences();
   const target = context.nodes.find(node => node.type === 'AwaitExpression' && inside(node, transport));
   need(target, 'NO_TARGET', 'Missing awaited transport expression.', transport);
+  // The serialized wrapper introduces these free names at the transport site.
+  // Reject lexical capture even when the original chain never reads them.
+  for (let scope = context.scopeManager.acquire(transport); scope; scope = scope.upper) {
+    need(!['Object', 'Reflect'].some(name => scope.set.has(name)), 'WRAPPER_BINDING', 'Wrapper standard capabilities must resolve to host globals at the injection scope.', target);
+  }
   const evidence: Evidence[] = [
     { kind: 'source', range: range(match.roots.get('requestFor')!), description: 'Finite URL filtering, normalized cache key and site-status endpoint with conversation/turn/source provenance.' },
     { kind: 'transport', range: range(transport), description: 'Unique guarded member fetch preserves runtime receiver, endpoint, GET options and original await.' },
@@ -706,7 +713,7 @@ export function deriveCua(source: string): CuaDerivation {
     const parsed = parseSourceContext(source);
     need(parsed.context, 'PARSE_ERROR', parsed.parseError ?? 'Invalid JavaScript.');
     const context = parsed.context;
-    const candidates = context.nodes.filter((node): node is E.FunctionDeclaration => node.type === 'FunctionDeclaration' && node.async === true && context.nodes.some(child => child.type === 'AwaitExpression' && inside(child, node) && child.argument.type === 'CallExpression' && child.argument.callee.type === 'MemberExpression' && !child.argument.callee.computed && child.argument.callee.property.type === 'Identifier' && child.argument.callee.property.name === 'fetch'));
+    const candidates = context.nodes.filter((node): node is E.FunctionDeclaration => node.type === 'FunctionDeclaration' && node.async === true && context.nodes.some(child => child.type === 'AwaitExpression' && inside(child, node) && child.argument.type === 'CallExpression' && child.argument.callee.type === 'MemberExpression' && (child.argument.callee.computed ? child.argument.callee.property.type === 'Literal' && child.argument.callee.property.value === 'fetch' : child.argument.callee.property.type === 'Identifier' && child.argument.callee.property.name === 'fetch')));
     need(candidates.length, 'NO_TARGET', 'No dedicated awaited member-fetch transport found.');
     const proofs: ReturnType<typeof prove>[] = [];
     const failures: Unsupported[] = [];
