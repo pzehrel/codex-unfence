@@ -200,6 +200,71 @@ class Match {
     return actual;
   }
 
+  private initialized(identifier: E.Identifier): void {
+    const parent = this.context.parents.get(identifier);
+    const top = parent?.type === 'VariableDeclarator' ? this.context.parents.get(this.context.parents.get(parent)!) : null;
+    if (top === this.context.program) return;
+    const initializer = enclosing(this.context, identifier, 'ArrowFunctionExpression');
+    need(initializer?.type === 'ArrowFunctionExpression', 'CONFIGURATION_INITIALIZATION', 'Configuration needs a top-level constant or finite once initializer.', identifier);
+    let position: E.Node = identifier;
+    while (this.context.parents.get(position)?.type === 'AssignmentExpression' || this.context.parents.get(position)?.type === 'SequenceExpression') position = this.context.parents.get(position)!;
+    const assignmentStatement = this.context.parents.get(position);
+    need(assignmentStatement?.type === 'ExpressionStatement' && this.context.parents.get(assignmentStatement) === initializer.body, 'CONFIGURATION_INITIALIZATION', 'Configuration assignment must be unconditional in its initializer.', identifier);
+    const creation = this.context.parents.get(initializer);
+    need(creation?.type === 'CallExpression' && creation.arguments.length === 1 && creation.arguments[0] === initializer && creation.callee.type === 'Identifier', 'CONFIGURATION_INITIALIZATION', 'Deferred configuration must use a local once constructor.', initializer);
+    const once = this.context.bindings.get(creation.callee), onceDefinition = once && definition(once);
+    need(onceDefinition?.type === 'VariableDeclarator' && onceDefinition.init?.type === 'ArrowFunctionExpression', 'CONFIGURATION_INITIALIZATION', 'Unknown once constructor.', creation);
+    // The finite once combinator is matched structurally, including task clearing.
+    const parsed = parseSourceContext('const once = (task, value) => () => (task && (value = task(task = 0)), value);').context!;
+    const canonical = parsed.nodes.find(node => node.type === 'ArrowFunctionExpression')!;
+    const alpha = (expected: E.Node, actual: E.Node, names = new Map<string, string>()): boolean => {
+      if (expected.type !== actual.type) return false;
+      if (expected.type === 'Identifier' && actual.type === 'Identifier') {
+        const previous = names.get(expected.name);
+        if (previous) return previous === actual.name;
+        if ([...names.values()].includes(actual.name)) return false;
+        names.set(expected.name, actual.name); return true;
+      }
+      for (const [key, value] of Object.entries(expected)) {
+        if (['start', 'end', 'range', 'loc', 'raw'].includes(key)) continue;
+        const other = (actual as unknown as Record<string, unknown>)[key];
+        if (Array.isArray(value)) {
+          if (!Array.isArray(other) || other.length !== value.length || !value.every((item: E.Node, index) => alpha(item, other[index] as E.Node, names))) return false;
+        } else if (value && typeof value === 'object' && 'type' in value) {
+          if (!other || typeof other !== 'object' || !('type' in other) || !alpha(value as E.Node, other as E.Node, names)) return false;
+        } else if (value !== other) return false;
+      }
+      return true;
+    };
+    need(alpha(canonical, onceDefinition.init), 'CONFIGURATION_INITIALIZATION', 'Once constructor differs from supported task-clearing semantics.', onceDefinition);
+    need(once!.references.every(ref => ref.isRead() || ref.init), 'CONFIGURATION_INITIALIZATION', 'Once constructor is reassigned.', onceDefinition);
+    const output = this.context.parents.get(creation);
+    need(output?.type === 'VariableDeclarator' && output.id.type === 'Identifier', 'CONFIGURATION_INITIALIZATION', 'Initializer must have a local binding.', creation);
+    const reachable = (binding: Variable, seen: Set<Variable>): boolean => {
+      if (seen.has(binding)) return false;
+      seen.add(binding);
+      for (const ref of binding.references) {
+        if (!ref.isRead()) { need(ref.init, 'CONFIGURATION_INITIALIZATION', 'Initializer binding is reassigned.', ref.identifier); continue; }
+        const call = this.context.parents.get(ref.identifier);
+        need(call?.type === 'CallExpression' && call.callee === ref.identifier && !call.arguments.length, 'CONFIGURATION_INITIALIZATION', 'Initializer escapes or has unknown arguments.', ref.identifier);
+        const statement = this.context.parents.get(call);
+        if (statement?.type === 'ExpressionStatement' && this.context.parents.get(statement) === this.context.program) {
+          const instance = definition(this.binding('policy'));
+          if (instance && range(statement).end < range(instance).start) return true;
+        }
+        const fn = enclosing(this.context, call, 'ArrowFunctionExpression');
+        const invoke = fn && this.context.parents.get(fn), declaration = invoke && this.context.parents.get(invoke);
+        if (invoke?.type === 'CallExpression' && invoke.callee.type === 'Identifier' && this.context.bindings.get(invoke.callee) === once && declaration?.type === 'VariableDeclarator' && declaration.id.type === 'Identifier') {
+          const outer = this.context.bindings.get(declaration.id);
+          if (outer && reachable(outer, seen)) return true;
+        }
+      }
+      return false;
+    };
+    const binding = this.context.bindings.get(output.id);
+    need(binding && reachable(binding, new Set()), 'CONFIGURATION_INITIALIZATION', 'Configuration initializer is not reached by an unconditional module call.', identifier);
+  }
+
   completeHelpers(): void {
     for (const name of ['agentBlocked', 'enabled', 'isRecord', 'requestFor', 'localHost', 'displayUrl', 'endpointFor', 'getMetadata']) {
       const actual = definition(this.binding(name));
@@ -214,6 +279,7 @@ class Match {
       const parent = this.context.parents.get(identifier);
       const initializer = parent?.type === 'VariableDeclarator' ? parent.init : parent?.type === 'AssignmentExpression' && parent.operator === '=' ? parent.right : null;
       need(initializer?.type === 'Literal' && initializer.value === value, 'REQUEST_CONFIGURATION', 'Related configuration value is outside the finite pattern.', parent ?? identifier);
+      this.initialized(identifier);
       this.matched.add(identifier);
     }
     const ttl = definition(this.binding('ttl'));
@@ -221,7 +287,43 @@ class Match {
     this.match('ttl', ttl);
   }
 
+  private capabilityEffects(): void {
+    const standards = new Set(['URL', 'Map', 'Date', 'Object', 'Reflect', 'JSON', 'Error']);
+    const capabilities = new Set<Variable>();
+    const root = (node: E.Node): boolean => {
+      if (node.type === 'Identifier') {
+        const binding = this.context.bindings.get(node);
+        return binding ? capabilities.has(binding) : standards.has(node.name) || ['globalThis', 'global', 'window', 'self'].includes(node.name);
+      }
+      return node.type === 'MemberExpression' && root(node.object);
+    };
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const node of this.context.nodes) {
+        if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier' && node.init && root(node.init)) {
+          const binding = this.context.bindings.get(node.id);
+          if (binding && !capabilities.has(binding)) { capabilities.add(binding); changed = true; }
+        }
+      }
+    }
+    for (const node of this.context.nodes) {
+      if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && ['eval', 'Function'].includes(node.callee.name) && !this.context.bindings.has(node.callee)) throw new Unsupported('DYNAMIC_SCOPE', 'Dynamic code can mutate the related chain.', node);
+      const written = node.type === 'AssignmentExpression' ? node.left : node.type === 'UpdateExpression' ? node.argument : node.type === 'UnaryExpression' && node.operator === 'delete' ? node.argument : null;
+      need(!written || !root(written), 'CAPABILITY_MUTATION', 'Visible mutation of a standard capability or its alias is unsupported.', written ?? undefined);
+      if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression') {
+        const key = node.callee.computed ? node.callee.property.type === 'Literal' ? node.callee.property.value : null : node.callee.property.type === 'Identifier' ? node.callee.property.name : null;
+        const reflective = ['defineProperty', 'defineProperties', 'setPrototypeOf', 'assign', 'set', 'deleteProperty'].includes(String(key));
+        need(!reflective || !node.arguments.some(argument => root(argument)), 'CAPABILITY_MUTATION', 'Reflective modification of a related standard capability is unsupported.', node);
+      }
+      if (!this.matched.has(node) && node.type === 'CallExpression') {
+        need(!node.arguments.some(argument => root(argument)), 'CAPABILITY_ESCAPE', 'A standard capability escapes to an unknown local call.', node);
+      }
+    }
+  }
+
   closeReferences(): void {
+    this.capabilityEffects();
     for (const binding of this.bindings.values()) {
       for (const reference of binding.references) {
         need(this.matched.has(reference.identifier), 'RELATED_ESCAPE', 'A related binding has an additional use, assignment or escaped receiver.', reference.identifier);
@@ -277,7 +379,7 @@ function prove(context: SourceContext, transport: E.FunctionDeclaration): { targ
     { kind: 'source', range: range(match.roots.get('requestFor')!), description: 'Finite URL filtering, normalized cache key and site-status endpoint with conversation/turn/source provenance.' },
     { kind: 'transport', range: range(transport), description: 'Unique guarded member fetch preserves runtime receiver, endpoint, GET options and original await.' },
     { kind: 'response', range: range(owner), description: 'Same response supplies ok and awaited no-argument json; unchanged body reaches strict agent predicate.' },
-    { kind: 'predicate', range: range(match.roots.get('enabled')!), description: 'Own response chain uses feature_status and the initialized agent key with strict true comparison.' },
+    { kind: 'predicate', range: range(match.roots.get('enabled')!), description: 'Original predicate reads feature_status and the initialized agent key with strict true comparison; wrapper own-data constraints are separate.' },
     { kind: 'consumption', range: range(consumer), description: 'Blocked result flows through unchanged cache/inflight and a corresponding throwing guard.' },
     { kind: 'receiver', range: range(owner), description: 'Finite class state, default constructor, unique local instance and closed related lexical references.' },
   ];
