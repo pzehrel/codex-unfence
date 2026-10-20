@@ -1,6 +1,6 @@
 {
   "name": "codex-browser-liberation-patch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Structural review plans and recoverable transactions for Codex browser plugins on macOS",
   "type": "module",
   "bin": {
@@ -21,6 +21,15 @@
     "dist/loader-configuration-proof.js",
     "dist/handle-provenance.js",
     "dist/cli.js",
+    "dist/managed-cli.js",
+    "dist/guide.js",
+    "dist/cua-contract.js",
+    "dist/cua-analysis.js",
+    "dist/cua-recipe.js",
+    "dist/cua-admission.js",
+    "dist/installations.js",
+    "dist/managed-patches.js",
+    "dist/managed-state.js",
     "dist/discovery.js",
     "dist/integrity.js",
     "dist/plan.js",

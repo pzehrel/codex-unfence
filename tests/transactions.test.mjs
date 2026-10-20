@@ -3,7 +3,7 @@ import { createHmac } from 'node:crypto';
 import { runCli, startCli } from './helpers/cli.mjs';
 import { once } from 'node:events';
 import { setTimeout } from 'node:timers';
-import { access, chmod, link, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, link, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +23,17 @@ async function sandbox(t) {
   const prepared = run(box, ['prepare', '--plugin-root', join(directory, 'plugins'), '--target', target, '--output', box.plan]);
   assert.equal(prepared.status, 0, prepared.stdout + prepared.stderr);
   return box;
+}
+
+async function replaceIdentity(box) {
+  const bytes = await readFile(box.target);
+  const before = await stat(box.target, { bigint: true });
+  // Keep the old inode allocated so filesystems cannot reuse it for the replacement.
+  await rename(box.target, join(box.directory, 'previous-target.mjs'));
+  await writeFile(box.target, bytes, { mode: 0o640 });
+  const after = await stat(box.target, { bigint: true });
+  assert.equal(after.dev, before.dev);
+  assert.notEqual(after.ino, before.ino, 'identity mutation must create a different inode');
 }
 
 async function groupSandbox(t) {
@@ -237,10 +248,7 @@ test('restore preserves external content, filesystem identity changes and aliase
     response(apply(box));
     if (mutation === 'external') await writeFile(box.target, 'user edited after apply');
     if (mutation === 'upgrade') await writeFile(box.target, source + '// new plugin build');
-    if (mutation === 'identity') {
-      const bytes = await readFile(box.target);
-      await rm(box.target); await writeFile(box.target, bytes, { mode: 0o640 });
-    }
+    if (mutation === 'identity') await replaceIdentity(box);
     if (mutation === 'mode') await chmod(box.target, 0o600);
     if (mutation === 'symlink') {
       const bytes = await readFile(box.target);
@@ -307,7 +315,7 @@ test('apply preflights current identity and every plan artifact before target or
   for (const mutation of ['source', 'inode', 'original', 'patched', 'manifest', 'symlink', 'hardlink']) {
     const box = await sandbox(t);
     if (mutation === 'source') await writeFile(box.target, source + '// external change');
-    if (mutation === 'inode') { await rm(box.target); await writeFile(box.target, source, { mode: 0o640 }); }
+    if (mutation === 'inode') await replaceIdentity(box);
     if (mutation === 'original' || mutation === 'patched') await writeFile(join(box.plan, 'contents', `0000.${mutation}.mjs`), 'tampered');
     if (mutation === 'manifest') {
       const path = join(box.plan, 'contents/manifest.json');
@@ -1105,10 +1113,7 @@ test('status and ordinary writes reject changed committed provenance rather than
       await writeFile(path, JSON.stringify(value));
     }
     if (mutation === 'key') await writeFile(join(box.store, 'key'), Buffer.alloc(32));
-    if (mutation === 'identity') {
-      const bytes = await readFile(box.target);
-      await rm(box.target); await writeFile(box.target, bytes, { mode: 0o640 });
-    }
+    if (mutation === 'identity') await replaceIdentity(box);
     const bytes = await readFile(box.target);
     assert.equal(response(status(box), 4).outcome, 'conflict');
     assert.equal(response(apply(box), 4).outcome, 'conflict');

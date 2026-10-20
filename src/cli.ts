@@ -6,10 +6,24 @@ import { apply, recover, restore, status } from './transactions.js';
 import { isAbsolute } from 'node:path';
 import { EXIT_CODES, renderHuman } from './result.js';
 import type { CommandResult } from './result.js';
+import { managedCli } from './managed-cli.js';
 
 const help = `codex-browser-patch — macOS Codex browser plugin structural detection
 
 Usage:
+  codex-browser-patch                         interactive discovery, check and action selection
+  codex-browser-patch check [--app <absolute-app-path>] [--json]
+  codex-browser-patch status [--app <absolute-app-path>] [--json]
+  codex-browser-patch apply [--app <absolute-app-path>]
+  codex-browser-patch restore [--app <absolute-app-path>]
+  codex-browser-patch recover [--app <absolute-app-path>]
+
+Managed changes require interactive stdin/stdout and explicit confirmation; --json cannot authorize writes.
+Exit and reopen the host manually. Sealed-resource changes invalidate its signature.
+Recovery data stays private outside npm cache; keep the matching local tarball while unpublished.
+Structural support, write readiness and runtime verification are separate. Runtime: not-verified.
+
+Legacy explicit review-plan commands:
   codex-browser-patch detect [--plugin-root <directory>] [--json]
   codex-browser-patch prepare [--plugin-root <directory>] --target <absolute-artifact-path> [--target <path> ...] --output <new-plan-directory> [--json]
   codex-browser-patch prepare [--plugin-root <directory>] --all-compatible --output <new-plan-directory> [--json]
@@ -71,6 +85,13 @@ const json = args.includes('--json') || args.some((arg) => arg.startsWith('--jso
 
 async function main(): Promise<CommandResult | null> {
   try {
+    const route = parseArgs({ args, allowPositionals: true, strict: false, tokens: true, options: {
+      app: { type: 'string' }, plan: { type: 'string' }, store: { type: 'string' },
+      'plugin-root': { type: 'string' }, target: { type: 'string', multiple: true }, output: { type: 'string' },
+      'all-compatible': { type: 'boolean' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
+    } });
+    const legacy = route.tokens.some(token => token.kind === 'option' && (token.name === 'plan' || token.name === 'store'));
+    if (!route.values.help && !legacy && (route.positionals.length === 0 || ['check', 'status', 'apply', 'restore', 'recover'].includes(route.positionals[0] ?? ''))) return await managedCli(args);
     const { values, positionals, tokens } = parseArgs({
       args,
       options: {
@@ -93,7 +114,7 @@ async function main(): Promise<CommandResult | null> {
       if (token.name !== 'target' && seen.has(token.name)) throw new Error(`Duplicate option: --${token.name}`);
       seen.add(token.name);
     }
-    if (values.help && (positionals.length === 0 || (positionals.length === 1 && ['detect', 'prepare', 'apply', 'restore', 'status', 'recover'].includes(positionals[0] ?? '')))) {
+    if (values.help && (positionals.length === 0 || (positionals.length === 1 && ['check', 'detect', 'prepare', 'apply', 'restore', 'status', 'recover'].includes(positionals[0] ?? '')))) {
       process.stdout.write(help);
       return null;
     }
@@ -139,7 +160,7 @@ async function main(): Promise<CommandResult | null> {
   } catch (error) {
     return {
       schemaVersion: 1,
-      command: args[0] === 'detect' || args[0] === 'prepare' || args[0] === 'apply' || args[0] === 'restore' || args[0] === 'status' || args[0] === 'recover' ? args[0] : null,
+      command: args[0] === 'check' || args[0] === 'detect' || args[0] === 'prepare' || args[0] === 'apply' || args[0] === 'restore' || args[0] === 'status' || args[0] === 'recover' ? args[0] : null,
       outcome: 'usage-error',
       exitCode: EXIT_CODES.usageError,
       data: null,
