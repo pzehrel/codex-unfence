@@ -308,6 +308,7 @@ class Match {
     while (this.context.parents.get(position)?.type === 'AssignmentExpression' || this.context.parents.get(position)?.type === 'SequenceExpression') position = this.context.parents.get(position)!;
     const assignmentStatement = this.context.parents.get(position);
     need(assignmentStatement?.type === 'ExpressionStatement' && this.context.parents.get(assignmentStatement) === initializer.body, 'CONFIGURATION_INITIALIZATION', 'Configuration assignment must be unconditional in its initializer.', identifier);
+    need(initializer.body.type === 'BlockStatement' && initializer.body.body.slice(0, initializer.body.body.indexOf(assignmentStatement)).every(node => node.type === 'ExpressionStatement' && ['CallExpression', 'SequenceExpression', 'Literal'].includes(node.expression.type)), 'CONFIGURATION_INITIALIZATION', 'Initializer prefix has unknown or abrupt control flow before configuration assignment.', identifier);
     const creation = this.context.parents.get(initializer);
     need(creation?.type === 'CallExpression' && creation.arguments.length === 1 && creation.arguments[0] === initializer && creation.callee.type === 'Identifier', 'CONFIGURATION_INITIALIZATION', 'Deferred configuration must use a local once constructor.', initializer);
     const once = this.context.bindings.get(creation.callee), onceDefinition = once && definition(once);
@@ -428,6 +429,10 @@ class Match {
           for (const item of node.id.properties) {
             need(item.type === 'Property' && !item.computed && item.value.type === 'Identifier', 'CAPABILITY_ALIAS', 'Dynamic capability destructuring is unsupported.', item);
             const name = item.key.type === 'Identifier' ? item.key.name : item.key.type === 'Literal' ? item.key.value : null;
+            if (globalRoot(node.init) && ['globalThis', 'global', 'window', 'self'].includes(String(name))) {
+              const binding = this.context.bindings.get(item.value);
+              if (binding && !globalAliases.has(binding)) { globalAliases.add(binding); changed = true; }
+            }
             if (root(node.init) || standards.has(String(name))) {
               const binding = this.context.bindings.get(item.value);
               if (binding && !capabilities.has(binding)) { capabilities.add(binding); changed = true; }
@@ -562,7 +567,7 @@ export function deriveCua(source: string): CuaDerivation {
         const binding = candidate.id && context.bindings.get(candidate.id);
         const related = binding?.references.some(ref => {
           const owner = enclosing(context, ref.identifier, 'ClassExpression');
-          return owner && context.nodes.some(node => inside(node, owner) && node.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier' && node.property.name === 'blocked');
+          return owner && context.nodes.some(node => inside(node, owner) && node.type === 'MemberExpression' && (node.computed ? node.property.type === 'Literal' && node.property.value === 'blocked' : node.property.type === 'Identifier' && node.property.name === 'blocked'));
         });
         if (related) failures.push(error);
       }
