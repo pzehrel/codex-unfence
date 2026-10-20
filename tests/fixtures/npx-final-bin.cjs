@@ -17,6 +17,17 @@ require('./managed-boundaries.cjs');
 os.userInfo = (...args) => ({ ...userInfo(...args), homedir: join(root, 'home') });
 const scenarioPath = join(root, 'boundary.json');
 const scenario = fs.existsSync(scenarioPath) ? JSON.parse(fs.readFileSync(scenarioPath, 'utf8')) : {};
+const childProcess = require('node:child_process'); // eslint-disable-line no-restricted-syntax -- External ps boundary only.
+const execFile = childProcess.execFile;
+childProcess.execFile = function (file, ...args) {
+  if (file === '/bin/ps') {
+    const current = fs.existsSync(scenarioPath) ? JSON.parse(fs.readFileSync(scenarioPath, 'utf8')) : {};
+    process.env.CODEX_TEST_PROCESS_ROWS = JSON.stringify(current.processRows ?? []);
+    if (current.processFailure) process.env.CODEX_TEST_PROCESS_FAILURE = '1';
+    else delete process.env.CODEX_TEST_PROCESS_FAILURE;
+  }
+  return execFile(file, ...args);
+};
 const promises = require('node:fs/promises');
 const rename = promises.rename;
 promises.rename = async function (from, to) {

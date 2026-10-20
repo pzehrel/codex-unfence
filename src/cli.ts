@@ -11,6 +11,19 @@ import { managedCli } from './managed-cli.js';
 const help = `codex-browser-patch — macOS Codex browser plugin structural detection
 
 Usage:
+  codex-browser-patch                         interactive discovery, check and action selection
+  codex-browser-patch check [--app <absolute-app-path>] [--json]
+  codex-browser-patch status [--app <absolute-app-path>] [--json]
+  codex-browser-patch apply [--app <absolute-app-path>]
+  codex-browser-patch restore [--app <absolute-app-path>]
+  codex-browser-patch recover [--app <absolute-app-path>]
+
+Managed changes require interactive stdin/stdout and explicit confirmation; --json cannot authorize writes.
+Exit and reopen the host manually. Sealed-resource changes invalidate its signature.
+Recovery data stays private outside npm cache; keep the matching local tarball while unpublished.
+Structural support, write readiness and runtime verification are separate. Runtime: not-verified.
+
+Legacy explicit review-plan commands:
   codex-browser-patch detect [--plugin-root <directory>] [--json]
   codex-browser-patch prepare [--plugin-root <directory>] --target <absolute-artifact-path> [--target <path> ...] --output <new-plan-directory> [--json]
   codex-browser-patch prepare [--plugin-root <directory>] --all-compatible --output <new-plan-directory> [--json]
@@ -101,7 +114,7 @@ async function main(): Promise<CommandResult | null> {
       if (token.name !== 'target' && seen.has(token.name)) throw new Error(`Duplicate option: --${token.name}`);
       seen.add(token.name);
     }
-    if (values.help && (positionals.length === 0 || (positionals.length === 1 && ['detect', 'prepare', 'apply', 'restore', 'status', 'recover'].includes(positionals[0] ?? '')))) {
+    if (values.help && (positionals.length === 0 || (positionals.length === 1 && ['check', 'detect', 'prepare', 'apply', 'restore', 'status', 'recover'].includes(positionals[0] ?? '')))) {
       process.stdout.write(help);
       return null;
     }

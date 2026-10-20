@@ -1,6 +1,6 @@
 {
   "name": "codex-browser-liberation-patch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Structural review plans and recoverable transactions for Codex browser plugins on macOS",
   "type": "module",
   "bin": {

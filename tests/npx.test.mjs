@@ -149,6 +149,33 @@ test('npm exec refuses a target changed after inspection instead of applying to 
   assert.deepEqual(await readFile(target), changed);
 });
 
+test('npm exec check reports process failures and a blocked guide can recheck after the host exits', async t => {
+  const box = await packageBox(t);
+  const app = join(box.directory, 'home/Applications/Blocked.app');
+  const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
+  await mkdir(join(target, '..'), { recursive: true });
+  const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
+  await writeFile(target, source);
+  const scenario = join(box.directory, 'boundary.json');
+  await writeFile(scenario, JSON.stringify({ processFailure: true }));
+  const failed = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
+  assert.equal(JSON.parse(failed.stdout).data.inspection.writeReadiness, 'unknown');
+  await writeFile(scenario, JSON.stringify({ processRows: [{ pid: 998877, executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' }] }));
+  const blocked = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
+  const inspected = JSON.parse(blocked.stdout).data.inspection;
+  assert.equal(inspected.support, 'supported');
+  assert.equal(inspected.writeReadiness, 'blocked');
+  assert.deepEqual(inspected.allowedActions, []);
+  const guided = await npmPackage.runNpmExecPty([], { ...box, steps: [
+    { waitFor: 'Action (recheck', beforeSend: () => writeFile(scenario, '{}'), send: 'recheck\n' },
+    { waitFor: 'Action (apply', send: 'apply\n' },
+    { waitFor: 'Type yes', send: 'yes\n' },
+  ] });
+  assert.equal(guided.status, 0, guided.stdout + guided.stderr);
+  assert.match(guided.stdout, /PROCESSES_RUNNING/);
+  assert.match(guided.stdout, /tool-applied \(applied\)/);
+});
+
 test('multiple installations require selection and confirmation EOF leaves the selected bytes unchanged', async t => {
   const box = await packageBox(t);
   const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));

@@ -63,6 +63,17 @@ test('managed status is read-only while explicit legacy selectors retain strict 
   assert.deepEqual(await readFile(box.target), box.source);
 });
 
+test('help documents managed commands and accepts command-specific help', async t => {
+  const box = await sandbox(t);
+  for (const command of ['check', 'apply', 'status', 'restore', 'recover']) {
+    const child = runCli([command, '--help'], { directory: box.directory, fixture });
+    assert.equal(child.status, 0, child.stdout + child.stderr);
+    assert.match(child.stdout, /check \[--app/);
+    assert.match(child.stdout, /interactive/);
+    assert.match(child.stdout, /--plan/);
+  }
+});
+
 test('managed writes require real confirmation and missing status preserves its command', async t => {
   const box = await sandbox(t);
   for (const command of ['apply', 'restore', 'recover']) {
