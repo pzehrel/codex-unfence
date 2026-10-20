@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import test from 'node:test';
@@ -39,6 +39,22 @@ test('offline npm exec runs the packed public bin from an unrelated cwd with iso
   assert.equal(observed.home, join(box.directory, 'home'));
   assert.equal(observed.stdinTTY, false);
   assert.equal(observed.stdoutTTY, false);
+});
+
+test('packed npm exec check uses genuine structural admission and remains read-only', async (t) => {
+  const box = await packageBox(t);
+  const app = join(box.directory, 'home/Applications/Synthetic.app');
+  const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
+  await mkdir(join(target, '..'), { recursive: true });
+  const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
+  await writeFile(target, source);
+  const child = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.data.inspection.support, 'supported');
+  assert.equal(result.data.inspection.state, 'original');
+  assert.deepEqual(await readFile(target), source);
+  await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-browser-liberation-patch/key')), { code: 'ENOENT' });
 });
 
 test('offline npm exec exposes help through a real PTY and propagates the public bin exit status', async (t) => {
