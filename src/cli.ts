@@ -6,6 +6,7 @@ import { apply, recover, restore, status } from './transactions.js';
 import { isAbsolute } from 'node:path';
 import { EXIT_CODES, renderHuman } from './result.js';
 import type { CommandResult } from './result.js';
+import { managedCli } from './managed-cli.js';
 
 const help = `codex-browser-patch — macOS Codex browser plugin structural detection
 
@@ -71,6 +72,13 @@ const json = args.includes('--json') || args.some((arg) => arg.startsWith('--jso
 
 async function main(): Promise<CommandResult | null> {
   try {
+    const route = parseArgs({ args, allowPositionals: true, strict: false, tokens: true, options: {
+      app: { type: 'string' }, plan: { type: 'string' }, store: { type: 'string' },
+      'plugin-root': { type: 'string' }, target: { type: 'string', multiple: true }, output: { type: 'string' },
+      'all-compatible': { type: 'boolean' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
+    } });
+    const legacy = route.tokens.some(token => token.kind === 'option' && (token.name === 'plan' || token.name === 'store'));
+    if (!route.values.help && !legacy && ['check', 'status'].includes(route.positionals[0] ?? '')) return await managedCli(args);
     const { values, positionals, tokens } = parseArgs({
       args,
       options: {

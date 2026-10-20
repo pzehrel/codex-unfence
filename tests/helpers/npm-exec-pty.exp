@@ -1,0 +1,21 @@
+# Fixed npm exec invocation supplied by the isolated shared helper.
+set timeout 30
+spawn -noecho {*}$argv
+expect {
+    eof {}
+    timeout {
+        exec /bin/kill -KILL [exp_pid]
+        puts stderr "npm exec PTY timed out"
+        exit 124
+    }
+}
+set result [wait]
+if {[lindex $result 2] != 0} {
+    puts stderr [lindex $result 3]
+    exit 1
+}
+if {[llength $result] > 4} {
+    puts stderr "npm exec PTY child terminated by signal"
+    exit 1
+}
+exit [lindex $result 3]

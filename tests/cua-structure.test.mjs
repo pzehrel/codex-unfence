@@ -18,3 +18,38 @@ test('derives the unique dedicated transport in a complete synthetic site-status
   assert.equal(result.change.range.unit, 'utf16');
   assert.deepEqual(deriveCua(fixture), result);
 });
+
+test('refuses configuration whose once initializer never runs', () => {
+  const result = deriveCua(fixture.replace('initialize();', ''));
+  assert.equal(result.support, 'unsupported');
+  assert.equal(result.change, null);
+  assert.match(result.diagnostics[0].code, /INITIALIZATION/);
+});
+
+test('refuses visible standard capability mutation and dynamic scope', () => {
+  for (const change of [
+    'Object.defineProperty(URL.prototype, "pathname", {set(value) {}});',
+    'Map.prototype.get = function () { return true; };',
+    'const standard = URL; standard.prototype.toString = () => "changed";',
+    'globalThis["URL"] = function () {};',
+    'eval("URL = function () {}");',
+  ]) {
+    const result = deriveCua(change + fixture);
+    assert.equal(result.support, 'unsupported', change);
+    assert.equal(result.change, null);
+  }
+});
+
+test('refuses conditional, reordered and changed once initialization', () => {
+  const inputs = [
+    fixture.replace('initialize();', 'if (false) initialize();'),
+    fixture.replace('initialize();', '').concat('\nenforce({}, "https://example.com"); initialize();'),
+    fixture.replace("baseUrl = 'https://chatgpt.com/backend-api'", "if (false) baseUrl = 'https://chatgpt.com/backend-api'"),
+    fixture.replace('task(task = 0)', 'task(task)'),
+  ];
+  for (const source of inputs) {
+    const result = deriveCua(source);
+    assert.equal(result.support, 'unsupported', source.slice(-100));
+    assert.equal(result.change, null);
+  }
+});
