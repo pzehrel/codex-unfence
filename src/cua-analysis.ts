@@ -383,6 +383,12 @@ class Match {
           if (expected.scope.type !== 'module') for (const ref of binding.references) need(metadata.matched.has(ref.identifier), 'METADATA_ESCAPE', 'Metadata value escapes its supported parser.', ref.identifier);
         }
         this.roots.set(name, actual);
+        for (const ref of this.binding(name).references) {
+          if (!ref.isRead() || this.matched.has(ref.identifier)) continue;
+          const call = this.context.parents.get(ref.identifier);
+          need(call?.type === 'CallExpression' && call.callee === ref.identifier && !call.optional && call.arguments.length === 1 && call.arguments[0]?.type !== 'SpreadElement', 'METADATA_ESCAPE', 'Metadata parser may only be called directly with one runtime.', ref.identifier);
+          this.matched.add(ref.identifier);
+        }
       } else this.match(name, actual);
     }
     for (const [name, value] of [['baseUrl', 'https://chatgpt.com/backend-api'], ['agentKey', 'agent'], ['requestSource', 'codex_browser_use']] as const) {
@@ -401,6 +407,139 @@ class Match {
     this.match('ttl', ttl);
   }
 
+  private readerBridge(call: E.CallExpression): boolean {
+    const context = this.context;
+    const member = (node: E.Node | null | undefined, key: string): node is E.MemberExpression => node?.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier' && node.property.name === key;
+    const binding = (node: E.Node | null | undefined): Variable | undefined => node ? context.bindings.get(node) : undefined;
+    const nodesIn = (node: E.Node): E.Node[] => context.nodes.filter(item => inside(item, node));
+    const callsOf = (value: Variable): E.CallExpression[] => value.references.filter(ref => ref.isRead()).flatMap(ref => {
+      const parent = context.parents.get(ref.identifier);
+      return parent?.type === 'CallExpression' && parent.callee === ref.identifier ? [parent] : [];
+    });
+    if (!member(call.callee, 'toHandle') || call.callee.object.type !== 'Identifier' || call.arguments.length !== 1) return false;
+    const arrow = enclosing(context, call, 'ArrowFunctionExpression');
+    const factory = enclosing(context, call, 'FunctionDeclaration');
+    if (arrow?.type !== 'ArrowFunctionExpression' || factory?.type !== 'FunctionDeclaration' || !factory.async || !factory.id || arrow.params.length !== 1 || arrow.params[0]?.type !== 'Identifier') return false;
+    const selector = binding(arrow.params[0]), body = arrow.body;
+    if (body.type !== 'ConditionalExpression' || binding(body.test) !== selector || body.consequent.type !== 'SequenceExpression' || body.consequent.expressions.length !== 2) return false;
+    const [decode, selected] = body.consequent.expressions;
+    if (decode?.type !== 'AssignmentExpression' || decode.operator !== '=' || binding(decode.left) !== selector || decode.right.type !== 'CallExpression' || decode.right.callee.type !== 'Identifier' || decode.right.arguments.length !== 1 || binding(decode.right.arguments[0]) !== selector) return false;
+    const handle = binding(call.callee.object);
+    const isHandle = (node: E.Node | undefined): node is E.CallExpression => node?.type === 'CallExpression' && member(node.callee, 'toHandle') && binding(node.callee.object) === handle && node.arguments.length === 1;
+    if (!isHandle(selected) || selected.arguments[0]?.type !== 'MemberExpression' || !selected.arguments[0].computed || selected.arguments[0].object.type !== 'Identifier' || selected.arguments[0].object.name !== 'globalThis' || binding(selected.arguments[0].object) || binding(selected.arguments[0].property) !== selector || !isHandle(body.alternate) || body.alternate.arguments[0]?.type !== 'Identifier' || body.alternate.arguments[0].name !== 'globalThis' || binding(body.alternate.arguments[0])) return false;
+    if (selector?.references.some(ref => !inside(ref.identifier, arrow))) return false;
+    const handles = handle && definition(handle);
+    if (handles?.type !== 'VariableDeclarator' || handles.init?.type !== 'ObjectExpression' || handles.init.properties.length !== 2 || !handles.init.properties.every(item => item.type === 'Property' && item.key.type === 'Identifier' && ['toValue', 'toHandle'].includes(item.key.name) && item.value.type === 'ArrowFunctionExpression')) return false;
+    const declaration = context.parents.get(arrow);
+    if (declaration?.type !== 'VariableDeclarator' || declaration.id.type !== 'Identifier') return false;
+    const accessor = binding(declaration.id), uses = accessor?.references.filter(ref => ref.isRead());
+    if (uses?.length !== 1 || accessor?.references.some(ref => ref.isWrite() && !ref.init)) return false;
+    const slot = context.parents.get(uses[0]!.identifier);
+    if (slot?.type !== 'Property' || slot.value !== uses[0]!.identifier || slot.computed || slot.method || slot.kind !== 'init' || !inside(slot, factory)) return false;
+    let imports: E.Node | undefined = context.parents.get(slot);
+    if (imports?.type !== 'ObjectExpression') return false;
+    // Slot must be inside the factory's imports object, not returned independently.
+    while (imports && context.parents.get(imports)?.type === 'Property') imports = context.parents.get(context.parents.get(imports)!);
+    if (imports?.type !== 'ObjectExpression') return false;
+    const instantiate = (node: E.Node): boolean => node.type === 'CallExpression' && node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier' && node.callee.object.name === 'WebAssembly' && !binding(node.callee.object) && node.callee.property.type === 'Identifier' && ['instantiate', 'instantiateStreaming'].includes(node.callee.property.name) && node.arguments.length === 2;
+    const importsDeclaration = context.parents.get(imports);
+    let linkedImports = false;
+    if (importsDeclaration?.type === 'VariableDeclarator' && importsDeclaration.id.type === 'Identifier') {
+      const importsBinding = binding(importsDeclaration.id);
+      linkedImports = nodesIn(factory).some(node => instantiate(node) && node.type === 'CallExpression' && binding(node.arguments[1]) === importsBinding);
+      if (!linkedImports && importsBinding) {
+        // Bundled Emscripten variant: an imports builder returns {namespace:table};
+        // the instantiator passes that same local object into the finite loader.
+        const builders = importsBinding.references.filter(ref => ref.isRead()).flatMap(ref => {
+          const property = context.parents.get(ref.identifier), object = property && context.parents.get(property), returned = object && context.parents.get(object);
+          const builder = returned && enclosing(context, returned, 'FunctionDeclaration');
+          return property?.type === 'Property' && object?.type === 'ObjectExpression' && object.properties.length === 1 && returned?.type === 'ReturnStatement' && returned.argument === object && builder?.type === 'FunctionDeclaration' && builder.id && builder.body.body.length === 1 ? [builder] : [];
+        });
+        if (builders.length === 1) {
+          const builder = builders[0]!, builderBinding = binding(builder.id!);
+          const calls = builderBinding && callsOf(builderBinding);
+          if (calls?.length === 1) {
+            const local = context.parents.get(calls[0]!), caller = enclosing(context, calls[0]!, 'FunctionDeclaration');
+            if (local?.type === 'VariableDeclarator' && local.id.type === 'Identifier' && caller?.type === 'FunctionDeclaration') {
+              const value = binding(local.id);
+              linkedImports = nodesIn(caller).some(node => node.type === 'CallExpression' && node.arguments.some(argument => binding(argument) === value) && node.callee.type === 'Identifier' && (() => {
+                const target = binding(node.callee), fn = target && definition(target);
+                return fn?.type === 'FunctionDeclaration' && nodesIn(fn).some(instantiate);
+              })());
+            }
+          }
+        }
+      }
+    }
+    if (!linkedImports) return false;
+    const factoryBinding = binding(factory.id);
+    if (!factoryBinding || factoryBinding.references.some(ref => ref.isWrite())) return false;
+    const factoryUses = factoryBinding.references.filter(ref => ref.isRead());
+    if (factoryUses.length !== 2) return false;
+    const wrappers = factoryUses.map(ref => enclosing(context, ref.identifier, 'FunctionDeclaration'));
+    if (wrappers.some(node => node?.type !== 'FunctionDeclaration' || node === factory)) return false;
+    const configure = wrappers.find(node => node?.type === 'FunctionDeclaration' && !node.async);
+    const reader = wrappers.find(node => node?.type === 'FunctionDeclaration' && node.async);
+    if (configure?.type !== 'FunctionDeclaration' || reader?.type !== 'FunctionDeclaration' || !configure.id || !reader.id || configure.params.length !== 1) return false;
+    const configReturn = configure.body.body[0];
+    if (configure.body.body.length !== 1 || configReturn?.type !== 'ReturnStatement' || configReturn.argument?.type !== 'CallExpression' || configReturn.argument.callee.type !== 'Identifier' || configReturn.argument.arguments.length !== 2 || binding(configReturn.argument.arguments[0]) !== factoryBinding || binding(configReturn.argument.arguments[1]) !== binding(configure.params[0])) return false;
+    const prepare = binding(configReturn.argument.callee), readerReturn = reader.body.body[0];
+    if (reader.body.body.length !== 1 || readerReturn?.type !== 'ReturnStatement' || readerReturn.argument?.type !== 'CallExpression' || readerReturn.argument.callee.type !== 'Identifier' || binding(readerReturn.argument.arguments[0]) !== factoryBinding) return false;
+    const decoder = binding(readerReturn.argument.callee), decoderDefinition = decoder && definition(decoder);
+    if (decoderDefinition?.type !== 'FunctionDeclaration' || decoderDefinition.params[0]?.type !== 'Identifier') return false;
+    const moduleAwait = nodesIn(decoderDefinition).find((node): node is E.AwaitExpression => node.type === 'AwaitExpression' && node.argument.type === 'CallExpression' && binding(node.argument.callee) === prepare && binding(node.argument.arguments[0]) === binding(decoderDefinition.params[0]));
+    const moduleDeclaration = moduleAwait && context.parents.get(moduleAwait);
+    if (moduleDeclaration?.type !== 'VariableDeclarator' || moduleDeclaration.id.type !== 'Identifier') return false;
+    const module = binding(moduleDeclaration.id);
+    const interfaces = nodesIn(decoderDefinition).filter((node): node is E.MemberExpression => node.type === 'MemberExpression' && binding(node.object) === module);
+    if (!['_malloc', '_free', 'HEAPU8'].every(name => interfaces.some(node => member(node, name))) || !interfaces.some(node => member(node, 'readBarcodesFromPixmap') || member(node, 'readBarcodesFromImage'))) return false;
+    const configureBinding = binding(configure.id);
+    if (!configureBinding || configureBinding.references.some(ref => ref.isWrite())) return false;
+    const configurations = callsOf(configureBinding);
+    if (configurations.length !== 1) return false;
+    const config = configurations[0]!, options = config.arguments[0];
+    const field = (node: E.Node | undefined, key: string): E.Node | undefined => node?.type === 'ObjectExpression' && node.properties.length === 1 && node.properties[0]?.type === 'Property' && !node.properties[0].computed && node.properties[0].key.type === 'Identifier' && node.properties[0].key.name === key ? node.properties[0].value : undefined;
+    const binary = field(field(options, 'overrides'), 'wasmBinary');
+    if (config.arguments.length !== 1 || !member(binary, 'buffer') || binary.object.type !== 'Identifier') return false;
+    const copy = binding(binary.object), copyDefinition = copy && definition(copy);
+    if (copyDefinition?.type !== 'VariableDeclarator' || copyDefinition.init?.type !== 'NewExpression' || copyDefinition.init.callee.type !== 'Identifier' || copyDefinition.init.callee.name !== 'Uint8Array' || binding(copyDefinition.init.callee) || copyDefinition.init.arguments.length !== 1 || !member(copyDefinition.init.arguments[0], 'byteLength')) return false;
+    const bytes = binding(copyDefinition.init.arguments[0].object);
+    const callback = enclosing(context, config, 'ArrowFunctionExpression');
+    const then = callback && context.parents.get(callback);
+    if (callback?.type !== 'ArrowFunctionExpression' || callback.params.length !== 1 || binding(callback.params[0]) !== bytes || then?.type !== 'CallExpression' || !member(then.callee, 'then') || then.arguments.length !== 1 || then.callee.object.type !== 'CallExpression' || then.callee.object.callee.type !== 'Identifier') return false;
+    const set = nodesIn(callback).filter((node): node is E.CallExpression => node.type === 'CallExpression' && member(node.callee, 'set') && binding(node.callee.object) === copy && node.arguments.length === 1 && binding(node.arguments[0]) === bytes);
+    if (set.length !== 1 || range(set[0]!).end > range(config).start) return false;
+    const loaderBinding = binding(then.callee.object.callee), loader = loaderBinding && definition(loaderBinding);
+    if (loader?.type !== 'FunctionDeclaration' || !loader.async || loader.params.length !== 1 || loader.params[0]?.type !== 'Identifier' || loader.body.body.length !== 1 || loader.body.body[0]?.type !== 'TryStatement') return false;
+    const attempt = loader.body.body[0];
+    if (attempt.finalizer || !attempt.handler || attempt.handler.param || attempt.block.body.length !== 1 || attempt.handler.body.body.length !== 1) return false;
+    const load = (statement: E.Node, path: string): boolean => {
+      const result = statement.type === 'ReturnStatement' && statement.argument?.type === 'AwaitExpression' ? statement.argument.argument : null;
+      const url = result?.type === 'CallExpression' ? result.arguments[0] : null;
+      return result?.type === 'CallExpression' && member(result.callee, 'readBytes') && member(result.callee.object, 'filesystem') && binding(result.callee.object.object) === binding(loader.params[0]) && result.arguments.length === 1 && url?.type === 'NewExpression' && url.callee.type === 'Identifier' && url.callee.name === 'URL' && !binding(url.callee) && url.arguments.length === 2 && url.arguments[0]?.type === 'Literal' && url.arguments[0].value === path && member(url.arguments[1], 'url') && url.arguments[1].object.type === 'MetaProperty';
+    };
+    if (!load(attempt.block.body[0]!, './zxing_reader.wasm') || !load(attempt.handler.body.body[0]!, '../../../node_modules/zxing-wasm/dist/reader/zxing_reader.wasm')) return false;
+    if ([...this.bindings.values()].some(value => value.references.some(ref => inside(ref.identifier, factory)))) return false;
+    // This is an explicit resource-family assumption, not an arbitrary global
+    // read exemption or a proof of the Wasm/bridge's complete lifetime effects.
+    this.roots.set('readerBridge', factory);
+    this.matched.add(selected);
+    this.matched.add(body.alternate);
+    return call === selected || call === body.alternate;
+  }
+
+  private readOnlyInstanceof(call: E.CallExpression): boolean {
+    if (call.callee.type !== 'Identifier' || call.arguments.length !== 2) return false;
+    const binding = this.context.bindings.get(call.callee), fn = binding && definition(binding);
+    if (fn?.type !== 'FunctionDeclaration' || fn.async || fn.generator || fn.params.length !== 2 || fn.params.some(node => node.type !== 'Identifier') || binding!.references.some(ref => ref.isWrite())) return false;
+    const attempt = fn.body.body[0];
+    if (fn.body.body.length !== 1 || attempt?.type !== 'TryStatement' || attempt.finalizer || !attempt.handler || attempt.handler.param || attempt.block.body.length !== 1 || attempt.handler.body.body.length !== 1) return false;
+    const yes = attempt.block.body[0], no = attempt.handler.body.body[0];
+    if (yes?.type !== 'ReturnStatement' || yes.argument?.type !== 'BinaryExpression' || yes.argument.operator !== 'instanceof' || no?.type !== 'ReturnStatement' || !no.argument || booleanValue(no.argument) !== false) return false;
+    const value = this.context.bindings.get(fn.params[0]!), constructor = this.context.bindings.get(fn.params[1]!);
+    return this.context.bindings.get(yes.argument.left) === value && this.context.bindings.get(yes.argument.right) === constructor && !!value && !!constructor && [value, constructor].every(parameter => parameter.references.length === 1 && parameter.references.every(ref => ref.isRead()));
+  }
+
   private capabilityEffects(): void {
     const standards = new Set(['URL', 'Map', 'Date', 'Object', 'Reflect', 'JSON', 'Error']);
     const capabilities = new Set<Variable>(), globalAliases = new Set<Variable>();
@@ -412,7 +551,16 @@ class Match {
       }
       if (node.type === 'MemberExpression' && globalRoot(node.object)) {
         const key = node.computed ? node.property.type === 'Literal' ? node.property.value : null : node.property.type === 'Identifier' ? node.property.name : null;
-        return key === null || standards.has(String(key));
+        const possible = (value: E.Node): string[] | null => {
+          if (value.type === 'Literal' && typeof value.value === 'string') return [value.value];
+          if (value.type === 'ConditionalExpression') {
+            const yes = possible(value.consequent), no = possible(value.alternate);
+            return yes && no ? [...yes, ...no] : null;
+          }
+          return null;
+        };
+        const keys = key === null ? possible(node.property) : [String(key)];
+        return !keys || keys.some(name => standards.has(name) || ['globalThis', 'global', 'window', 'self'].includes(name));
       }
       return node.type === 'MemberExpression' && root(node.object);
     };
@@ -452,7 +600,7 @@ class Match {
       }
       if (!this.matched.has(node) && node.type === 'CallExpression') {
         const inspect = node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier' && !this.context.bindings.has(node.callee.object) && ['Object', 'Reflect'].includes(node.callee.object.name) && node.callee.property.type === 'Identifier' && ['getOwnPropertyDescriptor', 'getOwnPropertyDescriptors', 'getPrototypeOf', 'ownKeys', 'hasOwn', 'keys', 'values', 'entries', 'isFrozen'].includes(node.callee.property.name);
-        need(inspect || !node.arguments.some(argument => root(argument)), 'CAPABILITY_ESCAPE', 'A standard capability escapes to an unknown local call.', node);
+        need(inspect || !node.arguments.some(argument => root(argument)) || this.readOnlyInstanceof(node) || this.readerBridge(node), 'CAPABILITY_ESCAPE', 'A standard capability escapes to an unknown local call.', node);
       }
     }
   }
@@ -546,6 +694,8 @@ function prove(context: SourceContext, transport: E.FunctionDeclaration): { targ
     { kind: 'consumption', range: range(consumer), description: 'Blocked result flows through unchanged cache/inflight and a corresponding throwing guard.' },
     { kind: 'receiver', range: range(owner), description: 'Finite class state, default constructor, unique local instance and closed related lexical references.' },
   ];
+  const bridge = match.roots.get('readerBridge');
+  if (bridge) evidence.push({ kind: 'receiver', range: range(bridge), description: 'Linked ZXing reader resource loader, byte-copy configuration, factory, handle imports and decoder interfaces identified. Resource/host-bridge lifetime noninterference is assumed, not proved.' });
   return { target, evidence };
 }
 
@@ -579,7 +729,7 @@ export function deriveCua(source: string): CuaDerivation {
     const selected = range(proof.target), before = source.slice(selected.start, selected.end), after = wrapCuaResponse(before);
     const patchedSource = source.slice(0, selected.start) + after + source.slice(selected.end);
     parse(patchedSource, { ecmaVersion: 2022, sourceType: 'module' });
-    return { ...base, support: 'supported', diagnostics: [], evidence: proof.evidence, change: { range: selected, before, after, patchedSource, localDiff: `Expression UTF-16 [${selected.start}, ${selected.end})\n- ${before}\n+ ${after}\n` } };
+    return { ...base, assumptions: proof.evidence.some(item => item.description.includes('ZXing')) ? [...assumptions, 'Only the linked finite ZXing reader resource and host bridge are assumed not to mutate the site-status chain, its configuration or standard capabilities throughout their lifetime; this noninterference is not proved. Resource bytes are not read or executed.'] : assumptions, support: 'supported', diagnostics: [], evidence: proof.evidence, change: { range: selected, before, after, patchedSource, localDiff: `Expression UTF-16 [${selected.start}, ${selected.end})\n- ${before}\n+ ${after}\n` } };
   } catch (error) {
     const failure = error instanceof Unsupported ? error : new Unsupported('PARSE_ERROR', error instanceof Error ? error.message : 'Unable to parse and bind source.');
     return { ...base, support: 'unsupported', evidence: [], diagnostics: [{ code: failure.code, severity: 'error', message: failure.message, ...(failure.node ? { range: range(failure.node) } : {}) }], change: null };
