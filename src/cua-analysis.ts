@@ -550,10 +550,19 @@ export function deriveCua(source: string): CuaDerivation {
     const failures: Unsupported[] = [];
     for (const candidate of candidates) {
       try { proofs.push(prove(context, candidate)); }
-      catch (error) { if (error instanceof Unsupported) failures.push(error); else throw error; }
+      catch (error) {
+        if (!(error instanceof Unsupported)) throw error;
+        const binding = candidate.id && context.bindings.get(candidate.id);
+        const related = binding?.references.some(ref => {
+          const owner = enclosing(context, ref.identifier, 'ClassExpression');
+          return owner && context.nodes.some(node => inside(node, owner) && node.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier' && node.property.name === 'blocked');
+        });
+        if (related) failures.push(error);
+      }
     }
     need(proofs.length <= 1, 'AMBIGUOUS_TARGET', 'Multiple complete dedicated site-status channels found.');
     if (!proofs.length) throw failures[0] ?? new Unsupported('NO_TARGET', 'No complete supported channel found.');
+    need(!failures.length, 'UNPROVEN_CANDIDATE', 'Another plausible blocked-consumption channel is outside the supported family.', failures[0]?.node);
     const proof = proofs[0]!;
     const selected = range(proof.target), before = source.slice(selected.start, selected.end), after = wrapCuaResponse(before);
     const patchedSource = source.slice(0, selected.start) + after + source.slice(selected.end);
