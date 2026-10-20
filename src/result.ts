@@ -12,8 +12,10 @@ export const EXIT_CODES = {
 export interface Diagnostic {
   code: string;
   severity: 'info' | 'warning' | 'error';
+  outcome?: 'runtime-error' | 'conflict' | 'usage-error';
   message: string;
   path?: string;
+  installation?: string;
   systemCode?: string;
   range?: SourceRange;
 }
@@ -131,7 +133,7 @@ export function renderHuman(result: CommandResult): string {
     lines.push('Runtime: not-verified. Versions do not identify the running installation.');
   }
   for (const diagnostic of result.diagnostics) {
-    lines.push(`[${diagnostic.code}] ${diagnostic.message}${diagnostic.systemCode ? ` ${diagnostic.systemCode}` : ''}${diagnostic.path ? ` (${diagnostic.path})` : ''}${diagnostic.range ? ` [${diagnostic.range.start}..${diagnostic.range.end} ${diagnostic.range.unit}]` : ''}`);
+    lines.push(`[${diagnostic.code}] ${diagnostic.message}${diagnostic.systemCode ? ` ${diagnostic.systemCode}` : ''}${diagnostic.path ? ` (${diagnostic.path})` : ''}${diagnostic.installation ? ` (installation: ${diagnostic.installation})` : ''}${diagnostic.range ? ` [${diagnostic.range.start}..${diagnostic.range.end} ${diagnostic.range.unit}]` : ''}`);
   }
   return `${lines.join('\n')}\n`;
 }

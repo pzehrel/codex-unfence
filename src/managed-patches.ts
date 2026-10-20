@@ -32,7 +32,13 @@ export interface Inspection {
 export interface ConfirmedSelection { candidate: Candidate; inspectionToken: string; confirmed: true }
 
 function diagnostic(error: unknown): Diagnostic {
-  return { code: error instanceof TransactionError ? error.code : 'INSPECTION_FAILED', severity: 'error', message: error instanceof Error ? error.message : 'Cannot inspect target.' };
+  return {
+    code: error instanceof TransactionError ? error.code : 'INSPECTION_FAILED', severity: 'error',
+    outcome: error instanceof TransactionError ? error.kind : 'runtime-error',
+    message: error instanceof Error ? error.message : 'Cannot inspect target.',
+    ...(error instanceof Error && 'path' in error && typeof error.path === 'string' ? { path: error.path } : {}),
+    ...(error instanceof Error && 'code' in error && !(error instanceof TransactionError) ? { systemCode: String(error.code) } : {}),
+  };
 }
 
 /** One public business boundary for discovery, read-only inspection and managed transactions. */
@@ -116,7 +122,11 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
     try {
       const running = cuaBlockingProcesses(await processTable());
       if (running.length) blockers.push({ code: 'PROCESSES_RUNNING', severity: 'error', message: `Exit related processes before writing: ${running.map((entry) => `PID ${entry.pid} ${entry.executable}`).join('; ')}` });
-    } catch (error) { blockers.push({ code: 'PROCESS_ENUMERATION_FAILED', severity: 'error', message: error instanceof Error ? error.message : 'Cannot safely enumerate processes.' }); }
+    } catch (error) {
+      const entry: Diagnostic = { code: 'PROCESS_ENUMERATION_FAILED', severity: 'error', outcome: 'runtime-error', message: error instanceof Error ? error.message : 'Cannot safely enumerate processes.' };
+      blockers.push(entry);
+      diagnostics.push(entry);
+    }
     const actionBlocked = blockers.some((entry) => entry.code !== 'INCOMPLETE_TRANSACTION');
     const allowedActions: Inspection['allowedActions'] = actionBlocked || !inspectionToken ? [] : state === 'incomplete' && recovery ? ['recover'] : derivation?.support === 'supported' && state === 'original' ? ['apply', ...(recovery ? ['restore' as const] : [])] : state === 'tool-applied' && recovery ? ['apply', 'restore'] : [];
     const inspection: Inspection = { candidate, support: derivation?.support ?? 'unsupported', state, derivation, source, writeReadiness: blockers.some((entry) => entry.code === 'PROCESS_ENUMERATION_FAILED') ? 'unknown' : blockers.length ? 'blocked' : 'ready', blockers, allowedActions, diagnostics, inspectionToken, operation, recovery, runtime: 'not-verified' };

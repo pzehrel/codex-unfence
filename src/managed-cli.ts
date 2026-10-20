@@ -37,10 +37,11 @@ export async function managedCli(args: string[]): Promise<CheckResult | Operatio
   }
   const inspections = [];
   for (const installation of discovery.candidates) inspections.push(await managed.inspect(installation));
-  const diagnostics = [...discovery.diagnostics, ...inspections.flatMap(inspection => inspection.diagnostics.map(entry => ({ ...entry, path: entry.path ?? inspection.candidate.targetPath })))];
+  const diagnostics = [...discovery.diagnostics, ...inspections.flatMap(inspection => inspection.diagnostics.map(entry => ({ ...entry, installation: inspection.candidate.appPath, path: entry.path ?? inspection.candidate.targetPath })))];
   if (!inspections.length) diagnostics.push({ code: 'NO_INSTALLATIONS', severity: 'error', message: 'No CUA installation found; provide --app with its absolute path.' });
-  const outcome = !inspections.length || discovery.diagnostics.some(entry => entry.severity === 'error') || inspections.some(inspection => inspection.operation?.outcome === 'runtime-error') ? 'runtime-error'
-    : inspections.some(inspection => inspection.state === 'conflict' || inspection.operation?.outcome === 'conflict') ? 'conflict'
+  const discoveryErrors = discovery.diagnostics.filter(entry => entry.severity === 'error');
+  const outcome = (!inspections.length && !discoveryErrors.length) || discoveryErrors.some(entry => entry.outcome !== 'conflict') || inspections.some(inspection => inspection.operation?.outcome === 'runtime-error' || inspection.diagnostics.some(entry => entry.outcome === 'runtime-error')) ? 'runtime-error'
+    : discoveryErrors.length > 0 || inspections.some(inspection => inspection.state === 'conflict' || inspection.operation?.outcome === 'conflict') ? 'conflict'
       : inspections.some(inspection => inspection.support !== 'supported') ? 'incompatible' : 'success';
   const exitCode = { success: 0, 'runtime-error': 1, incompatible: 3, conflict: 4 }[outcome];
   return { schemaVersion: 1, command: 'check', outcome, exitCode, diagnostics, data: { discovery, inspections, inspection: candidate ? inspections[0] ?? null : null, runtime: 'not-verified' } };

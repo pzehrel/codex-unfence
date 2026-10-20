@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +36,38 @@ test('public check reports structural support independently of write blockers an
   assert.equal(result.data.inspection.writeReadiness, 'blocked');
   assert.equal(result.data.runtime, 'not-verified');
   assert.equal(result.data.inspection.blockers[0].code, 'PROCESSES_RUNNING');
+  assert.deepEqual(await readFile(box.target), box.source);
+  assert.deepEqual(await readdir(join(box.directory, 'home')), ['Applications']);
+});
+
+test('check reports process enumeration failure as runtime failure without changing structural support or file state', async t => {
+  const box = await sandbox(t);
+  const { code, result } = run(box, ['check'], { CODEX_TEST_PROCESS_FAILURE: '1' });
+  assert.equal(code, 1, JSON.stringify({ outcome: result.outcome, diagnostics: result.diagnostics }));
+  assert.equal(result.outcome, 'runtime-error');
+  assert.equal(result.data.inspections[0].support, 'supported');
+  assert.equal(result.data.inspections[0].state, 'original');
+  assert.equal(result.data.inspections[0].writeReadiness, 'unknown');
+  assert.deepEqual(result.data.inspections[0].allowedActions, []);
+  assert.equal(result.data.runtime, 'not-verified');
+  assert.ok(result.diagnostics.some(entry => entry.code === 'PROCESS_ENUMERATION_FAILED' && entry.installation === box.app));
+  assert.deepEqual(await readdir(join(box.directory, 'home')), ['Applications']);
+});
+
+test('check classifies a discovered path alias as conflict while retaining other installation results', async t => {
+  const box = await sandbox(t);
+  const alias = join(box.directory, 'home/Applications/Alias.app');
+  await symlink(box.app, alias);
+  const { code, result } = run(box, ['check']);
+  assert.equal(code, 4, JSON.stringify(result));
+  assert.equal(result.outcome, 'conflict');
+  assert.deepEqual(result.data.inspections.map(entry => entry.candidate.appPath), [box.app]);
+  assert.equal(result.data.inspections[0].state, 'original');
+  assert.ok(result.diagnostics.some(entry => entry.code === 'PATH_ALIAS' && entry.path === alias));
+  const explicit = run(box, ['check', '--app', alias]);
+  assert.equal(explicit.code, 4, JSON.stringify(explicit));
+  assert.equal(explicit.result.outcome, 'conflict');
+  assert.deepEqual(explicit.result.data.inspections, []);
   assert.deepEqual(await readFile(box.target), box.source);
   assert.deepEqual(await readdir(join(box.directory, 'home')), ['Applications']);
 });
