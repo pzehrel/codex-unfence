@@ -23,11 +23,21 @@ export default {
           wrappingStart = Math.min(wrappingStart, node.range[0]);
         }
       },
+      ObjectPattern(node) {
+        const parent = node.parent;
+        const source = parent.type === 'VariableDeclarator' ? parent.init
+          : parent.type === 'AssignmentExpression' ? parent.right : null;
+        if (source?.type === 'Identifier' && ['childProcess', 'promises'].includes(source.name)) {
+          wrappingStart = Math.min(wrappingStart, node.range[0]);
+        }
+      },
       AssignmentExpression(node) {
         const target = node.left;
-        if (target.type === 'MemberExpression' && target.object.type === 'Identifier' && target.object.name === 'os'
-          && (target.computed ? target.property.value : target.property.name) === 'userInfo') {
-          wrappingStart = Math.min(wrappingStart, node.range[0]);
+        if (target.type === 'MemberExpression' && target.object.type === 'Identifier' && target.object.name === 'os') {
+          const property = !target.computed ? target.property.name
+            : target.property.type === 'TemplateLiteral' && target.property.expressions.length === 0
+              ? target.property.quasis[0].value.cooked : target.property.value;
+          if (property === 'userInfo') wrappingStart = Math.min(wrappingStart, node.range[0]);
         }
       },
       'Program:exit'(node) {

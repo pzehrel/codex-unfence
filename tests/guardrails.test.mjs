@@ -107,6 +107,55 @@ test('boundary fixtures require their fixed preload composition through ESLint',
   }
 });
 
+test('boundary preloads precede destructured API saves through ESLint', async (t) => {
+  const saves = [
+    ['managed-boundaries.cjs', './transaction-boundaries.cjs', 'childProcess', 'execFile'],
+    ['npx-final-bin.cjs', './managed-boundaries.cjs', 'childProcess', 'execFile'],
+    ['managed-boundaries.cjs', './transaction-boundaries.cjs', 'promises', 'readdir'],
+    ['npx-final-bin.cjs', './managed-boundaries.cjs', 'promises', 'rename'],
+  ];
+  for (const [name, boundary, object, api] of saves) {
+    const filePath = `tests/fixtures/${name}`;
+    const fixture = await readFile(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
+    const load = `require('${boundary}');`;
+    for (const [form, save] of [
+      ['declaration', `const { ${api} } = ${object};`],
+      ['assignment', `let ${api};\n({ ${api} } = ${object});`],
+    ]) {
+      await t.test(`${name} ${object}.${api} ${form}`, async () => {
+        const source = fixture.replace(`const ${api} = ${object}.${api};`, save);
+        const [early] = await eslint.lintText(source, { filePath });
+        assert.deepEqual(early.messages, [], `${name} early preload`);
+        const lateSource = source.replace(load, '').replace(save, `${save}\n${load}`);
+        const [late] = await eslint.lintText(lateSource, { filePath });
+        assert.ok(late.messages.some(message => message.ruleId === 'test-boundaries/required-preload'
+          && message.message.includes(boundary) && message.message.includes(name)),
+        `${name} late preload after ${form}: ${JSON.stringify(late.messages)}`);
+      });
+    }
+  }
+});
+
+test('npx preload precedes static userInfo wrapper assignments through ESLint', async (t) => {
+  const name = 'npx-final-bin.cjs';
+  const filePath = `tests/fixtures/${name}`;
+  const boundary = './managed-boundaries.cjs';
+  const load = `require('${boundary}');`;
+  const fixture = await readFile(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
+  for (const member of ['os.userInfo', "os['userInfo']", 'os[`userInfo`]']) {
+    await t.test(member, async () => {
+      const source = fixture.replace('os.userInfo =', `${member} =`);
+      const [early] = await eslint.lintText(source, { filePath });
+      assert.deepEqual(early.messages, [], `${member} early preload`);
+      const lateSource = source.replace(load, '').replace('const scenarioPath =', `${load}\nconst scenarioPath =`);
+      const [late] = await eslint.lintText(lateSource, { filePath });
+      assert.ok(late.messages.some(message => message.ruleId === 'test-boundaries/required-preload'
+        && message.message.includes(boundary) && message.message.includes(name)),
+      `${member} late preload: ${JSON.stringify(late.messages)}`);
+    });
+  }
+});
+
 test('all three boundary fixtures permit ps save/wrap/delegate but reject restricted subprocess APIs', async () => {
   for (const name of ['npx-final-bin.cjs', 'managed-boundaries.cjs', 'transaction-boundaries.cjs']) {
     const filePath = `tests/fixtures/${name}`;
