@@ -78,7 +78,9 @@ not identify the running version. detect creates no patch plans or backups.
 
 Output protocol: schemaVersion 1. Exit codes: 0 success, 1 runtime failure,
 2 invalid arguments, 3 incompatible (including mixed compatible/incompatible), 4 conflict.
-Runtime failures take precedence over incompatibility; empty discovery succeeds.
+check aggregates runtime failure, conflict, incompatibility, then success.
+check exits 1 when no installations are found; empty legacy detect succeeds.
+Write blockers are reported separately; check success does not authorize writes.
 JSON results (including errors) go to stdout.
 `;
 

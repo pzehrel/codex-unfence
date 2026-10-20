@@ -76,7 +76,11 @@ test('packed npx check uses genuine structural admission and remains read-only',
 
 test('offline npx exposes help through a real PTY and propagates the public bin exit status', async (t) => {
   const box = await packageBox(t);
-  help(await npmPackage.runNpmExecPty(['--help'], box));
+  const documented = await npmPackage.runNpmExecPty(['--help'], box);
+  help(documented);
+  assert.match(documented.stdout, /check aggregates runtime failure, conflict, incompatibility, then success/);
+  assert.match(documented.stdout, /check exits 1 when no installations are found; empty legacy detect succeeds/);
+  assert.match(documented.stdout, /Write blockers are reported separately; check success does not authorize writes/);
   const observed = JSON.parse(await readFile(join(box.directory, 'final-bin.json'), 'utf8'));
   inside(join(box.directory, 'npm-cache'), observed.entry);
   assert.equal(observed.stdinTTY, true);
