@@ -1,5 +1,6 @@
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
+import requiredPreload from './scripts/eslint-test-boundaries.mjs';
 
 export default tseslint.config(
   { ignores: ['dist/**', 'node_modules/**', '.claude/**', 'evidence/**', 'patch-plans/**'] },
@@ -28,13 +29,22 @@ export default tseslint.config(
         {
           // The ps fixture may save execFile and install its wrapper, but may not call this launcher directly.
           selector: 'CallExpression[callee.type="MemberExpression"][callee.object.name="childProcess"]:matches([callee.computed=false][callee.property.name="execFile"], [callee.computed=true][callee.property.value="execFile"])',
-          message: 'Use the shared CLI launcher in tests/helpers/cli.mjs.',
+          message: 'Direct childProcess.execFile calls must use the shared CLI launcher in tests/helpers/cli.mjs.',
+        },
+        {
+          selector: 'CallExpression > MemberExpression.callee[object.name="childProcess"][computed=true] > TemplateLiteral.property[expressions.length=0] > TemplateElement[value.cooked="execFile"]',
+          message: 'Direct childProcess.execFile calls must use the shared CLI launcher in tests/helpers/cli.mjs.',
         },
       ],
     },
   },
   {
-    files: ['tests/fixtures/transaction-boundaries.cjs'],
+    files: ['tests/fixtures/npx-final-bin.cjs', 'tests/fixtures/managed-boundaries.cjs'],
+    plugins: { 'test-boundaries': { rules: { 'required-preload': requiredPreload } } },
+    rules: { 'test-boundaries/required-preload': 'error' },
+  },
+  {
+    files: ['tests/fixtures/npx-final-bin.cjs', 'tests/fixtures/managed-boundaries.cjs', 'tests/fixtures/transaction-boundaries.cjs'],
     rules: {
       // The exact import below patches execFile for synthetic ps output; it cannot launch CLI children.
       'no-restricted-properties': ['error', ...['spawn', 'spawnSync', 'exec', 'execSync', 'execFileSync', 'fork'].map((property) => ({

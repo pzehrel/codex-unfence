@@ -65,19 +65,70 @@ test('check reports committed, staged and working whitespace against the chosen 
   assert.doesNotMatch(failure.stdout, /checked test/);
 });
 
-test('process fixture permits its ps mock but rejects appended direct CLI launches', async () => {
-  const filePath = 'tests/fixtures/transaction-boundaries.cjs';
-  const fixture = await readFile(new URL('./fixtures/transaction-boundaries.cjs', import.meta.url), 'utf8');
-  const [legitimate] = await eslint.lintText(fixture, { filePath });
-  assert.deepEqual(legitimate.messages, []);
-  for (const launch of [
-    "childProcess.execFile(process.execPath, ['dist/cli.js', 'detect', '--json'], () => {});",
-    "childProcess['execFile'](process.execPath, ['dist/cli.js'], () => {});",
-    "childProcess.spawn(process.execPath, ['dist/cli.js']);",
-  ]) {
-    const [result] = await eslint.lintText(`${fixture}\n${launch}\n`, { filePath });
-    assert.ok(result.messages.some((message) => message.message.includes('shared CLI launcher')), launch);
-    assert.ok(result.messages.every((message) => ['no-restricted-syntax', 'no-restricted-properties'].includes(message.ruleId)), JSON.stringify(result.messages));
+const preloadContracts = [
+  ['npx-final-bin.cjs', './managed-boundaries.cjs'],
+  ['managed-boundaries.cjs', './transaction-boundaries.cjs'],
+];
+
+test('boundary fixtures require their fixed preload composition through ESLint', async () => {
+  for (const [name, boundary] of preloadContracts) {
+    const filePath = `tests/fixtures/${name}`;
+    const fixture = await readFile(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
+    for (const source of [fixture, `process.env.CODEX_TEST_SETUP = 'synthetic';\n${fixture}`]) {
+      const [legitimate] = await eslint.lintText(source, { filePath });
+      assert.deepEqual(legitimate.messages, [], name);
+    }
+    const load = `require('${boundary}');`;
+    const mutations = [
+      ['missing', ''],
+      ['replaced', `require('${name === 'npx-final-bin.cjs' ? './transaction-boundaries.cjs' : './cua-boundaries.cjs'}');`],
+      ['conditional', `if (process.env.CODEX_TEST_FAULT) ${load}`],
+      ['conditional expression', `process.env.CODEX_TEST_FAULT && require('${boundary}');`],
+      ['optional loader', `require?.('${boundary}');`],
+      ['uncalled', `function unusedBoundary() { ${load} } void unusedBoundary;`],
+      ['string', `void ${JSON.stringify(load)};`],
+      ['comment', `// ${load}`],
+      ['wrong loader', `void ((require) => require('${boundary}'))(() => {});`],
+      ['late', ''],
+      ['late after saving execFile', ''],
+      ...(name === 'npx-final-bin.cjs' ? [['late after home wrapper', '']] : []),
+    ];
+    for (const [mutation, replacement] of mutations) {
+      let source = fixture.replace(load, replacement);
+      if (mutation === 'late') source += `\n${load}\n`;
+      if (mutation === 'late after saving execFile') source = source.replace('const execFile = childProcess.execFile;', `const execFile = childProcess.execFile;\n${load}`);
+      if (mutation === 'late after home wrapper') source = source.replace('const scenarioPath =', `${load}\nconst scenarioPath =`);
+      const [result] = await eslint.lintText(source, { filePath });
+      assert.ok(result.filePath.endsWith(filePath));
+      assert.ok(result.messages.some(message => message.ruleId === 'test-boundaries/required-preload'
+        && message.message.includes(boundary) && message.message.includes(name)),
+      `${name} ${mutation}: ${JSON.stringify(result.messages)}`);
+    }
+  }
+});
+
+test('all three boundary fixtures permit ps save/wrap/delegate but reject restricted subprocess APIs', async () => {
+  for (const name of ['npx-final-bin.cjs', 'managed-boundaries.cjs', 'transaction-boundaries.cjs']) {
+    const filePath = `tests/fixtures/${name}`;
+    const fixture = await readFile(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
+    for (const source of [fixture, fixture.replaceAll('childProcess.execFile', "childProcess['execFile']"), fixture.replaceAll('childProcess.execFile', 'childProcess[`execFile`]')]) {
+      const [legitimate] = await eslint.lintText(source, { filePath });
+      assert.deepEqual(legitimate.messages, [], name);
+    }
+    for (const api of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFileSync', 'fork', 'execFile']) {
+      for (const member of [`childProcess.${api}`, `childProcess['${api}']`, `childProcess[\`${api}\`]`]) {
+        // Saving execFile for the existing ps wrapper is permitted; other launchers cannot be saved either.
+        const accesses = api === 'execFile' ? [`${member}(process.execPath, ['dist/cli.js'], () => {});`]
+          : [`${member}(process.execPath, ['dist/cli.js']);`, `void ${member};`];
+        for (const launch of accesses) {
+          const [result] = await eslint.lintText(`${fixture}\n${launch}\n`, { filePath });
+          assert.ok(result.filePath.endsWith(filePath));
+          assert.ok(result.messages.some(message => message.message.includes('shared CLI launcher')
+            && message.message.includes(api)), `${name}: ${launch}: ${JSON.stringify(result.messages)}`);
+          assert.ok(result.messages.every(message => ['no-restricted-syntax', 'no-restricted-properties'].includes(message.ruleId)), JSON.stringify(result.messages));
+        }
+      }
+    }
   }
 });
 
@@ -101,8 +152,12 @@ test('test lint rejects direct subprocess access through imports, reexports, dyn
   }
   const [typescript] = await eslint.lintText("import child = require('node:child_process'); void child;", { filePath: 'tests/direct-launch.ts' });
   assert.ok(typescript.messages.some((message) => message.message.includes('shared CLI launcher')));
-  for (const source of ["childProcess.spawn('node', ['dist/cli.js']);", "void require('child_process');"]) {
-    const [result] = await eslint.lintText(source, { filePath: 'tests/fixtures/transaction-boundaries.cjs' });
-    assert.ok(result.messages.some((message) => message.message.includes('shared CLI launcher')), source);
+  for (const name of ['npx-final-bin.cjs', 'managed-boundaries.cjs', 'transaction-boundaries.cjs']) {
+    const filePath = `tests/fixtures/${name}`;
+    const fixture = await readFile(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
+    for (const source of examples) {
+      const [result] = await eslint.lintText(`${fixture}\n${source}\n`, { filePath });
+      assert.ok(result.messages.some(message => message.message.includes('shared CLI launcher')), `${name}: ${source}`);
+    }
   }
 });
