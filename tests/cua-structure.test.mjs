@@ -9,6 +9,57 @@ import { deriveCua } from '../dist/cua-analysis.js';
 
 const fixture = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url), 'utf8');
 
+/*
+ * Finite public deriveCua(source) coverage, spec #22 / ticket #24.
+ * This is a selected set of adjacent cases, not a Cartesian product.
+ *
+ * Dimension             | Named cases / existing controls                 | Expected behavior
+ * Alias establishment   | matrix alias: declaration, assignment,          | Read-only aliases support;
+ *                       | destructuring declaration/assignment, chains    | standard mutation/escape rejects.
+ * Property access       | matrix candidate: dot and literal-computed fetch| Unknown second fetch still counts;
+ *                       | matrix reader: direct and computed instantiate  | computed instantiate earns no bridge.
+ * Scope                 | matrix scope: Object/Reflect module/parameter   | Injection capture rejects;
+ *                       | bindings and unrelated local bindings           | unrelated local shadows support.
+ * Candidate count       | unique synthetic chain; matrix candidate:       | Only one proven chain supports;
+ *                       | absent, two proven, one proven + one unknown     | absent/ambiguous/unknown rejects.
+ * Initialization        | matrix initialization: direct/deferred, missing,| Early unconditional setup supports;
+ * reachability          | conditional, abrupt, late and changed once      | unreachable/late/changed setup rejects.
+ *
+ * Historical roots reuse these cases: assignment alias omission (matrix alias),
+ * wrapper capture (matrix scope), computed-fetch omission (matrix candidate),
+ * computed-instantiate misassociation (matrix reader). Only synthetic source is
+ * parsed. Reader cases never load resource bytes or instantiate Wasm.
+ */
+const expectedTransport = 'await runtime.fetch(endpoint, options)';
+
+function structuralCases(group, cases) {
+  for (const { name, source, support, diagnostic } of cases) {
+    test(`matrix ${group}: ${name}`, () => {
+      const result = deriveCua(source);
+      assert.equal(result.support, support, JSON.stringify(result.diagnostics));
+      if (support === 'unsupported') {
+        assert.equal(result.change, null);
+        assert.ok(result.diagnostics.length > 0);
+        if (diagnostic) assert.equal(result.diagnostics[0].code, diagnostic);
+        return;
+      }
+      assert.deepEqual(result.diagnostics, []);
+      const { range, before, after, patchedSource } = result.change;
+      // The fixture contract supplies this literal; never derive expectations
+      // from the analyzer's target or evidence ranges.
+      const start = source.indexOf(expectedTransport);
+      assert.ok(start >= 0);
+      assert.equal(source.indexOf(expectedTransport, start + 1), -1);
+      assert.deepEqual(range, { start, end: start + expectedTransport.length, unit: 'utf16' });
+      assert.equal(before, expectedTransport);
+      assert.notEqual(after, before);
+      assert.deepEqual(Buffer.from(patchedSource.slice(0, start)), Buffer.from(source.slice(0, start)));
+      assert.deepEqual(Buffer.from(patchedSource.slice(start + after.length)), Buffer.from(source.slice(start + expectedTransport.length)));
+      assert.equal(patchedSource.slice(start, start + after.length), after);
+    });
+  }
+}
+
 test('derives the unique dedicated transport in a complete synthetic site-status chain', () => {
   const result = deriveCua(fixture);
   assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
@@ -89,79 +140,49 @@ test('supports a bound literal-only error formatter without changing the origina
   assert.ok(result.change.patchedSource.includes("new Error(message('Missing fetch'))"));
 });
 
-test('refuses initializer calls hidden after return or under a conditional', () => {
-  for (const source of [
-    fixture.replace('var initialize = once(() => {', 'var initialize = once(() => { return;'),
-    fixture.replace('initErrors(); initSiteStatus();', 'initErrors(); if (false) initSiteStatus();').replace('var initErrors = once(() => { initMetadata(); initSiteStatus(); });', 'var initErrors = once(() => { initMetadata(); if (false) initSiteStatus(); });'),
-  ]) {
-    const result = deriveCua(source);
-    assert.equal(result.support, 'unsupported');
-    assert.equal(result.change, null);
-  }
-});
+const directConfiguration = "var baseUrl = 'https://chatgpt.com/backend-api', agentKey = 'agent', requestSource = 'codex_browser_use';";
+const directFixture = fixture.replace(/var baseUrl, agentKey, requestSource, initSiteStatus = once\(\(\) => \{[\s\S]*?\n\}\);/, directConfiguration + ' var initSiteStatus = once(() => {});');
 
-test('requires direct constant configuration before the policy can be consumed', () => {
-  const direct = fixture.replace(/var baseUrl, agentKey, requestSource, initSiteStatus = once\(\(\) => \{[\s\S]*?\n\}\);/, "var baseUrl = 'https://chatgpt.com/backend-api', agentKey = 'agent', requestSource = 'codex_browser_use'; var initSiteStatus = once(() => {});");
-  assert.equal(deriveCua(direct).support, 'supported');
-  const declaration = "var baseUrl = 'https://chatgpt.com/backend-api', agentKey = 'agent', requestSource = 'codex_browser_use';";
-  const late = direct.replace(declaration, '') + '\nenforce({}, "https://example.com");\n' + declaration;
-  const result = deriveCua(late);
-  assert.equal(result.support, 'unsupported');
-  assert.equal(result.change, null);
-});
+structuralCases('initialization', [
+  { name: 'unconditional nested once configuration supports', source: fixture, support: 'supported' },
+  { name: 'direct configuration before policy construction supports', source: directFixture, support: 'supported' },
+  { name: 'initializer call after return rejects', source: fixture.replace('var initialize = once(() => {', 'var initialize = once(() => { return;'), support: 'unsupported', diagnostic: 'CONFIGURATION_INITIALIZATION' },
+  { name: 'all configuration calls under conditional reject', source: fixture.replace('initErrors(); initSiteStatus();', 'initErrors(); if (false) initSiteStatus();').replace('var initErrors = once(() => { initMetadata(); initSiteStatus(); });', 'var initErrors = once(() => { initMetadata(); if (false) initSiteStatus(); });'), support: 'unsupported', diagnostic: 'CONFIGURATION_INITIALIZATION' },
+  { name: 'direct configuration after consumption rejects', source: directFixture.replace(directConfiguration, '') + '\nenforce({}, "https://example.com");\n' + directConfiguration, support: 'unsupported', diagnostic: 'CONFIGURATION_INITIALIZATION' },
+  { name: 'configuration assignment after return rejects', source: fixture.replace("baseUrl = 'https://chatgpt.com/backend-api'", "return; baseUrl = 'https://chatgpt.com/backend-api'"), support: 'unsupported', diagnostic: 'CONFIGURATION_INITIALIZATION' },
+  { name: 'configuration assignment after throw rejects', source: fixture.replace("baseUrl = 'https://chatgpt.com/backend-api'", 'throw new Error("stop"); baseUrl = \'https://chatgpt.com/backend-api\''), support: 'unsupported', diagnostic: 'CONFIGURATION_INITIALIZATION' },
+  { name: 'never-called once configuration rejects', source: fixture.replace('initialize();', ''), support: 'unsupported', diagnostic: 'CONFIGURATION_INITIALIZATION' },
+  { name: 'conditional module initializer call rejects', source: fixture.replace('initialize();', 'if (false) initialize();'), support: 'unsupported', diagnostic: 'CONFIGURATION_INITIALIZATION' },
+  { name: 'module initialization after consumption rejects', source: fixture.replace('initialize();', '') + '\nenforce({}, "https://example.com"); initialize();', support: 'unsupported', diagnostic: 'CONFIGURATION_INITIALIZATION' },
+  { name: 'conditional configuration assignment rejects', source: fixture.replace("baseUrl = 'https://chatgpt.com/backend-api'", "if (false) baseUrl = 'https://chatgpt.com/backend-api'"), support: 'unsupported', diagnostic: 'CONFIGURATION_INITIALIZATION' },
+  { name: 'once combinator without task clearing rejects', source: fixture.replace('task(task = 0)', 'task(task)'), support: 'unsupported', diagnostic: 'CONFIGURATION_INITIALIZATION' },
+]);
 
-test('refuses destructured and global-root aliases that modify standard capabilities', () => {
-  for (const prefix of [
-    'const {prototype: original} = URL; original.toString = function () { return "changed"; };',
-    'const globals = globalThis; globals.URL.prototype.toString = function () { return "changed"; };',
-    'const {URL: constructor} = globalThis; constructor.prototype.toString = function () { return "changed"; };',
-    'const globals = globalThis; globals[unknownKey] = function () {};',
-  ]) {
-    const result = deriveCua(prefix + fixture);
-    assert.equal(result.support, 'unsupported', prefix);
-    assert.equal(result.change, null);
-  }
-});
-
-test('refuses standard capability mutation through aliases formed by ordinary assignment', () => {
-  for (const prefix of [
-    'let standard; standard = URL; standard.prototype.toString = () => "changed";',
-    'let globals; globals = globalThis; globals.URL.prototype.toString = () => "changed";',
-    'let first, second; second = first; first = URL; second.prototype.toString = () => "changed";',
-  ]) {
-    const result = deriveCua(prefix + fixture);
-    assert.equal(result.support, 'unsupported', prefix);
-    assert.equal(result.change, null);
-    assert.equal(result.diagnostics[0].code, 'CAPABILITY_MUTATION');
-  }
-});
-
-test('refuses standard capability mutation through destructuring assignments', () => {
-  for (const prefix of [
-    'let standard; ({URL: standard} = globalThis); standard.prototype.toString = () => "changed";',
-    'let original; ({prototype: original} = URL); original.toString = () => "changed";',
-    'let globals; ({globalThis: globals} = globalThis); globals.URL.prototype.toString = () => "changed";',
-    'let globals, standard; globals = globalThis; ({URL: standard} = globals); standard.prototype.toString = () => "changed";',
-  ]) {
-    const result = deriveCua(prefix + fixture);
-    assert.equal(result.support, 'unsupported', prefix);
-    assert.equal(result.change, null);
-    assert.equal(result.diagnostics[0].code, 'CAPABILITY_MUTATION');
-  }
-});
-
-test('permits assignments that do not mutate or expose related capabilities', () => {
-  for (const prefix of [
-    'let local; local = {}; local.syntheticFlag = true;',
-    'let standard; standard = URL;',
-    'let globals; globals = globalThis; globals.syntheticFlag = true;',
-    'let local; ({syntheticState: local} = globalThis); local.syntheticFlag = true;',
-    'let standard; ({URL: standard} = globalThis);',
-  ]) {
-    const result = deriveCua(prefix + fixture);
-    assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
-  }
-});
+structuralCases('alias', [
+  { name: 'declaration of standard without mutation supports', prefix: 'const standard = URL;', support: 'supported' },
+  { name: 'ordinary assignment of standard without mutation supports', prefix: 'let standard; standard = URL;', support: 'supported' },
+  { name: 'destructuring declaration without mutation supports', prefix: 'const {URL: standard} = globalThis;', support: 'supported' },
+  { name: 'destructuring assignment without mutation supports', prefix: 'let standard; ({URL: standard} = globalThis);', support: 'supported' },
+  { name: 'ordinary assignment of unrelated object supports', prefix: 'let local; local = {}; local.syntheticFlag = true;', support: 'supported' },
+  { name: 'global-root assignment with unrelated property write supports', prefix: 'let globals; globals = globalThis; globals.syntheticFlag = true;', support: 'supported' },
+  { name: 'destructured unrelated property write supports', prefix: 'let local; ({syntheticState: local} = globalThis); local.syntheticFlag = true;', support: 'supported' },
+  { name: 'declaration then standard mutation rejects', prefix: 'const standard = URL; standard.prototype.toString = () => "changed";', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'ordinary assignment then standard mutation rejects', prefix: 'let standard; standard = URL; standard.prototype.toString = () => "changed";', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'ordinary global-root assignment then standard mutation rejects', prefix: 'let globals; globals = globalThis; globals.URL.prototype.toString = () => "changed";', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'reverse-order assignment chain then mutation rejects', prefix: 'let first, second; second = first; first = URL; second.prototype.toString = () => "changed";', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'destructuring declaration of prototype then mutation rejects', prefix: 'const {prototype: original} = URL; original.toString = function () { return "changed"; };', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'global-root declaration then standard mutation rejects', prefix: 'const globals = globalThis; globals.URL.prototype.toString = function () { return "changed"; };', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'destructuring declaration of standard then mutation rejects', prefix: 'const {URL: constructor} = globalThis; constructor.prototype.toString = function () { return "changed"; };', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'global-root declaration then unknown property write rejects', prefix: 'const globals = globalThis; globals[unknownKey] = function () {};', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'destructuring assignment of standard then mutation rejects', prefix: 'let standard; ({URL: standard} = globalThis); standard.prototype.toString = () => "changed";', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'destructuring assignment of prototype then mutation rejects', prefix: 'let original; ({prototype: original} = URL); original.toString = () => "changed";', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'destructuring assignment of global root then mutation rejects', prefix: 'let globals; ({globalThis: globals} = globalThis); globals.URL.prototype.toString = () => "changed";', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'ordinary and destructuring assignment chain then mutation rejects', prefix: 'let globals, standard; globals = globalThis; ({URL: standard} = globals); standard.prototype.toString = () => "changed";', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'destructuring declaration of global root then mutation rejects', prefix: 'const {globalThis: globals} = globalThis; globals.URL.prototype.toString = () => "changed";', support: 'unsupported', diagnostic: 'CAPABILITY_MUTATION' },
+  { name: 'declaration then standard escape rejects', prefix: 'const standard = URL; unknown(standard);', support: 'unsupported', diagnostic: 'CAPABILITY_ESCAPE' },
+  { name: 'ordinary assignment then standard escape rejects', prefix: 'let standard; standard = URL; unknown(standard);', support: 'unsupported', diagnostic: 'CAPABILITY_ESCAPE' },
+  { name: 'destructuring assignment then standard escape rejects', prefix: 'let standard; ({URL: standard} = globalThis); unknown(standard);', support: 'unsupported', diagnostic: 'CAPABILITY_ESCAPE' },
+].map(({ prefix, ...entry }) => ({ ...entry, source: prefix + '\n' + fixture })));
 
 function renamed(source, prefix) {
   const program = parse(source, { ecmaVersion: 2022, sourceType: 'module', ranges: true });
@@ -203,24 +224,22 @@ test('supports lexical renaming, Unicode offsets and unrelated module code with 
   assert.equal(deriveCua(patchedSource).support, 'unsupported');
 });
 
-test('refuses another plausible site-status channel even when only one is fully supported', () => {
-  const second = renamed(fixture.replace("{ method: 'GET' }", "{ method: 'POST' }"), 'other');
-  const result = deriveCua(fixture + '\n' + second.replace("import { basename } from 'node:path';", ''));
-  assert.equal(result.support, 'unsupported');
-  assert.equal(result.change, null);
-});
+function secondChannel(source, prefix) {
+  return fixture + '\n' + renamed(source, prefix).replace("import { basename } from 'node:path';", '');
+}
 
-test('refuses a second site-status chain with a statically computed transport property', () => {
-  const second = renamed(fixture.replaceAll('runtime.fetch', 'runtime["fetch"]'), 'computedFetch').replace("import { basename } from 'node:path';", '');
-  const result = deriveCua(fixture + '\n' + second);
-  assert.equal(result.support, 'unsupported');
-  assert.equal(result.change, null);
-  assert.equal(result.diagnostics[0].code, 'UNPROVEN_CANDIDATE');
-});
+structuralCases('candidate', [
+  { name: 'no awaited fetch rejects', source: fixture.replace('await runtime.fetch(endpoint, options)', 'await runtime.send(endpoint, options)'), support: 'unsupported', diagnostic: 'NO_TARGET' },
+  { name: 'single literal-computed fetch has no proven transport', source: fixture.replaceAll('runtime.fetch', 'runtime["fetch"]'), support: 'unsupported' },
+  { name: 'two proven dot-fetch channels reject ambiguity', source: secondChannel(fixture, 'another'), support: 'unsupported', diagnostic: 'AMBIGUOUS_TARGET' },
+  { name: 'proven dot-fetch plus unknown POST channel rejects', source: secondChannel(fixture.replace("{ method: 'GET' }", "{ method: 'POST' }"), 'other'), support: 'unsupported', diagnostic: 'UNPROVEN_CANDIDATE' },
+  { name: 'proven dot-fetch plus literal-computed fetch channel rejects', source: secondChannel(fixture.replaceAll('runtime.fetch', 'runtime["fetch"]'), 'computedFetch'), support: 'unsupported', diagnostic: 'UNPROVEN_CANDIDATE' },
+  { name: 'proven dot-fetch plus literal-computed blocked reads rejects', source: secondChannel(fixture.replaceAll('.blocked', '["blocked"]'), 'computed'), support: 'unsupported', diagnostic: 'UNPROVEN_CANDIDATE' },
+  { name: 'unrelated literal-computed fetch without blocked consumer supports', source: fixture + '\nasync function unrelatedFetch(runtime) { return await runtime["fetch"]("other"); }', support: 'supported' },
+]);
 
-test('refuses ambiguity, unknown response interfaces, changed provenance, receivers and boolean semantics', () => {
+test('refuses unknown response interfaces, changed provenance, receivers and boolean semantics', () => {
   const cases = [
-    fixture + renamed(fixture, 'another').replace("import { basename } from 'node:path';", ''),
     fixture.replace('/aura/site_status', '/aura/other'),
     fixture.replace("{ method: 'GET' }", "{ method: 'POST' }"),
     fixture.replace('await response.json()', 'await other.json()'),
@@ -242,20 +261,14 @@ test('refuses ambiguity, unknown response interfaces, changed provenance, receiv
   }
 });
 
-test('refuses wrapper standard names captured by bindings at the injection scope', () => {
-  for (const name of ['Object', 'Reflect']) {
-    for (const source of [
-      `const ${name} = {};\n` + fixture,
-      fixture.replace('async function transport(runtime, endpoint, options)', `async function transport(runtime, endpoint, ${name})`).replace('return await runtime.fetch(endpoint, options)', `return await runtime.fetch(endpoint, ${name})`),
-    ]) {
-      const result = deriveCua(source);
-      assert.equal(result.support, 'unsupported', name);
-      assert.equal(result.change, null);
-      assert.equal(result.diagnostics[0].code, 'WRAPPER_BINDING');
-    }
-  }
-  assert.equal(deriveCua('function unrelatedScope(Object, Reflect) { return [Object, Reflect]; }\n' + fixture).support, 'supported');
-});
+structuralCases('scope', [
+  { name: 'module Object capture rejects', source: 'const Object = {};\n' + fixture, support: 'unsupported', diagnostic: 'WRAPPER_BINDING' },
+  { name: 'module Reflect capture rejects', source: 'const Reflect = {};\n' + fixture, support: 'unsupported', diagnostic: 'WRAPPER_BINDING' },
+  { name: 'transport Object parameter capture rejects', source: fixture.replace('async function transport(runtime, endpoint, options)', 'async function transport(runtime, endpoint, Object)').replace('return await runtime.fetch(endpoint, options)', 'return await runtime.fetch(endpoint, Object)'), support: 'unsupported', diagnostic: 'WRAPPER_BINDING' },
+  { name: 'transport Reflect parameter capture rejects', source: fixture.replace('async function transport(runtime, endpoint, options)', 'async function transport(runtime, endpoint, Reflect)').replace('return await runtime.fetch(endpoint, options)', 'return await runtime.fetch(endpoint, Reflect)'), support: 'unsupported', diagnostic: 'WRAPPER_BINDING' },
+  { name: 'unrelated Object and Reflect parameters support', source: 'function unrelatedScope(Object, Reflect) { return [Object, Reflect]; }\n' + fixture, support: 'supported' },
+  { name: 'unrelated Object and Reflect local declarations support', source: 'function unrelatedScope() { const Object = {}, Reflect = {}; return [Object, Reflect]; }\n' + fixture, support: 'supported' },
+]);
 
 test('returns parse diagnostics for invalid and unsupported syntax without throwing', () => {
   for (const source of ['function {', 'await using value = item;', '']) {
@@ -332,27 +345,17 @@ test('refuses related export exposure even without an extra local reference', ()
   }
 });
 
-test('requires initialization assignment itself to be reachable before any abrupt statement', () => {
-  for (const abrupt of ['return;', 'throw new Error("stop");']) {
-    const result = deriveCua(fixture.replace("baseUrl = 'https://chatgpt.com/backend-api'", abrupt + " baseUrl = 'https://chatgpt.com/backend-api'"));
-    assert.equal(result.support, 'unsupported', abrupt);
-    assert.equal(result.change, null);
-  }
-});
-
-test('tracks destructured aliases of the global root itself', () => {
-  const source = 'const {globalThis: globals} = globalThis; globals.URL.prototype.toString = () => "changed";\n' + fixture;
-  assert.equal(deriveCua(source).support, 'unsupported');
-});
-
-test('refuses an additional unknown chain with statically computed blocked reads', () => {
-  const second = renamed(fixture, 'computed').replace("import { basename } from 'node:path';", '').replaceAll('.blocked', '["blocked"]');
-  const result = deriveCua(fixture + second);
-  assert.equal(result.support, 'unsupported');
-  assert.equal(result.change, null);
-});
-
 const readerFixture = await readFile(new URL('./fixtures/cua-structural-reader.js.txt', import.meta.url), 'utf8');
+
+structuralCases('reader', [
+  { name: 'direct instantiate links finite bridge', source: fixture + readerFixture, support: 'supported' },
+  { name: 'direct instantiateStreaming links finite bridge', source: fixture + readerFixture.replace('WebAssembly.instantiate(', 'WebAssembly.instantiateStreaming('), support: 'supported' },
+  { name: 'computed instantiate identifier earns no bridge', source: fixture + readerFixture.replace('const module = await WebAssembly.instantiate(', 'const instantiate = "notInstantiation"; const module = await WebAssembly[instantiate]('), support: 'unsupported', diagnostic: 'CAPABILITY_ESCAPE' },
+  { name: 'computed instantiateStreaming identifier earns no bridge', source: fixture + readerFixture.replace('const module = await WebAssembly.instantiate(', 'const instantiateStreaming = "notInstantiation"; const module = await WebAssembly[instantiateStreaming]('), support: 'unsupported', diagnostic: 'CAPABILITY_ESCAPE' },
+  { name: 'literal-computed instantiate earns no bridge', source: fixture + readerFixture.replace('WebAssembly.instantiate(', 'WebAssembly["instantiate"]('), support: 'unsupported', diagnostic: 'CAPABILITY_ESCAPE' },
+  { name: 'literal-computed instantiateStreaming earns no bridge', source: fixture + readerFixture.replace('WebAssembly.instantiate(', 'WebAssembly["instantiateStreaming"]('), support: 'unsupported', diagnostic: 'CAPABILITY_ESCAPE' },
+  { name: 'unrelated computed instantiation without capability escape supports', source: fixture + '\nasync function unrelatedReader() { return await WebAssembly["instantiate"](syntheticBytes, {}); }', support: 'supported' },
+]);
 
 test('admits only the linked finite ZXing reader bridge under an explicit noninterference assumption', () => {
   const result = deriveCua(fixture + readerFixture);
@@ -396,27 +399,10 @@ test('rejects disconnected or changed reader bridges and additional capability e
   assert.equal(renamedResult.support, 'supported', JSON.stringify(renamedResult.diagnostics));
 });
 
-test('refuses dynamic reader calls whose property binding only resembles instantiation', () => {
-  for (const name of ['instantiate', 'instantiateStreaming']) {
-    const reader = readerFixture.replace('const module = await WebAssembly.instantiate(', `const ${name} = "notInstantiation"; const module = await WebAssembly[${name}](`);
-    const result = deriveCua(fixture + reader);
-    assert.equal(result.support, 'unsupported', name);
-    assert.equal(result.change, null);
-    assert.equal(result.diagnostics[0].code, 'CAPABILITY_ESCAPE');
-  }
-});
-
 test('refuses reader imports detached from resource instantiation', () => {
   const result = deriveCua(fixture + readerFixture.replace('new Uint8Array(), imports', 'new Uint8Array(), otherImports'));
   assert.equal(result.support, 'unsupported');
   assert.equal(result.change, null);
-});
-
-test('refuses configuration whose once initializer never runs', () => {
-  const result = deriveCua(fixture.replace('initialize();', ''));
-  assert.equal(result.support, 'unsupported');
-  assert.equal(result.change, null);
-  assert.match(result.diagnostics[0].code, /INITIALIZATION/);
 });
 
 test('allows unrelated browser capability inspection without treating it as chain mutation', () => {
@@ -429,26 +415,11 @@ test('refuses visible standard capability mutation and dynamic scope', () => {
   for (const change of [
     'Object.defineProperty(URL.prototype, "pathname", {set(value) {}});',
     'Map.prototype.get = function () { return true; };',
-    'const standard = URL; standard.prototype.toString = () => "changed";',
     'globalThis["URL"] = function () {};',
     'eval("URL = function () {}");',
   ]) {
     const result = deriveCua(change + fixture);
     assert.equal(result.support, 'unsupported', change);
-    assert.equal(result.change, null);
-  }
-});
-
-test('refuses conditional, reordered and changed once initialization', () => {
-  const inputs = [
-    fixture.replace('initialize();', 'if (false) initialize();'),
-    fixture.replace('initialize();', '').concat('\nenforce({}, "https://example.com"); initialize();'),
-    fixture.replace("baseUrl = 'https://chatgpt.com/backend-api'", "if (false) baseUrl = 'https://chatgpt.com/backend-api'"),
-    fixture.replace('task(task = 0)', 'task(task)'),
-  ];
-  for (const source of inputs) {
-    const result = deriveCua(source);
-    assert.equal(result.support, 'unsupported', source.slice(-100));
     assert.equal(result.change, null);
   }
 });
