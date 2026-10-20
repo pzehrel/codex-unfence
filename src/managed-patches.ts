@@ -74,6 +74,7 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
       // An authenticated stored plan supplies the original when the actual target is patched.
       derivation = record?.plan.derivation ?? derive(text);
       diagnostics.push(...derivation.diagnostics);
+      if (!record && derivation.support === 'unsupported') diagnostics.push({ code: 'UNVERIFIED_SOURCE', severity: 'warning', message: 'No trusted managed origin exists; original tool version is unknown. If this is a historical patch, use its original entrypoint, preparation and operation store to restore. Similar wrapper bytes never prove tool provenance.' });
       operation = await status(actual);
       diagnostics.push(...operation.diagnostics.filter((entry) => entry.code !== 'PROCESS_CHECK_LIMITATION'));
       state = operation.data?.targets[0]?.state ?? 'conflict';
