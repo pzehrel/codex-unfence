@@ -297,7 +297,11 @@ class Match {
   private initialized(identifier: E.Identifier): void {
     const parent = this.context.parents.get(identifier);
     const top = parent?.type === 'VariableDeclarator' ? this.context.parents.get(this.context.parents.get(parent)!) : null;
-    if (top === this.context.program) return;
+    if (top === this.context.program) {
+      const instance = definition(this.binding('policy'));
+      need(instance && range(parent!).end < range(instance).start, 'CONFIGURATION_INITIALIZATION', 'Direct configuration must be initialized before policy construction and consumption.', identifier);
+      return;
+    }
     const initializer = enclosing(this.context, identifier, 'ArrowFunctionExpression');
     need(initializer?.type === 'ArrowFunctionExpression', 'CONFIGURATION_INITIALIZATION', 'Configuration needs a top-level constant or finite once initializer.', identifier);
     let position: E.Node = identifier;
@@ -347,6 +351,12 @@ class Match {
           if (instance && range(statement).end < range(instance).start) return true;
         }
         const fn = enclosing(this.context, call, 'ArrowFunctionExpression');
+        let direct: E.Node = call;
+        while (this.context.parents.get(direct)?.type === 'SequenceExpression') direct = this.context.parents.get(direct)!;
+        const directStatement = this.context.parents.get(direct);
+        if (fn?.type !== 'ArrowFunctionExpression' || fn.body.type !== 'BlockStatement' || directStatement?.type !== 'ExpressionStatement' || this.context.parents.get(directStatement) !== fn.body) continue;
+        const preceding = fn.body.body.slice(0, fn.body.body.indexOf(directStatement));
+        if (!preceding.every(node => node.type === 'ExpressionStatement' && (node.expression.type === 'CallExpression' || node.expression.type === 'SequenceExpression' || node.expression.type === 'Literal'))) continue;
         const invoke = fn && this.context.parents.get(fn), declaration = invoke && this.context.parents.get(invoke);
         if (invoke?.type === 'CallExpression' && invoke.callee.type === 'Identifier' && this.context.bindings.get(invoke.callee) === once && declaration?.type === 'VariableDeclarator' && declaration.id.type === 'Identifier') {
           const outer = this.context.bindings.get(declaration.id);
@@ -392,13 +402,14 @@ class Match {
 
   private capabilityEffects(): void {
     const standards = new Set(['URL', 'Map', 'Date', 'Object', 'Reflect', 'JSON', 'Error']);
-    const capabilities = new Set<Variable>();
+    const capabilities = new Set<Variable>(), globalAliases = new Set<Variable>();
+    const globalRoot = (node: E.Node): boolean => node.type === 'Identifier' && (this.context.bindings.has(node) ? globalAliases.has(this.context.bindings.get(node)!) : ['globalThis', 'global', 'window', 'self'].includes(node.name));
     const root = (node: E.Node): boolean => {
       if (node.type === 'Identifier') {
         const binding = this.context.bindings.get(node);
         return binding ? capabilities.has(binding) : standards.has(node.name);
       }
-      if (node.type === 'MemberExpression' && node.object.type === 'Identifier' && !this.context.bindings.has(node.object) && ['globalThis', 'global', 'window', 'self'].includes(node.object.name)) {
+      if (node.type === 'MemberExpression' && globalRoot(node.object)) {
         const key = node.computed ? node.property.type === 'Literal' ? node.property.value : null : node.property.type === 'Identifier' ? node.property.name : null;
         return key === null || standards.has(String(key));
       }
@@ -408,9 +419,20 @@ class Match {
     while (changed) {
       changed = false;
       for (const node of this.context.nodes) {
-        if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier' && node.init && root(node.init)) {
+        if (node.type !== 'VariableDeclarator' || !node.init) continue;
+        if (node.id.type === 'Identifier') {
           const binding = this.context.bindings.get(node.id);
-          if (binding && !capabilities.has(binding)) { capabilities.add(binding); changed = true; }
+          if (binding && root(node.init) && !capabilities.has(binding)) { capabilities.add(binding); changed = true; }
+          if (binding && globalRoot(node.init) && !globalAliases.has(binding)) { globalAliases.add(binding); changed = true; }
+        } else if (node.id.type === 'ObjectPattern' && (root(node.init) || globalRoot(node.init))) {
+          for (const item of node.id.properties) {
+            need(item.type === 'Property' && !item.computed && item.value.type === 'Identifier', 'CAPABILITY_ALIAS', 'Dynamic capability destructuring is unsupported.', item);
+            const name = item.key.type === 'Identifier' ? item.key.name : item.key.type === 'Literal' ? item.key.value : null;
+            if (root(node.init) || standards.has(String(name))) {
+              const binding = this.context.bindings.get(item.value);
+              if (binding && !capabilities.has(binding)) { capabilities.add(binding); changed = true; }
+            }
+          }
         }
       }
     }

@@ -85,6 +85,40 @@ test('supports a bound literal-only error formatter without changing the origina
   assert.ok(result.change.patchedSource.includes("new Error(message('Missing fetch'))"));
 });
 
+test('refuses initializer calls hidden after return or under a conditional', () => {
+  for (const source of [
+    fixture.replace('var initialize = once(() => {', 'var initialize = once(() => { return;'),
+    fixture.replace('initErrors(); initSiteStatus();', 'initErrors(); if (false) initSiteStatus();').replace('var initErrors = once(() => { initMetadata(); initSiteStatus(); });', 'var initErrors = once(() => { initMetadata(); if (false) initSiteStatus(); });'),
+  ]) {
+    const result = deriveCua(source);
+    assert.equal(result.support, 'unsupported');
+    assert.equal(result.change, null);
+  }
+});
+
+test('requires direct constant configuration before the policy can be consumed', () => {
+  const direct = fixture.replace(/var baseUrl, agentKey, requestSource, initSiteStatus = once\(\(\) => \{[\s\S]*?\n\}\);/, "var baseUrl = 'https://chatgpt.com/backend-api', agentKey = 'agent', requestSource = 'codex_browser_use'; var initSiteStatus = once(() => {});");
+  assert.equal(deriveCua(direct).support, 'supported');
+  const declaration = "var baseUrl = 'https://chatgpt.com/backend-api', agentKey = 'agent', requestSource = 'codex_browser_use';";
+  const late = direct.replace(declaration, '') + '\nenforce({}, "https://example.com");\n' + declaration;
+  const result = deriveCua(late);
+  assert.equal(result.support, 'unsupported');
+  assert.equal(result.change, null);
+});
+
+test('refuses destructured and global-root aliases that modify standard capabilities', () => {
+  for (const prefix of [
+    'const {prototype: original} = URL; original.toString = function () { return "changed"; };',
+    'const globals = globalThis; globals.URL.prototype.toString = function () { return "changed"; };',
+    'const {URL: constructor} = globalThis; constructor.prototype.toString = function () { return "changed"; };',
+    'const globals = globalThis; globals[unknownKey] = function () {};',
+  ]) {
+    const result = deriveCua(prefix + fixture);
+    assert.equal(result.support, 'unsupported', prefix);
+    assert.equal(result.change, null);
+  }
+});
+
 test('refuses configuration whose once initializer never runs', () => {
   const result = deriveCua(fixture.replace('initialize();', ''));
   assert.equal(result.support, 'unsupported');
