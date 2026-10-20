@@ -78,7 +78,7 @@ async function main(): Promise<CommandResult | null> {
       'all-compatible': { type: 'boolean' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
     } });
     const legacy = route.tokens.some(token => token.kind === 'option' && (token.name === 'plan' || token.name === 'store'));
-    if (!route.values.help && !legacy && ['check', 'status'].includes(route.positionals[0] ?? '')) return await managedCli(args);
+    if (!route.values.help && !legacy && (route.positionals.length === 0 || ['check', 'status', 'apply', 'restore', 'recover'].includes(route.positionals[0] ?? ''))) return await managedCli(args);
     const { values, positionals, tokens } = parseArgs({
       args,
       options: {

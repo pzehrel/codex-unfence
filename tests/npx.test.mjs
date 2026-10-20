@@ -67,3 +67,21 @@ test('offline npm exec exposes help through a real PTY and propagates the public
   const invalid = await npmPackage.runNpmExecPty(['--unknown'], box);
   assert.equal(invalid.status, 2, invalid.stdout + invalid.stderr);
 });
+
+test('default npm exec guide displays the selected target and cancels without changing installation', async t => {
+  const box = await packageBox(t);
+  const app = join(box.directory, 'home/Applications/Guide.app');
+  const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
+  await mkdir(join(target, '..'), { recursive: true });
+  const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
+  await writeFile(target, source);
+  const child = await npmPackage.runNpmExecPty([], { ...box, steps: [
+    { waitFor: 'Action', send: 'apply\n' }, { waitFor: 'Type yes', send: 'no\n' },
+  ] });
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  assert.ok(child.stdout.includes(target));
+  assert.doesNotMatch(child.stdout, /Select installation number/);
+  assert.match(child.stdout, /signature/);
+  assert.match(child.stdout, /Cancelled/);
+  assert.deepEqual(await readFile(target), source);
+});

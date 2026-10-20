@@ -13,7 +13,7 @@ if (!suffix || suffix.startsWith('..') || isAbsolute(suffix)
   throw new Error('Test preload may only affect this sandbox npm exec public bin.');
 }
 const userInfo = os.userInfo;
-require('./transaction-boundaries.cjs');
+require('./managed-boundaries.cjs');
 os.userInfo = (...args) => ({ ...userInfo(...args), homedir: join(root, 'home') });
 syncBuiltinESMExports();
 fs.writeFileSync(join(root, 'final-bin.json'), JSON.stringify({

@@ -1,8 +1,18 @@
 # Fixed npm exec invocation supplied by the isolated shared helper.
 set timeout 30
 spawn -noecho {*}$argv
+log_user 0
 expect {
-    eof {}
+    -i $spawn_id -re {.+} {
+        puts -nonewline $expect_out(0,string)
+        flush stdout
+        exp_continue
+    }
+    -i $user_spawn_id -re {.+} {
+        send -i $spawn_id -- $expect_out(0,string)
+        exp_continue
+    }
+    -i $spawn_id eof {}
     timeout {
         exec /bin/kill -KILL [exp_pid]
         puts stderr "npm exec PTY timed out"
