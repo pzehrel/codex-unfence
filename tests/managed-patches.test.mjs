@@ -251,6 +251,22 @@ test('managed discovery rejects permissive state, unsigned locator changes and s
   }
 });
 
+test('similar patch bytes without trusted provenance never authorize restore and retain unknown-source guidance', async t => {
+  const box = await sandbox(t);
+  const { candidate } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const untracked = { ...await installation(box, 'Untracked', 'other'), version: 'other', build: '999' };
+  const patched = await readFile(candidate.targetPath);
+  await writeFile(untracked.targetPath, patched);
+  const inspection = run(box, 'inspect', untracked);
+  assert.equal(inspection.support, 'unsupported');
+  assert.equal(inspection.recovery, null);
+  assert.deepEqual(inspection.allowedActions, []);
+  assert.ok(inspection.diagnostics.some(entry => entry.code === 'UNVERIFIED_SOURCE' && /unknown/.test(entry.message)));
+  assert.notEqual(run(box, 'restore', untracked).exitCode, 0);
+  assert.deepEqual(await readFile(untracked.targetPath), patched);
+});
+
 test('a locator with a missing preparation directory is a blocked conflict rather than an undiscovered patch', async t => {
   const box = await sandbox(t);
   const { candidate } = await supportedInstallation(box);
