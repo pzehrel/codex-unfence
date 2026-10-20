@@ -102,6 +102,7 @@ export function renderHuman(result: CommandResult): string {
       const inspection = result.data.inspection;
       if (inspection) {
         lines.push(`Structural support: ${inspection.support}; file state: ${inspection.state}; write readiness: ${inspection.writeReadiness}`);
+        for (const evidence of inspection.derivation?.evidence ?? []) lines.push(`Support: ${evidence.description}`);
         for (const assumption of inspection.derivation?.assumptions ?? []) lines.push(`Assumption: ${assumption}`);
         for (const blocker of inspection.blockers) lines.push(`[${blocker.code}] ${blocker.message}`);
       }
