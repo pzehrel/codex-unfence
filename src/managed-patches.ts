@@ -1,4 +1,6 @@
-import { lstat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, lstat } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import type { CuaDerivation, DeriveCua } from './cua-contract.js';
 import { canonical, digest } from './integrity.js';
 import { discoverInstallations, installationAt } from './installations.js';
@@ -78,6 +80,8 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
       if (record) recovery = { tool: record.locator.tool, command: record.locator.recovery, store: record.locator.store, preparation: record.locator.preparation };
       inspectionToken = digest(canonical({ target: actual.targetPath, device: String(before.dev), inode: String(before.ino), mode: String(before.mode), ctime: String(before.ctimeNs), mtime: String(before.mtimeNs), source, derivation, tool, locator: record?.locator ?? null, state, pending: operation.data?.pendingTransactions ?? [] }));
       candidate = actual;
+      try { await access(dirname(actual.targetPath), constants.W_OK | constants.X_OK); }
+      catch { blockers.push({ code: 'TARGET_NOT_WRITABLE', severity: 'error', message: 'Target directory must permit atomic replacement without elevation.', path: dirname(actual.targetPath) }); }
     } catch (error) {
       const entry = diagnostic(error);
       diagnostics.push(entry);

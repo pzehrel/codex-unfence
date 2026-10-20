@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, link, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, link, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -170,6 +170,85 @@ test('interrupted managed apply is discoverable and recover rolls back without c
   assert.deepEqual(await readFile(candidate.targetPath), original);
   assert.equal(run(box, 'status', candidate).data.targets[0].state, 'original');
   assert.deepEqual(await readdir(join(candidate.targetPath, '..')), ['browser-service.mjs']);
+});
+
+test('read-only inspection reports unwritable target parents without creating state', async t => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  const parent = join(candidate.targetPath, '..');
+  await chmod(parent, 0o500);
+  try {
+    const inspection = run(box, 'inspect', candidate);
+    assert.equal(inspection.support, 'supported');
+    assert.equal(inspection.writeReadiness, 'blocked');
+    assert.deepEqual(inspection.allowedActions, []);
+    assert.ok(inspection.blockers.some(entry => entry.code === 'TARGET_NOT_WRITABLE'));
+    assert.deepEqual(await readFile(candidate.targetPath), original);
+    await assert.rejects(access(join(box.directory, 'home/Library')), { code: 'ENOENT' });
+  } finally { await chmod(parent, 0o700); }
+});
+
+test('managed recover can itself be interrupted and restore recovery returns the pre-restore applied state', async t => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const patched = await readFile(candidate.targetPath);
+  const restore = await pauseOperation(t, box, candidate, 'restore', 'after-target-rename');
+  await restore.kill();
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+  assert.equal(run(box, 'inspect', candidate).state, 'incomplete');
+  const recovery = await pauseOperation(t, box, candidate, 'recover', 'after-rollback-intent');
+  await recovery.kill();
+  assert.equal(run(box, 'inspect', candidate).state, 'incomplete');
+  const recovered = run(box, 'recover', candidate);
+  assert.equal(recovered.exitCode, 0, JSON.stringify(recovered));
+  assert.equal(recovered.data.targets[0].state, 'tool-applied');
+  assert.deepEqual(await readFile(candidate.targetPath), patched);
+  assert.equal(run(box, 'restore', candidate).data.targets[0].action, 'restored');
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+});
+
+test('a patched target with its operation store missing is a conflict and cannot acquire fresh provenance', async t => {
+  const box = await sandbox(t);
+  const { candidate } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const trusted = run(box, 'inspect', candidate);
+  const patched = await readFile(candidate.targetPath);
+  await rm(trusted.recovery.store, { recursive: true });
+  const missing = run(box, 'inspect', candidate);
+  assert.equal(missing.state, 'conflict');
+  assert.deepEqual(missing.allowedActions, []);
+  assert.notEqual(run(box, 'apply', candidate).exitCode, 0);
+  assert.deepEqual(await readFile(candidate.targetPath), patched);
+});
+
+test('managed discovery rejects permissive state, unsigned locator changes and store migration', async t => {
+  for (const mutation of ['permissions', 'locator', 'store-alias', 'external-update']) {
+    const box = await sandbox(t);
+    const { candidate } = await supportedInstallation(box);
+    assert.equal(run(box, 'apply', candidate).exitCode, 0);
+    const trusted = run(box, 'inspect', candidate);
+    const patched = await readFile(candidate.targetPath);
+    if (mutation === 'permissions') await chmod(trusted.recovery.preparation, 0o755);
+    else if (mutation === 'locator') {
+      const root = join(trusted.recovery.preparation, '../..');
+      const [name] = await readdir(join(root, 'targets'));
+      const path = join(root, 'targets', name);
+      const envelope = JSON.parse(await readFile(path, 'utf8'));
+      envelope.record.store += '-moved';
+      await writeFile(path, JSON.stringify(envelope));
+    } else if (mutation === 'store-alias') {
+      const moved = trusted.recovery.store + '-moved';
+      const { rename } = await import('node:fs/promises');
+      await rename(trusted.recovery.store, moved);
+      await symlink(moved, trusted.recovery.store);
+    } else await writeFile(candidate.targetPath, '// external update\n');
+    const inspection = run(box, 'inspect', candidate);
+    assert.equal(inspection.state, 'conflict', mutation);
+    assert.deepEqual(inspection.allowedActions, [], mutation);
+    assert.notEqual(run(box, 'restore', candidate).exitCode, 0, mutation);
+    assert.deepEqual(await readFile(candidate.targetPath), mutation === 'external-update' ? Buffer.from('// external update\n') : patched);
+  }
 });
 
 test('a locator with a missing preparation directory is a blocked conflict rather than an undiscovered patch', async t => {
