@@ -1,0 +1,39 @@
+// Self-authored miniature reader resource graph. Parsed only, never evaluated.
+async function readerFactory() {
+  let handles = [undefined, null], next = 2;
+  let bridge = {
+    toValue: handle => handles[handle],
+    toHandle: value => { const handle = next++; handles[handle] = value; return handle; },
+  };
+  const decodeName = pointer => String(pointer);
+  const globalHandle = pointer => pointer ? (pointer = decodeName(pointer), bridge.toHandle(globalThis[pointer])) : bridge.toHandle(globalThis);
+  const imports = { env: { global: globalHandle } };
+  const module = await WebAssembly.instantiate(new Uint8Array(), imports);
+  return module.instance.exports;
+}
+function configureReader(options) { return prepareReader(readerFactory, options); }
+const readerModules = new WeakMap();
+function prepareReader(factory, { overrides, fireImmediately = false } = {}) {
+  if (overrides) readerModules.set(factory, overrides);
+  return fireImmediately ? factory(readerModules.get(factory)) : undefined;
+}
+async function loadReader(runtime) {
+  try { return await runtime.filesystem.readBytes(new URL('./zxing_reader.wasm', import.meta.url)); }
+  catch { return await runtime.filesystem.readBytes(new URL('../../../node_modules/zxing-wasm/dist/reader/zxing_reader.wasm', import.meta.url)); }
+}
+let readerReady;
+async function initializeReader(runtime) {
+  readerReady == null && (readerReady = loadReader(runtime).then(bytes => {
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes), configureReader({ overrides: { wasmBinary: copy.buffer } });
+  }));
+  await readerReady;
+}
+async function decodeReader(factory, image, options) {
+  const module = await prepareReader(factory, { fireImmediately: true });
+  const pointer = module._malloc(image.length);
+  try { module.HEAPU8.set(image, pointer); return module.readBarcodesFromPixmap(pointer, 1, 1, options); }
+  finally { module._free(pointer); }
+}
+async function readCodes(image, options) { return decodeReader(readerFactory, image, options); }
+async function scan(runtime, image) { await initializeReader(runtime); return await readCodes(image, {}); }

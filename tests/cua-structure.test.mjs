@@ -289,6 +289,56 @@ test('refuses an additional unknown chain with statically computed blocked reads
   assert.equal(result.change, null);
 });
 
+const readerFixture = await readFile(new URL('./fixtures/cua-structural-reader.js.txt', import.meta.url), 'utf8');
+
+test('admits only the linked finite ZXing reader bridge under an explicit noninterference assumption', () => {
+  const result = deriveCua(fixture + readerFixture);
+  assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+  assert.ok(result.assumptions.some(text => /ZXing/.test(text) && /not proved/.test(text)));
+  assert.ok(result.evidence.some(item => /ZXing/.test(item.description)));
+});
+
+test('permits finite conditional unrelated global keys while refusing unknown keys', () => {
+  const source = 'const globals = globalThis; globals[choose ? "syntheticStateA" : "syntheticStateB"] = {};\n' + fixture;
+  assert.equal(deriveCua(source).support, 'supported');
+});
+
+test('permits the finite read-only instanceof helper for standard error classification', () => {
+  const result = deriveCua('function instance(value, constructor) { try { return value instanceof constructor; } catch { return false; } }\ninstance(synthetic, Error);\n' + fixture);
+  assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+});
+
+test('permits direct unrelated calls to the proven read-only metadata parser', () => {
+  const source = fixture.replace('function getMetadata(runtime) { return runtime.turn; }', headerMetadata) + '\nfunction model(runtime) { return getMetadata(runtime)?.model; }';
+  const result = deriveCua(source);
+  assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+});
+
+test('rejects disconnected or changed reader bridges and additional capability escape', () => {
+  for (const change of [
+    readerFixture.replace('decodeReader(readerFactory, image, options)', 'decodeReader(otherFactory, image, options)'),
+    readerFixture.replace('prepareReader(readerFactory, options)', 'prepareReader(otherFactory, options)'),
+    readerFixture.replace('global: globalHandle', 'global: otherHandle'),
+    readerFixture.replaceAll('bridge.toHandle', 'otherBridge.toHandle'),
+    readerFixture.replaceAll('zxing_reader.wasm', 'other.wasm'),
+    readerFixture + '\nunknown(globalThis[unknownKey]);',
+    readerFixture.replace('const imports =', 'unknown(globalHandle); const imports ='),
+    readerFixture.replace('let handles =', 'URL.prototype.toString = unknown; let handles ='),
+  ]) {
+    const result = deriveCua(fixture + change);
+    assert.equal(result.support, 'unsupported', result.change?.before);
+    assert.equal(result.change, null);
+  }
+  const renamedResult = deriveCua(fixture + renamed(readerFixture, 'reader'));
+  assert.equal(renamedResult.support, 'supported', JSON.stringify(renamedResult.diagnostics));
+});
+
+test('refuses reader imports detached from resource instantiation', () => {
+  const result = deriveCua(fixture + readerFixture.replace('new Uint8Array(), imports', 'new Uint8Array(), otherImports'));
+  assert.equal(result.support, 'unsupported');
+  assert.equal(result.change, null);
+});
+
 test('refuses configuration whose once initializer never runs', () => {
   const result = deriveCua(fixture.replace('initialize();', ''));
   assert.equal(result.support, 'unsupported');
