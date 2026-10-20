@@ -85,9 +85,24 @@ export function runNpmExecPty(args, options) {
       process.kill(-child.pid, 'SIGKILL');
       reject(new Error(`npm exec PTY timed out: ${stdout}${stderr}`));
     }, 30_000);
+    let sending = false;
+    async function respond() {
+      if (sending) return;
+      sending = true;
+      try {
+        while (steps[step] && stdout.includes(steps[step].waitFor)) {
+          const current = steps[step++];
+          if (current.beforeSend) await current.beforeSend();
+          child.stdin.write(current.send);
+        }
+      } catch (error) {
+        process.kill(-child.pid, 'SIGKILL');
+        reject(error);
+      } finally { sending = false; }
+    }
     child.stdout.setEncoding('utf8').on('data', (text) => {
       stdout += text;
-      while (steps[step] && stdout.includes(steps[step].waitFor)) child.stdin.write(steps[step++].send);
+      void respond();
     });
     child.stderr.setEncoding('utf8').on('data', (text) => { stderr += text; });
     child.on('error', (error) => { clearTimeout(timer); reject(error); });

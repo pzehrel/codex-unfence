@@ -15,6 +15,15 @@ if (!suffix || suffix.startsWith('..') || isAbsolute(suffix)
 const userInfo = os.userInfo;
 require('./managed-boundaries.cjs');
 os.userInfo = (...args) => ({ ...userInfo(...args), homedir: join(root, 'home') });
+const scenarioPath = join(root, 'boundary.json');
+const scenario = fs.existsSync(scenarioPath) ? JSON.parse(fs.readFileSync(scenarioPath, 'utf8')) : {};
+const promises = require('node:fs/promises');
+const rename = promises.rename;
+promises.rename = async function (from, to) {
+  const result = await rename(from, to);
+  if (to === scenario.killAfterRename) process.kill(process.pid, 'SIGKILL');
+  return result;
+};
 syncBuiltinESMExports();
 fs.writeFileSync(join(root, 'final-bin.json'), JSON.stringify({
   pid: process.pid, entry, cwd: process.cwd(), home: os.userInfo().homedir,
