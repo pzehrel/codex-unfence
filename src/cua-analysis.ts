@@ -441,7 +441,7 @@ class Match {
     // Slot must be inside the factory's imports object, not returned independently.
     while (imports && context.parents.get(imports)?.type === 'Property') imports = context.parents.get(context.parents.get(imports)!);
     if (imports?.type !== 'ObjectExpression') return false;
-    const instantiate = (node: E.Node): boolean => node.type === 'CallExpression' && node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier' && node.callee.object.name === 'WebAssembly' && !binding(node.callee.object) && node.callee.property.type === 'Identifier' && ['instantiate', 'instantiateStreaming'].includes(node.callee.property.name) && node.arguments.length === 2;
+    const instantiate = (node: E.Node): boolean => node.type === 'CallExpression' && node.callee.type === 'MemberExpression' && node.callee.object.type === 'Identifier' && node.callee.object.name === 'WebAssembly' && !binding(node.callee.object) && !node.callee.computed && node.callee.property.type === 'Identifier' && ['instantiate', 'instantiateStreaming'].includes(node.callee.property.name) && node.arguments.length === 2;
     const importsDeclaration = context.parents.get(imports);
     let linkedImports = false;
     if (importsDeclaration?.type === 'VariableDeclarator' && importsDeclaration.id.type === 'Identifier') {
@@ -688,6 +688,11 @@ function prove(context: SourceContext, transport: E.FunctionDeclaration): { targ
   match.closeReferences();
   const target = context.nodes.find(node => node.type === 'AwaitExpression' && inside(node, transport));
   need(target, 'NO_TARGET', 'Missing awaited transport expression.', transport);
+  // The serialized wrapper introduces these free names at the transport site.
+  // Reject lexical capture even when the original chain never reads them.
+  for (let scope = context.scopeManager.acquire(transport); scope; scope = scope.upper) {
+    need(!['Object', 'Reflect'].some(name => scope.set.has(name)), 'WRAPPER_BINDING', 'Wrapper standard capabilities must resolve to host globals at the injection scope.', target);
+  }
   const evidence: Evidence[] = [
     { kind: 'source', range: range(match.roots.get('requestFor')!), description: 'Finite URL filtering, normalized cache key and site-status endpoint with conversation/turn/source provenance.' },
     { kind: 'transport', range: range(transport), description: 'Unique guarded member fetch preserves runtime receiver, endpoint, GET options and original await.' },
@@ -708,7 +713,7 @@ export function deriveCua(source: string): CuaDerivation {
     const parsed = parseSourceContext(source);
     need(parsed.context, 'PARSE_ERROR', parsed.parseError ?? 'Invalid JavaScript.');
     const context = parsed.context;
-    const candidates = context.nodes.filter((node): node is E.FunctionDeclaration => node.type === 'FunctionDeclaration' && node.async === true && context.nodes.some(child => child.type === 'AwaitExpression' && inside(child, node) && child.argument.type === 'CallExpression' && child.argument.callee.type === 'MemberExpression' && !child.argument.callee.computed && child.argument.callee.property.type === 'Identifier' && child.argument.callee.property.name === 'fetch'));
+    const candidates = context.nodes.filter((node): node is E.FunctionDeclaration => node.type === 'FunctionDeclaration' && node.async === true && context.nodes.some(child => child.type === 'AwaitExpression' && inside(child, node) && child.argument.type === 'CallExpression' && child.argument.callee.type === 'MemberExpression' && (child.argument.callee.computed ? child.argument.callee.property.type === 'Literal' && child.argument.callee.property.value === 'fetch' : child.argument.callee.property.type === 'Identifier' && child.argument.callee.property.name === 'fetch')));
     need(candidates.length, 'NO_TARGET', 'No dedicated awaited member-fetch transport found.');
     const proofs: ReturnType<typeof prove>[] = [];
     const failures: Unsupported[] = [];
