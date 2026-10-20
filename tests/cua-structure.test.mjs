@@ -123,6 +123,46 @@ test('refuses destructured and global-root aliases that modify standard capabili
   }
 });
 
+test('refuses standard capability mutation through aliases formed by ordinary assignment', () => {
+  for (const prefix of [
+    'let standard; standard = URL; standard.prototype.toString = () => "changed";',
+    'let globals; globals = globalThis; globals.URL.prototype.toString = () => "changed";',
+    'let first, second; second = first; first = URL; second.prototype.toString = () => "changed";',
+  ]) {
+    const result = deriveCua(prefix + fixture);
+    assert.equal(result.support, 'unsupported', prefix);
+    assert.equal(result.change, null);
+    assert.equal(result.diagnostics[0].code, 'CAPABILITY_MUTATION');
+  }
+});
+
+test('refuses standard capability mutation through destructuring assignments', () => {
+  for (const prefix of [
+    'let standard; ({URL: standard} = globalThis); standard.prototype.toString = () => "changed";',
+    'let original; ({prototype: original} = URL); original.toString = () => "changed";',
+    'let globals; ({globalThis: globals} = globalThis); globals.URL.prototype.toString = () => "changed";',
+    'let globals, standard; globals = globalThis; ({URL: standard} = globals); standard.prototype.toString = () => "changed";',
+  ]) {
+    const result = deriveCua(prefix + fixture);
+    assert.equal(result.support, 'unsupported', prefix);
+    assert.equal(result.change, null);
+    assert.equal(result.diagnostics[0].code, 'CAPABILITY_MUTATION');
+  }
+});
+
+test('permits assignments that do not mutate or expose related capabilities', () => {
+  for (const prefix of [
+    'let local; local = {}; local.syntheticFlag = true;',
+    'let standard; standard = URL;',
+    'let globals; globals = globalThis; globals.syntheticFlag = true;',
+    'let local; ({syntheticState: local} = globalThis); local.syntheticFlag = true;',
+    'let standard; ({URL: standard} = globalThis);',
+  ]) {
+    const result = deriveCua(prefix + fixture);
+    assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+  }
+});
+
 function renamed(source, prefix) {
   const program = parse(source, { ecmaVersion: 2022, sourceType: 'module', ranges: true });
   const scopes = analyze(program, { ecmaVersion: 2022, sourceType: 'module' });

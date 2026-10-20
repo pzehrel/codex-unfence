@@ -568,20 +568,22 @@ class Match {
     while (changed) {
       changed = false;
       for (const node of this.context.nodes) {
-        if (node.type !== 'VariableDeclarator' || !node.init) continue;
-        if (node.id.type === 'Identifier') {
-          const binding = this.context.bindings.get(node.id);
-          if (binding && root(node.init) && !capabilities.has(binding)) { capabilities.add(binding); changed = true; }
-          if (binding && globalRoot(node.init) && !globalAliases.has(binding)) { globalAliases.add(binding); changed = true; }
-        } else if (node.id.type === 'ObjectPattern' && (root(node.init) || globalRoot(node.init))) {
-          for (const item of node.id.properties) {
+        const target = node.type === 'VariableDeclarator' ? node.id : node.type === 'AssignmentExpression' && node.operator === '=' ? node.left : null;
+        const value = node.type === 'VariableDeclarator' ? node.init : node.type === 'AssignmentExpression' && node.operator === '=' ? node.right : null;
+        if (!target || !value) continue;
+        if (target.type === 'Identifier') {
+          const binding = this.context.bindings.get(target);
+          if (binding && root(value) && !capabilities.has(binding)) { capabilities.add(binding); changed = true; }
+          if (binding && globalRoot(value) && !globalAliases.has(binding)) { globalAliases.add(binding); changed = true; }
+        } else if (target.type === 'ObjectPattern' && (root(value) || globalRoot(value))) {
+          for (const item of target.properties) {
             need(item.type === 'Property' && !item.computed && item.value.type === 'Identifier', 'CAPABILITY_ALIAS', 'Dynamic capability destructuring is unsupported.', item);
             const name = item.key.type === 'Identifier' ? item.key.name : item.key.type === 'Literal' ? item.key.value : null;
-            if (globalRoot(node.init) && ['globalThis', 'global', 'window', 'self'].includes(String(name))) {
+            if (globalRoot(value) && ['globalThis', 'global', 'window', 'self'].includes(String(name))) {
               const binding = this.context.bindings.get(item.value);
               if (binding && !globalAliases.has(binding)) { globalAliases.add(binding); changed = true; }
             }
-            if (root(node.init) || standards.has(String(name))) {
+            if (root(value) || standards.has(String(name))) {
               const binding = this.context.bindings.get(item.value);
               if (binding && !capabilities.has(binding)) { capabilities.add(binding); changed = true; }
             }
@@ -592,7 +594,7 @@ class Match {
     for (const node of this.context.nodes) {
       if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && ['eval', 'Function'].includes(node.callee.name) && !this.context.bindings.has(node.callee)) throw new Unsupported('DYNAMIC_SCOPE', 'Dynamic code can mutate the related chain.', node);
       const written = node.type === 'AssignmentExpression' ? node.left : node.type === 'UpdateExpression' ? node.argument : node.type === 'UnaryExpression' && node.operator === 'delete' ? node.argument : null;
-      need(!written || !root(written), 'CAPABILITY_MUTATION', 'Visible mutation of a standard capability or its alias is unsupported.', written ?? undefined);
+      need(!written || written.type === 'Identifier' && this.context.bindings.has(written) || !root(written), 'CAPABILITY_MUTATION', 'Visible mutation of a standard capability or its alias is unsupported.', written ?? undefined);
       if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression') {
         const key = node.callee.computed ? node.callee.property.type === 'Literal' ? node.callee.property.value : null : node.callee.property.type === 'Identifier' ? node.callee.property.name : null;
         const reflective = ['defineProperty', 'defineProperties', 'setPrototypeOf', 'assign', 'set', 'deleteProperty'].includes(String(key));
