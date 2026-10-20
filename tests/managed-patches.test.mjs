@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { access, link, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, link, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { runCli } from './helpers/cli.mjs';
+import { runCli, startCli } from './helpers/cli.mjs';
+import { once } from 'node:events';
+import { setTimeout } from 'node:timers';
 
 const binary = fileURLToPath(new URL('./fixtures/managed-patches-driver.mjs', import.meta.url));
 const fixture = fileURLToPath(new URL('./fixtures/managed-boundaries.cjs', import.meta.url));
@@ -133,6 +135,134 @@ test('apply rejects a supported original changed after confirmation token valida
   assert.equal(refused.exitCode, 4);
   assert.ok(refused.diagnostics.some(entry => ['INSPECTION_CHANGED', 'TARGET_CHANGED'].includes(entry.code)));
   assert.deepEqual(await readFile(candidate.targetPath), changed);
+});
+
+async function pauseOperation(t, box, candidate, command, boundary) {
+  const child = startCli([command, JSON.stringify(candidate)], { directory: box.directory, binary, fixture, env: { CODEX_TEST_PAUSE: boundary, CODEX_TEST_TARGET: candidate.targetPath }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  await Promise.race([
+    once(child, 'message').then(([message]) => assert.equal(message.boundary, boundary)),
+    once(child, 'exit').then(([code, signal]) => { throw new Error(`Driver exited before ${boundary}: ${code}/${signal} ${stdout} ${stderr}`); }),
+    new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error(`No boundary ${boundary}: ${stdout} ${stderr}`)), 15000); timer.unref(); }),
+  ]);
+  return { async kill() { const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited; } };
+}
+
+test('interrupted managed apply is discoverable and recover rolls back without continuing application', async t => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  const interrupted = await pauseOperation(t, box, candidate, 'apply', 'after-target-rename');
+  const root = join(box.directory, 'home/Library/Application Support/codex-browser-liberation-patch');
+  assert.equal((await readdir(join(root, 'targets'))).length, 1);
+  await interrupted.kill();
+  assert.notDeepEqual(await readFile(candidate.targetPath), original);
+  const pending = run(box, 'inspect', candidate);
+  assert.equal(pending.state, 'incomplete');
+  assert.equal(pending.writeReadiness, 'blocked');
+  assert.deepEqual(pending.allowedActions, ['recover']);
+  const recovered = run(box, 'recover', candidate);
+  assert.equal(recovered.exitCode, 0, JSON.stringify(recovered));
+  assert.equal(recovered.data.targets[0].action, 'rolled-back');
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+  assert.equal(run(box, 'status', candidate).data.targets[0].state, 'original');
+  assert.deepEqual(await readdir(join(candidate.targetPath, '..')), ['browser-service.mjs']);
+});
+
+test('read-only inspection reports unwritable target parents without creating state', async t => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  const parent = join(candidate.targetPath, '..');
+  await chmod(parent, 0o500);
+  try {
+    const inspection = run(box, 'inspect', candidate);
+    assert.equal(inspection.support, 'supported');
+    assert.equal(inspection.writeReadiness, 'blocked');
+    assert.deepEqual(inspection.allowedActions, []);
+    assert.ok(inspection.blockers.some(entry => entry.code === 'TARGET_NOT_WRITABLE'));
+    assert.deepEqual(await readFile(candidate.targetPath), original);
+    await assert.rejects(access(join(box.directory, 'home/Library')), { code: 'ENOENT' });
+  } finally { await chmod(parent, 0o700); }
+});
+
+test('managed recover can itself be interrupted and restore recovery returns the pre-restore applied state', async t => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const patched = await readFile(candidate.targetPath);
+  const restore = await pauseOperation(t, box, candidate, 'restore', 'after-target-rename');
+  await restore.kill();
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+  assert.equal(run(box, 'inspect', candidate).state, 'incomplete');
+  const recovery = await pauseOperation(t, box, candidate, 'recover', 'after-rollback-intent');
+  await recovery.kill();
+  assert.equal(run(box, 'inspect', candidate).state, 'incomplete');
+  const recovered = run(box, 'recover', candidate);
+  assert.equal(recovered.exitCode, 0, JSON.stringify(recovered));
+  assert.equal(recovered.data.targets[0].state, 'tool-applied');
+  assert.deepEqual(await readFile(candidate.targetPath), patched);
+  assert.equal(run(box, 'restore', candidate).data.targets[0].action, 'restored');
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+});
+
+test('a patched target with its operation store missing is a conflict and cannot acquire fresh provenance', async t => {
+  const box = await sandbox(t);
+  const { candidate } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const trusted = run(box, 'inspect', candidate);
+  const patched = await readFile(candidate.targetPath);
+  await rm(trusted.recovery.store, { recursive: true });
+  const missing = run(box, 'inspect', candidate);
+  assert.equal(missing.state, 'conflict');
+  assert.deepEqual(missing.allowedActions, []);
+  assert.notEqual(run(box, 'apply', candidate).exitCode, 0);
+  assert.deepEqual(await readFile(candidate.targetPath), patched);
+});
+
+test('managed discovery rejects permissive state, unsigned locator changes and store migration', async t => {
+  for (const mutation of ['permissions', 'locator', 'store-alias', 'external-update']) {
+    const box = await sandbox(t);
+    const { candidate } = await supportedInstallation(box);
+    assert.equal(run(box, 'apply', candidate).exitCode, 0);
+    const trusted = run(box, 'inspect', candidate);
+    const patched = await readFile(candidate.targetPath);
+    if (mutation === 'permissions') await chmod(trusted.recovery.preparation, 0o755);
+    else if (mutation === 'locator') {
+      const root = join(trusted.recovery.preparation, '../..');
+      const [name] = await readdir(join(root, 'targets'));
+      const path = join(root, 'targets', name);
+      const envelope = JSON.parse(await readFile(path, 'utf8'));
+      envelope.record.store += '-moved';
+      await writeFile(path, JSON.stringify(envelope));
+    } else if (mutation === 'store-alias') {
+      const moved = trusted.recovery.store + '-moved';
+      const { rename } = await import('node:fs/promises');
+      await rename(trusted.recovery.store, moved);
+      await symlink(moved, trusted.recovery.store);
+    } else await writeFile(candidate.targetPath, '// external update\n');
+    const inspection = run(box, 'inspect', candidate);
+    assert.equal(inspection.state, 'conflict', mutation);
+    assert.deepEqual(inspection.allowedActions, [], mutation);
+    assert.notEqual(run(box, 'restore', candidate).exitCode, 0, mutation);
+    assert.deepEqual(await readFile(candidate.targetPath), mutation === 'external-update' ? Buffer.from('// external update\n') : patched);
+  }
+});
+
+test('a locator with a missing preparation directory is a blocked conflict rather than an undiscovered patch', async t => {
+  const box = await sandbox(t);
+  const { candidate } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const inspection = run(box, 'inspect', candidate);
+  const patched = await readFile(candidate.targetPath);
+  await rm(join(inspection.recovery.preparation, '..'), { recursive: true });
+  const missing = run(box, 'inspect', candidate);
+  assert.equal(missing.state, 'conflict');
+  assert.equal(missing.writeReadiness, 'blocked');
+  assert.deepEqual(missing.allowedActions, []);
+  assert.deepEqual(await readFile(candidate.targetPath), patched);
 });
 
 test('inspection surfaces damaged preparation as conflict and refuses every write without trusting its locator', async t => {
