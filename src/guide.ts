@@ -44,13 +44,18 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
         continue;
       }
       for (const evidence of inspection.derivation?.evidence ?? []) process.stdout.write(`Support: ${evidence.description}\n`);
+      for (const assumption of inspection.derivation?.assumptions ?? []) process.stdout.write(`Assumption: ${assumption}\n`);
       process.stdout.write(`Target: ${inspection.candidate.targetPath}\nScope: site-status response only; original request and predicate stay.\nBackups and recovery data remain private outside npm cache.\nChanging sealed resources invalidates the application signature; this tool does not sign it.\nExit the host and related services yourself before writing.\n${command === 'recover' ? 'Recover rolls back to the interrupted operation before state; it never continues apply or restore.\n' : ''}`);
       const confirmed = await ask(`Type yes to ${command}, anything else cancels: `);
       if (confirmed !== 'yes') { process.stdout.write('Cancelled; installation unchanged.\n'); return null; }
       if (!inspection.inspectionToken) throw new Error('No verified inspection token; inspect again.');
       const result = await managed[command]({ candidate: inspection.candidate, inspectionToken: inspection.inspectionToken, confirmed: true });
       process.stdout.write(renderHuman(result));
-      process.stdout.write('Runtime: not-verified. Reopen the host manually. The patch persists until restore.\nUse the same local package tarball to run status or restore; npm cache is separate from recovery data.\n');
+      if (result.exitCode === 0) {
+        process.stdout.write('Runtime: not-verified. Reopen the host manually after checking the reported file state.\n');
+        if (result.data?.targets.some(target => target.state === 'tool-applied')) process.stdout.write('The patch persists until restore.\n');
+      } else process.stdout.write('Operation did not complete successfully. Keep recovery data and inspect status before reopening the host; use recover only for an incomplete operation.\n');
+      process.stdout.write('Use the same local package tarball to run status, restore or recover; npm cache is separate from recovery data.\n');
       return result;
     }
   } finally { input.close(); }
