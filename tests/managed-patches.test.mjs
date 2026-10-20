@@ -251,6 +251,24 @@ test('managed discovery rejects permissive state, unsigned locator changes and s
   }
 });
 
+test('apply refuses a locator published after confirmation instead of adopting a new managed selection', async t => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  assert.equal(run(box, 'restore', candidate).exitCode, 0);
+  const trusted = run(box, 'inspect', candidate);
+  const root = join(trusted.recovery.preparation, '../..');
+  const [name] = await readdir(join(root, 'targets'));
+  const locator = join(root, 'targets', name);
+  const copy = join(box.directory, 'saved-locator.json');
+  await writeFile(copy, await readFile(locator), { mode: 0o600 });
+  await rm(locator);
+  const refused = run(box, 'apply', candidate, { CODEX_TEST_FAULT: 'managed-locator-change', CODEX_TEST_TARGET: candidate.targetPath, CODEX_TEST_LOCATOR: locator, CODEX_TEST_LOCATOR_COPY: copy });
+  assert.equal(refused.exitCode, 4);
+  assert.ok(refused.diagnostics.some(entry => entry.code === 'INSPECTION_CHANGED'));
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+});
+
 test('similar patch bytes without trusted provenance never authorize restore and retain unknown-source guidance', async t => {
   const box = await sandbox(t);
   const { candidate } = await supportedInstallation(box);
@@ -265,6 +283,26 @@ test('similar patch bytes without trusted provenance never authorize restore and
   assert.ok(inspection.diagnostics.some(entry => entry.code === 'UNVERIFIED_SOURCE' && /unknown/.test(entry.message)));
   assert.notEqual(run(box, 'restore', untracked).exitCode, 0);
   assert.deepEqual(await readFile(untracked.targetPath), patched);
+});
+
+test('inspection reports read-only operation stores before restore without changing recovery artifacts', async t => {
+  const box = await sandbox(t);
+  const { candidate } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const trusted = run(box, 'inspect', candidate);
+  const root = trusted.recovery.store;
+  const files = await readdir(root);
+  const patched = await readFile(candidate.targetPath);
+  await chmod(root, 0o500);
+  try {
+    const inspection = run(box, 'inspect', candidate);
+    assert.equal(inspection.support, 'supported');
+    assert.equal(inspection.writeReadiness, 'blocked');
+    assert.deepEqual(inspection.allowedActions, []);
+    assert.ok(inspection.blockers.some(entry => entry.code === 'STORE_NOT_WRITABLE'));
+    assert.deepEqual(await readdir(root), files);
+    assert.deepEqual(await readFile(candidate.targetPath), patched);
+  } finally { await chmod(root, 0o700); }
 });
 
 test('a locator with a missing preparation directory is a blocked conflict rather than an undiscovered patch', async t => {

@@ -155,7 +155,7 @@ export interface PreparationExpectation { device: string; inode: string; mode: n
 export async function prepareManaged(candidate: Candidate, original: Buffer, expected: PreparationExpectation, derive: DeriveCua, tool: ToolIdentity): Promise<{ locator: Locator; plan: ManagedPlan }> {
   const target = candidate.targetPath;
   const existing = await managedRecord(target, derive);
-  if (existing) return existing;
+  check(!existing, 'INSPECTION_CHANGED', 'Another managed selection appeared after confirmation; inspect and confirm again.');
   check(await realpath(target) === target, 'PATH_ALIAS', 'Target must be canonical.');
   const metadata = await lstat(target, { bigint: true });
   check(metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1n, 'PATH_ALIAS', 'Target must be an unaliased regular file.');

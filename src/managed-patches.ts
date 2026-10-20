@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
-import { access, lstat } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { access, lstat, readdir } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import type { CuaDerivation, DeriveCua } from './cua-contract.js';
 import { canonical, digest } from './integrity.js';
 import { discoverInstallations, installationAt } from './installations.js';
@@ -8,7 +8,7 @@ import type { Candidate } from './installations.js';
 import { processTable } from './processes.js';
 import type { Diagnostic, OperationResult, TargetState, TransactionCommand } from './result.js';
 import { EXIT_CODES } from './result.js';
-import { check, regularBytes, TransactionError } from './transaction-storage.js';
+import { check, exists, regularBytes, TransactionError } from './transaction-storage.js';
 import { cuaBlockingProcesses, cuaExecutor } from './cua-admission.js';
 import { managedPaths, managedRecord, prepareManaged } from './managed-state.js';
 import type { PreparationExpectation, ToolIdentity } from './managed-state.js';
@@ -39,6 +39,7 @@ function diagnostic(error: unknown): Diagnostic {
 export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool: ToolIdentity }) {
   const executor = cuaExecutor(derive);
   const inspectedSources = new WeakMap<Inspection, { bytes: Buffer; identity: PreparationExpectation }>();
+  const inspectedLocators = new WeakMap<Inspection, string | null>();
   async function status(candidate: Candidate): Promise<OperationResult> {
     try {
       const actual = await installationAt(candidate.appPath);
@@ -57,6 +58,7 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
     let operation: OperationResult | null = null;
     let recovery: Inspection['recovery'] = null;
     let snapshot: { bytes: Buffer; identity: PreparationExpectation } | null = null;
+    let locatorContent: string | null = null;
     if (process.platform !== 'darwin') blockers.push({ code: 'UNSUPPORTED_PLATFORM', severity: 'error', message: `Only macOS is supported; received ${process.platform}.` });
     if (Number(process.versions.node.split('.')[0]) < 22 || Number(process.versions.node.split('.')[0]) === 22 && Number(process.versions.node.split('.')[1]) < 13) blockers.push({ code: 'UNSUPPORTED_RUNTIME', severity: 'error', message: 'Node.js >=22.13.0 is required.' });
     try {
@@ -71,6 +73,7 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
       source = { sha256: digest(bytes), size: bytes.length };
       snapshot = { bytes, identity: { device: String(before.dev), inode: String(before.ino), mode: Number(before.mode & 0o7777n), ctime: String(before.ctimeNs), mtime: String(before.mtimeNs) } };
       const record = await managedRecord(actual.targetPath, derive);
+      locatorContent = record ? canonical(record.locator) : null;
       // An authenticated stored plan supplies the original when the actual target is patched.
       derivation = record?.plan.derivation ?? derive(text);
       diagnostics.push(...derivation.diagnostics);
@@ -83,6 +86,26 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
       candidate = actual;
       try { await access(dirname(actual.targetPath), constants.W_OK | constants.X_OK); }
       catch { blockers.push({ code: 'TARGET_NOT_WRITABLE', severity: 'error', message: 'Target directory must permit atomic replacement without elevation.', path: dirname(actual.targetPath) }); }
+      const paths = managedPaths(actual.targetPath);
+      const writable: string[] = [];
+      // Check each existing parent that must publish state; missing descendants use the nearest parent.
+      for (const path of [paths.root, dirname(paths.root), dirname(dirname(paths.root)), paths.home, join(paths.root, 'preparations'), join(paths.root, 'targets'), join(paths.root, 'stores')]) {
+        if (await exists(path)) writable.push(path);
+      }
+      if (record && await exists(record.locator.store)) {
+        writable.push(record.locator.store);
+        const transactions = join(record.locator.store, 'transactions');
+        if (await exists(transactions)) {
+          writable.push(transactions);
+          for (const name of await readdir(transactions)) {
+            if (!name.startsWith('.staging-')) writable.push(join(transactions, name));
+          }
+        }
+      }
+      for (const path of writable) {
+        try { await access(path, constants.W_OK | constants.X_OK); }
+        catch { blockers.push({ code: 'STORE_NOT_WRITABLE', severity: 'error', message: 'Managed recovery state must permit transaction publication without elevation.', path }); }
+      }
     } catch (error) {
       const entry = diagnostic(error);
       diagnostics.push(entry);
@@ -98,6 +121,7 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
     const allowedActions: Inspection['allowedActions'] = actionBlocked || !inspectionToken ? [] : state === 'incomplete' && recovery ? ['recover'] : derivation?.support === 'supported' && state === 'original' ? ['apply', ...(recovery ? ['restore' as const] : [])] : state === 'tool-applied' && recovery ? ['apply', 'restore'] : [];
     const inspection: Inspection = { candidate, support: derivation?.support ?? 'unsupported', state, derivation, source, writeReadiness: blockers.some((entry) => entry.code === 'PROCESS_ENUMERATION_FAILED') ? 'unknown' : blockers.length ? 'blocked' : 'ready', blockers, allowedActions, diagnostics, inspectionToken, operation, recovery, runtime: 'not-verified' };
     if (snapshot) inspectedSources.set(inspection, snapshot);
+    inspectedLocators.set(inspection, locatorContent);
     return inspection;
   }
   async function change(command: 'apply' | 'restore' | 'recover', selection: ConfirmedSelection): Promise<OperationResult> {
@@ -111,6 +135,7 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
         throw new TransactionError(blocker?.code ?? 'WRITE_BLOCKED', blocker?.message ?? 'Writing is blocked.', current.writeReadiness === 'unknown' ? 'runtime-error' : 'conflict');
       }
       let record = await managedRecord(current.candidate.targetPath, derive);
+      check(inspectedLocators.get(current) === (record ? canonical(record.locator) : null), 'INSPECTION_CHANGED', 'Managed selection changed after confirmation; inspect and confirm again.');
       if (command === 'recover') {
         check(record, 'RESTORE_SOURCE_REQUIRED', 'No managed recovery record. Use the original tool entrypoint and operation store for historical preparations.');
         return executor.recover({ store: record.locator.store });
