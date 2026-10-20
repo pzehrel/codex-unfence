@@ -455,6 +455,13 @@ class Match {
   closeReferences(): void {
     this.capabilityEffects();
     for (const binding of this.bindings.values()) {
+      for (const def of binding.defs) {
+        let node: E.Node | undefined = def.node;
+        while (node && node !== this.context.program) {
+          need(node.type !== 'ExportNamedDeclaration' && node.type !== 'ExportDefaultDeclaration', 'RELATED_EXPORT', 'Related bindings cannot be exported to unknown consumers.', node);
+          node = this.context.parents.get(node);
+        }
+      }
       for (const reference of binding.references) {
         need(this.matched.has(reference.identifier), 'RELATED_ESCAPE', 'A related binding has an additional use, assignment or escaped receiver.', reference.identifier);
       }

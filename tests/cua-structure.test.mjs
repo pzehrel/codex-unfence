@@ -257,6 +257,18 @@ test('compiled replacement propagates original errors and passes unsupported JSO
   assert.equal(body.feature_status.agent, true);
 });
 
+test('refuses related export exposure even without an extra local reference', () => {
+  for (const source of [
+    fixture.replace('async function transport(', 'export async function transport('),
+    fixture.replace('var ttl =', 'export var ttl ='),
+    fixture.replace('function agentBlocked(', 'export function agentBlocked('),
+  ]) {
+    const result = deriveCua(source);
+    assert.equal(result.support, 'unsupported');
+    assert.equal(result.change, null);
+  }
+});
+
 test('refuses configuration whose once initializer never runs', () => {
   const result = deriveCua(fixture.replace('initialize();', ''));
   assert.equal(result.support, 'unsupported');
