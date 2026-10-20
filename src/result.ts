@@ -1,4 +1,5 @@
 import type { SourceAnalysis, SourceRange } from './analysis.js';
+import type { DiscoveryReport, Inspection } from './managed-patches.js';
 
 export const EXIT_CODES = {
   success: 0,
@@ -85,12 +86,25 @@ export interface OperationResult extends ResultBase {
   } | null;
 }
 
-export type CommandResult = DetectionResult | PreparationResult | OperationResult | (ResultBase & { command: null; data: null });
+export interface CheckResult extends ResultBase {
+  command: 'check';
+  data: { discovery: DiscoveryReport; inspection: Inspection | null; runtime: 'not-verified' } | null;
+}
+
+export type CommandResult = DetectionResult | PreparationResult | OperationResult | CheckResult | (ResultBase & { command: null; data: null });
 
 export function renderHuman(result: CommandResult): string {
   const lines = [`${result.command ?? 'CLI'}: ${result.outcome}`];
   if (result.data) {
     if ('pluginRoot' in result.data) lines.push(`Plugin root: ${result.data.pluginRoot}`);
+    if (result.command === 'check') {
+      for (const candidate of result.data.discovery.candidates) lines.push(`Installation: ${candidate.appPath}; target: ${candidate.targetPath}`);
+      const inspection = result.data.inspection;
+      if (inspection) {
+        lines.push(`Structural support: ${inspection.support}; file state: ${inspection.state}; write readiness: ${inspection.writeReadiness}`);
+        for (const blocker of inspection.blockers) lines.push(`[${blocker.code}] ${blocker.message}`);
+      }
+    }
     if ('store' in result.data) {
       lines.push(`Operation store: ${result.data.store}`, `Transaction: ${result.data.transaction ?? 'none'}`, `Operation: ${result.data.operation ?? 'none'}`);
       if (result.data.groupState) lines.push(`Group: ${result.data.groupState}`);
