@@ -19,11 +19,83 @@ test('derives the unique dedicated transport in a complete synthetic site-status
   assert.deepEqual(deriveCua(fixture), result);
 });
 
+const guardedMethod = `
+  async throwIfBlocksUrl(runtime, site, backend, browser, authorization = 'browser-origin-access') {
+    if (bypass(runtime, 'check-url-site-status') || typeof site != 'string') return;
+    let status = await this.checkUrl(runtime, site, backend);
+    if (status == null) return;
+    let { request, result } = status, label = display(browser), family = browser?.browserFamily;
+    if (result.blocked) throw log(() => ({ authorization, backend, browserFamily: family, check: 'check-url-site-status', origin: origin(site) ?? void 0, permissionSource: 'site-status', outcome: 'denied', reason: 'site_status_blocked', ...result.cached ? { cached: true } : {} })), new SiteError('site_status_blocked', \`\${label} blocked on \${request.displayUrl}\`);
+  }
+`;
+const guardedHelpers = `
+function bypass(runtime, check) { return false; }
+function display(browser) { return browser?.name ?? 'synthetic'; }
+function origin(site) { return new URL(site).origin; }
+function log(event) { event(); }
+class SiteError extends Error {}
+`;
+const guardedFixture = guardedHelpers + fixture.slice(0, fixture.indexOf('function checkSite')).replace('  async checkUrl(', guardedMethod + '  async checkUrl(');
+
+test('supports the finite guarded class consumer while retaining bypass, logging and original cache code', () => {
+  const result = deriveCua(guardedFixture);
+  assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+  assert.ok(result.change.patchedSource.includes(guardedMethod));
+});
+
+test('supports a once-initialized local terminal error class', () => {
+  const source = guardedFixture.replace('class SiteError extends Error {}', 'var SiteError, initErrorClass = once(() => { SiteError = class extends Error {}; });\ninitErrorClass();');
+  const result = deriveCua(source);
+  assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+});
+
+test('supports a direct async callback consuming the guarded policy result', () => {
+  const source = guardedFixture.replace('class SiteError extends Error {}', 'var SiteError, initErrorClass = once(() => { SiteError = class extends Error {}; });\ninitErrorClass();') + `
+function checkSite(runtime, site, backend) { return policy.checkUrl(runtime, site, backend); }
+const controller = { validate: async site => {
+  if ((await checkSite(this.runtime, site, this.browserBackend))?.result.blocked)
+    throw new SiteError('siteStatus', 'site_status_blocked', 'Blocked', { origin: origin(site) ?? void 0, source: 'site-status' });
+} };
+`;
+  const result = deriveCua(source);
+  assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+});
+
+test('supports a top-level class-expression terminal error binding', () => {
+  const source = guardedFixture.replace('class SiteError extends Error {}', 'const SiteError = class extends Error {};');
+  const result = deriveCua(source);
+  assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+});
+
+const headerMetadata = `function getMetadata(runtime) {
+  let value = runtime.requestMeta?.['x-codex-turn-metadata'];
+  if (typeof value == 'string') try { value = JSON.parse(value); } catch { return; }
+  if (!(value == null || typeof value != 'object' || Array.isArray(value))) return value;
+}`;
+
+test('supports finite turn-header parsing with the same runtime and parsed metadata binding', () => {
+  const result = deriveCua(fixture.replace('function getMetadata(runtime) { return runtime.turn; }', headerMetadata));
+  assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+});
+
+test('supports a bound literal-only error formatter without changing the original guard', () => {
+  const source = 'function message(text) { return `synthetic: ${text}`; }\n' + fixture.replace("new Error('Missing fetch')", "new Error(message('Missing fetch'))");
+  const result = deriveCua(source);
+  assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+  assert.ok(result.change.patchedSource.includes("new Error(message('Missing fetch'))"));
+});
+
 test('refuses configuration whose once initializer never runs', () => {
   const result = deriveCua(fixture.replace('initialize();', ''));
   assert.equal(result.support, 'unsupported');
   assert.equal(result.change, null);
   assert.match(result.diagnostics[0].code, /INITIALIZATION/);
+});
+
+test('allows unrelated browser capability inspection without treating it as chain mutation', () => {
+  const source = 'const descriptor = Object.getOwnPropertyDescriptor(window.Element.prototype, "localName"); const browser = globalThis.document; browser.syntheticFlag = true;\n' + fixture;
+  const result = deriveCua(source);
+  assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
 });
 
 test('refuses visible standard capability mutation and dynamic scope', () => {
