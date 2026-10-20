@@ -61,7 +61,11 @@ export async function discoverInstallations(selection: { appPath?: string } = {}
       for (const name of names.sort()) {
         if (!name.endsWith('.app')) continue;
         const appPath = join(root, name);
-        try { candidates.push(await installationAt(appPath)); }
+        try {
+          // An unrelated application is not a malformed CUA installation.
+          await lstat(join(appPath, CUA_SERVICE));
+          candidates.push(await installationAt(appPath));
+        }
         catch (error) {
           if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) diagnostics.push(diagnostic(error, appPath));
         }

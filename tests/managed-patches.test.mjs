@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { link, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, link, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,4 +56,69 @@ test('explicit discovery reports missing installations and refuses symlink or ha
   await link(selected.targetPath, selected.targetPath + '.alias');
   assert.equal(run(box, 'discover', { appPath: selected.appPath }).diagnostics[0].code, 'PATH_ALIAS');
   assert.deepEqual((await readdir(join(box.directory, 'home'))).sort(), ['Applications']);
+});
+
+test('default discovery ignores ordinary app aliases that have no CUA service', async t => {
+  const box = await sandbox(t);
+  const ordinary = join(box.directory, 'ordinary.app');
+  await mkdir(ordinary);
+  await symlink(ordinary, join(box.directory, 'home/Applications/Ordinary.app'));
+  const report = run(box, 'discover');
+  assert.equal(report.selection, 'none');
+  assert.deepEqual(report.diagnostics, []);
+});
+
+test('inspection reports unsupported code separately from process blockers and creates no recovery state', async t => {
+  const box = await sandbox(t);
+  const candidate = { ...await installation(box, 'Inspect', 'anything'), version: null, build: null };
+  const original = await readFile(candidate.targetPath);
+  const inspection = run(box, 'inspect', candidate, { CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ pid: 987654, executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' }]) });
+  assert.equal(inspection.support, 'unsupported');
+  assert.equal(inspection.writeReadiness, 'blocked');
+  assert.equal(inspection.state, 'incompatible');
+  assert.equal(inspection.blockers[0].code, 'PROCESSES_RUNNING');
+  assert.ok(inspection.diagnostics.length > 0);
+  assert.equal(inspection.runtime, 'not-verified');
+  assert.equal(typeof inspection.inspectionToken, 'string');
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+  assert.deepEqual((await readdir(join(box.directory, 'home'))).sort(), ['Applications']);
+});
+
+async function supportedInstallation(box) {
+  const candidate = { ...await installation(box, 'Supported', 'unlisted-42'), version: 'unlisted-42', build: '999' };
+  const original = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
+  await writeFile(candidate.targetPath, original, { mode: 0o644 });
+  return { candidate, original };
+}
+
+test('managed operations persist private recovery state and restore original bytes after repeated application', async t => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  const inspection = run(box, 'inspect', candidate);
+  assert.equal(inspection.support, 'supported');
+  assert.equal(inspection.state, 'original');
+  assert.equal(inspection.writeReadiness, 'ready');
+  await assert.rejects(access(join(box.directory, 'home/Library')), { code: 'ENOENT' });
+  const applied = run(box, 'apply', candidate);
+  assert.equal(applied.exitCode, 0, JSON.stringify(applied));
+  assert.equal(applied.data.targets[0].action, 'applied');
+  const patched = await readFile(candidate.targetPath);
+  assert.notDeepEqual(patched, original);
+  const after = run(box, 'inspect', candidate);
+  assert.equal(after.state, 'tool-applied');
+  assert.equal(after.support, 'supported');
+  assert.equal(after.recovery.tool.version, '9.8.7-synthetic');
+  assert.equal(after.recovery.command, 'npx --package codex-browser-liberation-patch@9.8.7-synthetic codex-browser-patch');
+  assert.equal(run(box, 'apply', candidate).data.targets[0].action, 'already-applied');
+  assert.deepEqual(await readFile(candidate.targetPath), patched);
+  assert.equal(run(box, 'restore', candidate).data.targets[0].action, 'restored');
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+  const restored = run(box, 'status', candidate);
+  assert.equal(restored.data.targets[0].state, 'original');
+  assert.equal(restored.data.targets[0].action, 'restored');
+  assert.equal(run(box, 'restore', candidate).data.targets[0].action, 'already-original');
+  assert.equal((await stat(after.recovery.preparation)).mode & 0o777, 0o700);
+  assert.equal((await stat(join(after.recovery.preparation, 'source.original.mjs'))).mode & 0o777, 0o600);
+  assert.equal((await stat(after.recovery.store)).mode & 0o777, 0o700);
+  assert.deepEqual(await readdir(join(candidate.targetPath, '..')), ['browser-service.mjs']);
 });
