@@ -79,11 +79,16 @@ export function runNpmExecPty(args, options) {
       env: { ...spawnOptions.env, TERM: 'dumb' }, stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '', stderr = '';
+    let step = 0;
+    const steps = options.steps ?? [];
     const timer = setTimeout(() => {
       process.kill(-child.pid, 'SIGKILL');
       reject(new Error(`npm exec PTY timed out: ${stdout}${stderr}`));
     }, 30_000);
-    child.stdout.setEncoding('utf8').on('data', (text) => { stdout += text; });
+    child.stdout.setEncoding('utf8').on('data', (text) => {
+      stdout += text;
+      while (steps[step] && stdout.includes(steps[step].waitFor)) child.stdin.write(steps[step++].send);
+    });
     child.stderr.setEncoding('utf8').on('data', (text) => { stderr += text; });
     child.on('error', (error) => { clearTimeout(timer); reject(error); });
     child.on('close', (status, signal) => {

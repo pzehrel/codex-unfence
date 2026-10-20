@@ -62,3 +62,17 @@ test('managed status is read-only while explicit legacy selectors retain strict 
   assert.deepEqual(await readdir(join(box.directory, 'home')), ['Applications']);
   assert.deepEqual(await readFile(box.target), box.source);
 });
+
+test('managed writes require real confirmation and missing status preserves its command', async t => {
+  const box = await sandbox(t);
+  for (const command of ['apply', 'restore', 'recover']) {
+    const child = run(box, [command, '--app', box.app]);
+    assert.equal(child.code, 2, JSON.stringify(child));
+    assert.equal(child.result.command, command);
+  }
+  const missing = run(box, ['status', '--app', join(box.directory, 'missing.app')]);
+  assert.equal(missing.code, 1);
+  assert.equal(missing.result.command, 'status');
+  assert.equal(missing.result.data, null);
+  assert.deepEqual(await readFile(box.target), box.source);
+});
