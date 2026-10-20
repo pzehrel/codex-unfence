@@ -30,10 +30,20 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
     while (true) {
       process.stdout.write(`Installation: ${inspection.candidate.appPath}\nTarget: ${inspection.candidate.targetPath}\nStructural support: ${inspection.support}; file state: ${inspection.state}; write readiness: ${inspection.writeReadiness}\n`);
       for (const diagnostic of [...inspection.diagnostics, ...inspection.blockers]) process.stdout.write(`[${diagnostic.code}] ${diagnostic.message}\n`);
-      const command = action ?? await ask('Action (apply, restore, recover, recheck, cancel): ');
+      if (inspection.recovery) process.stdout.write(`Recovery tool: ${inspection.recovery.tool.packageName}@${inspection.recovery.tool.version}; executable: ${inspection.recovery.tool.executable}\nKeep the matching local package tarball; registry availability is not assumed.\n`);
+      const command = action ?? await ask(`Action (${[...inspection.allowedActions, 'recheck', 'cancel'].join(', ')}): `);
       if (command === null || command === 'cancel') { process.stdout.write('Cancelled; installation unchanged.\n'); return null; }
       if (command === 'recheck') { inspection = await managed.inspect(candidate); continue; }
       if (command !== 'apply' && command !== 'restore' && command !== 'recover') throw new Error('Choose a listed action.');
+      if (!inspection.allowedActions.includes(command)) {
+        process.stdout.write(`Action ${command} is unavailable; resolve the diagnostics and recheck.\n`);
+        if (!action) continue;
+        const choice = await ask('Action (recheck, cancel): ');
+        if (choice !== 'recheck') return null;
+        inspection = await managed.inspect(candidate);
+        continue;
+      }
+      for (const evidence of inspection.derivation?.evidence ?? []) process.stdout.write(`Support: ${evidence.description}\n`);
       process.stdout.write(`Target: ${inspection.candidate.targetPath}\nScope: site-status response only; original request and predicate stay.\nBackups and recovery data remain private outside npm cache.\nChanging sealed resources invalidates the application signature; this tool does not sign it.\nExit the host and related services yourself before writing.\n${command === 'recover' ? 'Recover rolls back to the interrupted operation before state; it never continues apply or restore.\n' : ''}`);
       const confirmed = await ask(`Type yes to ${command}, anything else cancels: `);
       if (confirmed !== 'yes') { process.stdout.write('Cancelled; installation unchanged.\n'); return null; }
