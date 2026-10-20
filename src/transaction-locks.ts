@@ -1,6 +1,7 @@
-import { randomUUID } from 'node:crypto';
-import { dirname, join, resolve } from 'node:path';
-import { canonicalDirectory, check, exists, publish, readJSON, TransactionError } from './transaction-storage.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { userInfo } from 'node:os';
+import { dirname, join, resolve, sep } from 'node:path';
+import { canonicalDirectory, check, exists, privateDirectory, publish, readJSON, syncDirectory, TransactionError } from './transaction-storage.js';
 import type { ProcessIdentity } from './processes.js';
 
 export interface LeaseRecord {
@@ -36,6 +37,30 @@ export async function inspectLease(path: string): Promise<Lease | null> {
 
 export function targetLock(path: string): string {
   return join(dirname(path), '.codex-browser-patch.lock');
+}
+
+export function checkCoordinationPaths(paths: string[]): void {
+  const base = join(userInfo().homedir, '.codex-browser-patch');
+  for (const path of paths) check(path !== base && !path.startsWith(base + sep) && !base.startsWith(path + sep), 'PATH_ALIAS', 'Preparation, operation store and targets must not overlap the fixed coordination namespace.', path);
+}
+
+/** OS account home, not HOME/XDG or --store: all current writers share one namespace. */
+export async function externalTargetLock(path: string, create = false): Promise<string> {
+  const home = userInfo().homedir;
+  const base = join(home, '.codex-browser-patch');
+  const parents = [base, join(base, 'target-leases')];
+  const key = createHash('sha256').update(dirname(path)).digest('hex');
+  parents.push(join(parents[1]!, key));
+  await canonicalDirectory(home);
+  for (const directory of parents) {
+    if (create) {
+      await privateDirectory(directory);
+      await syncDirectory(dirname(directory));
+    }
+    else if (await exists(directory)) await canonicalDirectory(directory, true);
+    else break;
+  }
+  return join(parents[2]!, 'target.lock');
 }
 
 export async function acquireLease(path: string, context: { store: string; transaction: string; table: ProcessIdentity[] }, checkPrevious: (record: LeaseRecord) => Promise<void>): Promise<Lease> {

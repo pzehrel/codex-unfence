@@ -5,7 +5,7 @@ import { EXIT_CODES } from './result.js';
 import type { Diagnostic, OperationResult, OperationTarget, PendingTransaction, TargetState, TransactionCommand } from './result.js';
 import { PROCESS_LIMITATION, processTable } from './processes.js';
 import type { ProcessIdentity } from './processes.js';
-import { acquireLease, inspectLease, releaseLease, targetLock } from './transaction-locks.js';
+import { acquireLease, checkCoordinationPaths, externalTargetLock, inspectLease, releaseLease, targetLock } from './transaction-locks.js';
 import type { LeaseRecord } from './transaction-locks.js';
 import { canonical, digest } from './integrity.js';
 import { atomicJSON, canonicalDirectory, check, exists, privateDirectory, readJSON, regularBytes, sign, syncDirectory, TransactionError, verify, writeExclusive } from './transaction-storage.js';
@@ -70,6 +70,7 @@ const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{1
 
 /** Bound only by the two closed admission adapters, never by user input. */
 export function transactionExecutor(adapter: TransactionAdapter) {
+const sealedTarget = adapter.scheme !== 'structural';
 async function storeAt(path: string, create: boolean): Promise<Store | null> {
   check(resolve(path) === path, 'PATH_ALIAS', 'Operation store must be a normalized absolute path.', path);
   if (!await exists(path)) {
@@ -254,8 +255,19 @@ async function previousTransaction(record: LeaseRecord, own: RecordEntry | null,
   check(terminal(entry.journal), 'INCOMPLETE_TRANSACTION', `Recover transaction ${entry.journal.id} using --store ${record.store} before ordinary writes.`);
 }
 
-async function pendingAtTarget(path: string): Promise<RecordEntry | null> {
-  const lease = await inspectLease(targetLock(path));
+async function targetRoots(paths: string[], create = false): Promise<string[]> {
+  const external = await Promise.all(paths.map((path) => externalTargetLock(path, create)));
+  return [...new Set(external)].sort().concat(sealedTarget ? [] : [...new Set(paths.map(targetLock))].sort());
+}
+
+async function checkTargetArtifacts(path: string): Promise<void> {
+  if (!sealedTarget) return;
+  const names = await readdir(dirname(path));
+  check(!names.some((name) => name.startsWith('.codex-browser-patch') || name.startsWith('.publish-')), 'LEGACY_TARGET_ARTIFACTS', 'Target directory contains old or interrupted transaction artifacts; offline maintenance is required. No artifacts were removed.', path);
+}
+
+async function pendingAtLease(root: string, path: string): Promise<RecordEntry | null> {
+  const lease = await inspectLease(root);
   if (!lease) return null;
   const store = await storeAt(lease.record.store, false);
   check(store, 'INVALID_LOCK', 'Target lock references an unavailable store.');
@@ -263,6 +275,14 @@ async function pendingAtTarget(path: string): Promise<RecordEntry | null> {
   const entry = await recordAt(store, lease.record.transaction);
   check(entry.journal.targets.some((target) => targetLock(target.path) === targetLock(path)), 'INVALID_LOCK', 'Target lock references an unrelated transaction.', path);
   return terminal(entry.journal) ? null : entry;
+}
+
+async function pendingAtTarget(path: string): Promise<RecordEntry | null> {
+  for (const root of [await externalTargetLock(path), targetLock(path)]) {
+    const pending = await pendingAtLease(root, path);
+    if (pending) return pending;
+  }
+  return null;
 }
 
 async function classify(item: PlanItem, entries: RecordEntry[]): Promise<Classified> {
@@ -286,12 +306,16 @@ async function classify(item: PlanItem, entries: RecordEntry[]): Promise<Classif
 /** The intent is already durable. Check actual bytes after failures, including rename-then-error. */
 async function replaceTarget(path: string, bytes: Buffer, expected: Snapshot): Promise<Snapshot> {
   check(same(await snapshot(path), expected), 'TARGET_CHANGED', 'Target changed immediately before replacement.', path);
-  const temporary = join(dirname(path), `.codex-browser-patch-${randomUUID()}.tmp`);
+  // CUA staging also stays outside sealed resources, including after SIGKILL.
+  // rename across filesystems fails closed rather than falling back to a copy.
+  const stagingDirectory = sealedTarget ? dirname(await externalTargetLock(path, true)) : dirname(path);
+  const temporary = join(stagingDirectory, `.codex-browser-patch-${randomUUID()}.tmp`);
   try {
     await writeExclusive(temporary, bytes, expected.mode);
     check(same(await snapshot(path), expected), 'TARGET_CHANGED', 'Target changed while staging replacement.', path);
     await rename(temporary, path);
     await syncDirectory(dirname(path));
+    if (stagingDirectory !== dirname(path)) await syncDirectory(stagingDirectory);
     const current = await snapshot(path);
     check(parentMatches(current, expected) && current.sha256 === digest(bytes) && current.size === bytes.length, 'POSTVERIFY_FAILED', 'Target failed post-write verification.', path);
     return current;
@@ -362,21 +386,26 @@ async function changeTransaction(operation: Operation, options: Options): Promis
     if (process.platform !== 'darwin') throw new TransactionError('UNSUPPORTED_PLATFORM', `Only macOS is supported; received ${process.platform}.`, 'runtime-error');
     const plan = await adapter.loadSelected(options);
     const paths = plan.targets.map((item) => item.target.identity.path);
+    checkCoordinationPaths([plan.directory, options.store, ...paths]);
     await processes();
     const existing = await storeAt(options.store, false);
     const history = await records(existing);
     check(!history.some((record) => !terminal(record.journal)), 'INCOMPLETE_TRANSACTION', 'Operation store contains an incomplete transaction; use recover.');
-    for (const path of paths) check(!await pendingAtTarget(path), 'INCOMPLETE_TRANSACTION', 'Target has an incomplete transaction, possibly in another store; use recover with its store.');
+    for (const path of paths) {
+      await checkTargetArtifacts(path);
+      check(!await pendingAtTarget(path), 'INCOMPLETE_TRANSACTION', 'Target has an incomplete transaction, possibly in another store; use recover with its store.');
+    }
     const classified: Classified[] = [];
     for (const item of plan.targets) classified.push(await classify(item, history));
     store = await storeAt(options.store, true);
     check(store, 'UNTRUSTED_STORE', 'Cannot create operation store.');
     const transaction = randomUUID();
     const table = await processes();
-    for (const root of [join(store.path, 'operation.lock'), ...new Set(paths.map(targetLock).sort())]) {
+    for (const root of [join(store.path, 'operation.lock'), ...await targetRoots(paths, true)]) {
       const lease = await acquireLease(root, { store: store.path, transaction, table }, (previous) => previousTransaction(previous, null, false));
       leases.push({ root, lease });
     }
+    for (const path of paths) await checkTargetArtifacts(path);
     const currentRecords = await records(store);
     check(!currentRecords.some((record) => !terminal(record.journal)), 'INCOMPLETE_TRANSACTION', 'Another transaction requires recovery.');
     const current: Classified[] = [];
@@ -459,6 +488,7 @@ async function status(options: Options): Promise<OperationResult> {
     if (!paths.length) throw new TransactionError('SELECTION_REQUIRED', 'status requires --plan or --target.', 'usage-error');
     const pendingEntries = new Map(history.filter((entry) => !terminal(entry.journal)).map((entry) => [`${entry.journal.store}/${entry.journal.id}`, entry]));
     for (const path of paths) {
+      await checkTargetArtifacts(path);
       const pending = await pendingAtTarget(path);
       if (pending) pendingEntries.set(`${pending.journal.store}/${pending.journal.id}`, pending);
     }
@@ -520,10 +550,14 @@ async function recoverTransaction(options: Options): Promise<OperationResult> {
     entry = pending[0] ?? null;
     if (!entry) return result('recover', 'success', { store: store.path, transaction: null, operation: null, targets: [], runtime: 'not-verified' }, [{ code: 'NO_INCOMPLETE_TRANSACTION', severity: 'info', message: 'No incomplete transaction; nothing to roll back.' }]);
     const table = await processes();
-    for (const root of [join(store.path, 'operation.lock'), ...new Set(entry.journal.targets.map((target) => targetLock(target.path)).sort())]) {
+    const paths = entry.journal.targets.map((target) => target.path);
+    checkCoordinationPaths([options.store, ...paths]);
+    for (const path of paths) await checkTargetArtifacts(path);
+    for (const root of [join(store.path, 'operation.lock'), ...await targetRoots(paths, true)]) {
       const lease = await acquireLease(root, { store: store.path, transaction: entry.journal.id, table }, (previous) => previousTransaction(previous, entry, true));
       leases.push({ root, lease });
     }
+    for (const path of paths) await checkTargetArtifacts(path);
     // Another recovery can finish between our initial read and acquiring the store lock.
     const refreshed = await records(store);
     const current = refreshed.find((record) => record.journal.id === entry!.journal.id);

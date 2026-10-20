@@ -75,6 +75,168 @@ test('public CUA CLI applies a pinned preparation and restores exact original by
   assert.equal(response(run(box, 'status')).data.targets[0].state, 'original');
 });
 
+test('CUA restore preserves transaction history outside the app and returns its original directory layout', async t => {
+  const box = await sandbox(t);
+  const parent = join(box.target, '..');
+  const initial = await readdir(parent);
+  response(run(box, 'status'));
+  await assert.rejects(access(join(box.directory, 'home', '.codex-browser-patch')), { code: 'ENOENT' });
+  response(run(box, 'apply'));
+  assert.deepEqual(await readdir(parent), initial);
+  response(run(box, 'restore'));
+  assert.deepEqual(await readdir(parent), initial);
+  const restored = response(run(box, 'status'));
+  assert.equal(restored.data.targets[0].action, 'restored');
+  assert.deepEqual(restored.data.pendingTransactions, []);
+  assert.equal((await readdir(join(box.store, 'transactions'))).length, 2);
+  response(run(box, 'restore'));
+  assert.deepEqual(await readdir(parent), initial);
+  assert.equal((await readdir(join(box.store, 'transactions'))).length, 3);
+});
+
+test('CUA refuses released, malformed and orphan legacy artifacts without deleting or writing the target', async t => {
+  for (const name of ['.codex-browser-patch.lock', '.codex-browser-patch.lock.11111111-1111-4111-8111-111111111111.next', '.codex-browser-patch-interrupted.tmp', '.publish-interrupted']) {
+    const box = await sandbox(t);
+    const artifact = join(box.target, '..', name);
+    await writeFile(artifact, JSON.stringify({ released: true }), { mode: 0o600 });
+    for (const command of ['status', 'apply', 'restore']) {
+      const rejected = response(run(box, command), 4);
+      assert.equal(rejected.diagnostics[0].code, 'LEGACY_TARGET_ARTIFACTS');
+      assert.deepEqual(await readFile(box.target), original);
+      assert.equal(await readFile(artifact, 'utf8'), JSON.stringify({ released: true }));
+      await assert.rejects(access(box.store), { code: 'ENOENT' });
+    }
+  }
+});
+
+test('CUA interrupted staging can recover without leaving resources inside the app', async t => {
+  const box = await sandbox(t);
+  const operation = await paused(t, box, 'apply', 'before-target-rename');
+  await operation.kill();
+  assert.deepEqual(await readFile(box.target), original);
+  const recovered = response(run(box, 'recover'));
+  assert.equal(recovered.data.targets[0].state, 'original');
+  assert.deepEqual(await readdir(join(box.target, '..')), ['browser-service.mjs']);
+  assert.deepEqual(response(run(box, 'status')).data.pendingTransactions, []);
+});
+
+test('CUA external coordination survives interrupted publication and released successors without app artifacts', async t => {
+  for (const boundary of ['after-coordination-lock-link', 'after-coordination-successor-link', 'after-coordination-release-link']) {
+    const box = await sandbox(t);
+    if (boundary === 'after-coordination-successor-link') response(run(box, 'restore'));
+    const operation = await paused(t, box, 'apply', boundary);
+    await operation.kill();
+    assert.deepEqual(await readdir(join(box.target, '..')), ['browser-service.mjs']);
+    if (boundary === 'after-coordination-release-link') response(run(box, 'restore'));
+    else response(run(box, 'apply'));
+    response(run(box, 'restore'));
+    assert.deepEqual(await readFile(box.target), original);
+    assert.deepEqual(await readdir(join(box.target, '..')), ['browser-service.mjs']);
+    assert.deepEqual(response(run(box, 'status')).data.pendingTransactions, []);
+  }
+});
+
+test('CUA rejects artifacts introduced while waiting for coordination and a stale contender cannot bypass a pending owner', async t => {
+  const box = await sandbox(t);
+  const contender = { ...box, store: join(box.directory, 'contender') };
+  const delayed = await paused(t, contender, 'apply', 'before-coordination-link');
+  const holder = await paused(t, box, 'apply', 'after-intent-publication');
+  await holder.kill();
+  response(await delayed.finish(), 4);
+  const pending = response(run(contender, 'status'));
+  assert.equal(pending.data.transaction, response(run(box, 'status')).data.transaction);
+  assert.equal(pending.data.groupState, 'incomplete');
+  response(run(box, 'recover'));
+  assert.deepEqual(await readFile(box.target), original);
+
+  const waiting = await paused(t, box, 'apply', 'before-coordination-link');
+  const artifact = join(box.target, '..', '.codex-browser-patch.lock.orphan.next');
+  await writeFile(artifact, 'external legacy artifact', { mode: 0o600 });
+  assert.equal(response(await waiting.finish(), 4).diagnostics[0].code, 'LEGACY_TARGET_ARTIFACTS');
+  assert.deepEqual(await readFile(box.target), original);
+  assert.equal(await readFile(artifact, 'utf8'), 'external legacy artifact');
+});
+
+test('CUA external coordination ignores HOME/XDG overrides and refuses alias or tampered ownership', async t => {
+  for (const mutation of ['symlink', 'permissions', 'ownership']) {
+    const box = await sandbox(t);
+    response(run(box, 'apply'));
+    response(run(box, 'restore'));
+    const coordination = join(box.directory, 'home', '.codex-browser-patch', 'target-leases');
+    const [name] = await readdir(coordination);
+    const directory = join(coordination, name);
+    if (mutation === 'symlink') {
+      await rename(directory, directory + '.moved');
+      await symlink(directory + '.moved', directory);
+    } else if (mutation === 'permissions') await chmod(directory, 0o755);
+    else {
+      const files = await readdir(directory);
+      const leaseFiles = files.filter(file => file.startsWith('target.lock'));
+      for (const file of leaseFiles) {
+        const path = join(directory, file);
+        const record = JSON.parse(await readFile(path, 'utf8'));
+        record.store = join(box.directory, 'missing-history');
+        await writeFile(path, JSON.stringify(record));
+      }
+    }
+    const rejected = run(box, 'apply', { CODEX_TEST_ALTERNATE_HOME: '1' });
+    assert.equal(rejected.status, 4, rejected.stdout + rejected.stderr);
+    assert.deepEqual(await readFile(box.target), original);
+    assert.deepEqual(await readdir(join(box.target, '..')), ['browser-service.mjs']);
+  }
+});
+
+test('current structural and CUA commands share external parent coordination and fail closed across schemes', async t => {
+  const box = await sandbox(t);
+  const pluginRoot = join(box.directory, 'plugins');
+  const structuralTarget = join(pluginRoot, 'browser/synthetic/scripts/browser-service.mjs');
+  const structuralSource = await readFile(new URL('./fixtures/site-status.js.txt', import.meta.url));
+  await mkdir(join(structuralTarget, '..'), { recursive: true });
+  await writeFile(structuralTarget, structuralSource, { mode: 0o640 });
+  const plan = join(box.directory, 'structural-plan');
+  const structuralStore = join(box.directory, 'structural-store');
+  const structural = command => runCli([command, '--plan', plan, '--store', structuralStore, '--json'], { directory: box.directory, fixture });
+  response(runCli(['prepare', '--plugin-root', pluginRoot, '--target', structuralTarget, '--output', plan, '--json'], { directory: box.directory, fixture }));
+  const cuaTarget = join(structuralTarget, '..', 'cua-service.mjs');
+  await writeFile(cuaTarget, original, { mode: 0o644 });
+  const cua = { ...box, target: cuaTarget };
+  const holder = await paused(t, cua, 'apply', 'after-coordination-lock-link');
+  const liveRoot = join(box.directory, 'home', '.codex-browser-patch', 'target-leases');
+  const [key] = await readdir(liveRoot);
+  const owner = JSON.parse(await readFile(join(liveRoot, key, 'target.lock'), 'utf8')).owner;
+  const live = runCli(['apply', '--plan', plan, '--store', structuralStore, '--json'], { directory: box.directory, fixture, env: { CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ ...owner, command: 'node synthetic-cli' }]) } });
+  assert.equal(response(live, 4).diagnostics[0].code, 'LOCK_HELD');
+  await holder.kill();
+  // A dead pre-intent CUA owner may be superseded by the structural writer.
+  response(structural('apply'));
+  const refused = response(run(cua, 'apply'), 4);
+  assert.equal(refused.diagnostics[0].code, 'LEGACY_TARGET_ARTIFACTS');
+  assert.deepEqual(await readFile(cuaTarget), original);
+  response(structural('restore'));
+});
+
+test('CUA refuses preparation or store overlap with fixed coordination before creating any artifacts', async t => {
+  for (const kind of ['preparation-root', 'preparation-parent', 'store-root', 'store-child']) {
+    const box = await sandbox(t);
+    const home = join(box.directory, 'home');
+    await mkdir(home, { recursive: true });
+    const coordination = join(home, '.codex-browser-patch');
+    if (kind === 'preparation-root' || kind === 'preparation-parent') {
+      const selected = kind === 'preparation-root' ? coordination : home;
+      await rename(box.preparation, selected + '.moving');
+      if (selected === home) await rm(home, { recursive: true });
+      await rename(selected + '.moving', selected);
+      box.preparation = selected;
+    } else box.store = kind === 'store-root' ? coordination : join(coordination, 'operations');
+    const before = await readdir(box.preparation);
+    const refused = response(run(box, 'apply'), 4);
+    assert.equal(refused.diagnostics[0].code, 'PATH_ALIAS');
+    assert.deepEqual(await readFile(box.target), original);
+    assert.deepEqual(await readdir(box.preparation), before);
+    if (kind.startsWith('store')) await assert.rejects(access(box.store), { code: 'ENOENT' });
+  }
+});
+
 test('CUA history refuses an externally replaced original inode even with exact pinned bytes', async t => {
   const box = await sandbox(t);
   response(run(box, 'apply'));

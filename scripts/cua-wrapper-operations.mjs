@@ -18,6 +18,8 @@ Usage: node scripts/cua-wrapper-operations.mjs apply|status|restore --preparatio
        node scripts/cua-wrapper-operations.mjs recover --store ABS [--json]
 CUA 26.1013.40934 / build 20770 only. Explicit target; preparation origin is informational.
 Private preparation and store required. No process termination, host restart or source execution.
+Target coordination history and replacement staging stay outside the app in the OS-account home.
+Old target-side transaction artifacts require offline maintenance; they are never deleted online.
 recover rolls back the interrupted operation's before state; it does not continue it.
 Runtime loading and website operation remain not-verified.
 `;

@@ -7,6 +7,18 @@ const promises = require('node:fs/promises');
 const childProcess = require('node:child_process');
 const { syncBuiltinESMExports } = require('node:module');
 const { dirname, join } = require('node:path');
+const os = require('node:os');
+const userInfo = os.userInfo;
+// Isolate the OS-account home boundary too; production does not trust HOME/XDG.
+const home = join(process.cwd(), 'home');
+os.userInfo = (...args) => {
+  fs.mkdirSync(home, { recursive: true });
+  return { ...userInfo(...args), homedir: home };
+};
+if (process.env.CODEX_TEST_ALTERNATE_HOME) {
+  process.env.HOME = join(process.cwd(), 'alternate-home');
+  process.env.XDG_STATE_HOME = join(process.cwd(), 'alternate-state');
+}
 Object.defineProperty(process, 'platform', { value: 'darwin' });
 const execute = childProcess.execFile;
 childProcess.execFile = function (file, args, ...rest) {
@@ -96,11 +108,12 @@ promises.open = async function (path, ...args) {
   return open(path, ...args);
 };
 promises.link = async function (from, to) {
+  if (String(to).includes('target-leases') && !JSON.parse(fs.readFileSync(from, 'utf8')).released) await boundary('before-coordination-link');
   if (String(to).includes('operation.lock') && !JSON.parse(fs.readFileSync(from, 'utf8')).released) await boundary('before-operation-lock');
   if (fault === 'release-failure' && String(to).endsWith('.next') && JSON.parse(fs.readFileSync(from, 'utf8')).released) throw ioError();
   const result = await link(from, to);
   const record = JSON.parse(fs.readFileSync(from, 'utf8'));
-  const scope = String(to).includes('operation.lock') ? 'operation' : 'target';
+  const scope = String(to).includes('operation.lock') ? 'operation' : String(to).includes('target-leases') ? 'coordination' : 'target';
   if (record.released) await boundary(`after-${scope}-release-link`);
   else await boundary(`after-${scope}-${String(to).endsWith('.next') ? 'successor' : 'lock'}-link`);
   if ((String(to).endsWith('.codex-browser-patch.lock') || String(to).includes('.codex-browser-patch.lock.')) && !JSON.parse(fs.readFileSync(from, 'utf8')).released) targetLeasePublished = true;

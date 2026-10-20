@@ -2,7 +2,7 @@
 
 正式工具是 macOS 的 Node.js CLI：发现 browser/chrome 插件，证明有限的站点状态消费结构，生成可审阅方案，再执行可恢复的文件事务。它只在本地消费点构造响应副本，将 `feature_status.agent` 固定为 `false`，保留请求、原对象及其他字段。
 
-**当前证据来自临时目录中的合成样例。真实插件结构兼容性、Codex 加载、宿主完整性接受和网站操作均未验证。** 已研究样本包含首版不支持的 deferred initializer 和 cache/inflight 控制流；不能据此声称实际样本兼容。检测不执行插件源码，也不修改插件。
+**正式结构 CLI 的证据来自临时目录中的合成样例，其真实插件结构兼容性、Codex 加载、宿主完整性接受和网站操作均未验证。** 已研究样本包含首版不支持的 deferred initializer 和 cache/inflight 控制流；不能据此声称实际样本兼容。检测不执行插件源码，也不修改插件。
 
 ## 限定版本的 CUA 请求包装副本
 
@@ -10,7 +10,9 @@
 
 准备脚本只生成私有原始／补丁副本和核对清单，不修改安装或运行应用。真实加载、生效、撤销、旧缓存及宿主完整性接受仍未验证；未知版本拒绝，不自动跟随更新。具体命令及验证结果见 [副本交付报告](reports/cua-request-wrapper-implementation.zh-CN.md)。该脚本仅供仓库内运行，不包含在 npm 包中。
 
-后续的仓库内应用／恢复工具见 [应用切片](docs/design/cua-wrapper-application-slice.md)及[工具交付报告](reports/cua-wrapper-application-implementation.zh-CN.md)。它采用独立的限定版本准入，并复用文件事务保护；不把 CUA 副本作为旧结构方案传入正式 CLI。真实安装写入和宿主／站点验收须另行确定范围，步骤见 [真实验收准备](docs/design/cua-wrapper-runtime-acceptance.md)。
+后续的仓库内应用／恢复工具见 [应用切片](docs/design/cua-wrapper-application-slice.md)及[工具交付报告](reports/cua-wrapper-application-implementation.zh-CN.md)。它采用独立的限定版本准入，并复用文件事务保护；不把 CUA 副本作为旧结构方案传入正式 CLI。2026-10-20 已在获准范围完成真实应用、用户试用、原文及签名恢复，具体证据与未验证项见 [真实验收记录](reports/cua-wrapper-runtime-acceptance.zh-CN.md)。
+
+CUA 的目标协调历史及替换暂存位于操作系统账户 home 下的 `.codex-browser-patch/target-leases/<父目录摘要>/`，不在应用包内；恢复后无需删除应用内锁链。该位置不随 `HOME`、XDG 或 `--store` 改变，必须与操作存储、准备副本一起保留。替换要求该位置与目标支持原子 rename；跨文件系统时拒绝，不降级复制。旧版目标旁锁、孤立后继或临时文件返回 `LEGACY_TARGET_ARTIFACTS`，需要独立离线维护，工具不在线删除。准备目录、操作存储和目标不得与该固定协调目录重合或互相包含。协调协议只约束使用当前引擎的并发写入者；不要同时运行旧二进制。机制见 [恢复收尾规格](docs/design/cua-wrapper-restore-completion.md)，实现与验证见 [恢复收尾报告](reports/cua-wrapper-restore-completion.zh-CN.md)。
 
 ## 本地安装
 
@@ -94,7 +96,7 @@ apply 中断通常回到 original；restore 中断通常回到 tool-applied。�
 
 恢复先验证整个组。任一目标出现未知外部内容，就保留所有目标和事务记录并报告冲突。不要把这类冲突当作可强制覆盖的提示。没有未完成事务时 recover 成功返回 `NO_INCOMPLETE_TRANSACTION`。
 
-事务先持久记录恢复所需的意图和私有备份，再逐文件原子替换，并校验写后内容。存储锁先于按规范路径排序的目标旁锁；跨存储操作共享目标排他。文件及父目录执行 fsync。整个多文件组**不是一次文件系统原子交换**；后续目标写入失败时回滚实际已变化的目标，回滚失败保留显式恢复证据。
+事务先持久记录恢复所需的意图和私有备份，再逐文件原子替换，并校验写后内容。先获取存储锁，再按稳定顺序获取账户 home 下的目标父目录协调租约；结构方案随后沿用按规范路径排序的目标旁锁，CUA 不生成目标旁锁。跨存储操作共享目标排他，不同准入方案的历史仍保守隔离。文件及父目录执行 fsync。整个多文件组**不是一次文件系统原子交换**；后续目标写入失败时回滚实际已变化的目标，回滚失败保留显式恢复证据。
 
 锁发布使用完整记录的不可覆盖硬链接。若在 link 与临时名 unlink 之间中断，读取只接受同目录、私有、同 inode 的唯一 `.publish-<UUID>` 临时名；不删除这个历史证据，仍验证 owner 生死和其事务，无法解释的硬链接继续拒绝。没有发布事务意图的死 owner 可由下一次普通写操作安全接替；recover 此时返回 `NO_INCOMPLETE_TRANSACTION`。
 
