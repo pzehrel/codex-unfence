@@ -122,3 +122,31 @@ test('managed operations persist private recovery state and restore original byt
   assert.equal((await stat(after.recovery.store)).mode & 0o777, 0o700);
   assert.deepEqual(await readdir(join(candidate.targetPath, '..')), ['browser-service.mjs']);
 });
+
+test('apply rejects a supported original changed after confirmation token validation', async t => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  const replacement = join(box.directory, 'replacement.mjs');
+  const changed = Buffer.concat([Buffer.from('// later supported revision\n'), original]);
+  await writeFile(replacement, changed);
+  const refused = run(box, 'apply', candidate, { CODEX_TEST_FAULT: 'managed-confirmation-change', CODEX_TEST_TARGET: candidate.targetPath, CODEX_TEST_REPLACEMENT: replacement });
+  assert.equal(refused.exitCode, 4);
+  assert.ok(refused.diagnostics.some(entry => ['INSPECTION_CHANGED', 'TARGET_CHANGED'].includes(entry.code)));
+  assert.deepEqual(await readFile(candidate.targetPath), changed);
+});
+
+test('inspection surfaces damaged preparation as conflict and refuses every write without trusting its locator', async t => {
+  const box = await sandbox(t);
+  const { candidate } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const trusted = run(box, 'inspect', candidate);
+  const patched = await readFile(candidate.targetPath);
+  await writeFile(join(trusted.recovery.preparation, 'source.original.mjs'), '// externally replaced original\n');
+  const conflict = run(box, 'inspect', candidate);
+  assert.equal(conflict.state, 'conflict');
+  assert.equal(conflict.writeReadiness, 'blocked');
+  assert.equal(conflict.inspectionToken, null);
+  assert.ok(conflict.diagnostics.length > 0);
+  for (const command of ['apply', 'restore', 'recover']) assert.notEqual(run(box, command, candidate).exitCode, 0);
+  assert.deepEqual(await readFile(candidate.targetPath), patched);
+});
