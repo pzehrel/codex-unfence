@@ -529,6 +529,39 @@ test('npx uninstall cancellation preserves patched bytes and every recovery arti
   }
 });
 
+test('npx interrupted install and uninstall require exact recovery confirmation and preserve transactions on refusal or EOF', async t => {
+  const box = await packageBox(t);
+  const { app, target } = await syntheticInstallation(box, 'ExactRecovery');
+  const scenario = join(box.directory, 'boundary.json');
+  const change = (command, steps = [{ waitFor: `Type yes to ${command},`, send: 'yes\n' }]) =>
+    npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps });
+  for (const command of ['install', 'uninstall']) {
+    if (command === 'uninstall') assert.equal((await change('install')).status, 0);
+    await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
+    const interrupted = await change(command);
+    assert.notEqual(interrupted.status, 0, interrupted.stdout + interrupted.stderr);
+    await rm(scenario);
+    const bytes = await readFile(target);
+    const identity = await stat(target);
+    const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
+    const before = await snapshotFiles(root);
+    for (const send of [' yes \n', 'YES\n', 'yes please\n', '\n', 'no\n', '\u0004']) {
+      const refused = await change(command, [{ waitFor: 'Type yes to recover', send }]);
+      assert.equal(refused.status, 0, refused.stdout + refused.stderr);
+      assert.match(refused.stdout, /Cancelled; installation unchanged/);
+      assert.doesNotMatch(refused.stdout, /rolled-back|Recovery completed|Type yes to (?:install|uninstall),/);
+      assert.deepEqual(await readFile(target), bytes);
+      assert.equal((await stat(target)).ino, identity.ino);
+      assert.deepEqual(await snapshotFiles(root), before);
+    }
+    const recovered = await change(command, [
+      { waitFor: 'Type yes to recover', send: 'yes\n' },
+      { waitFor: `Type yes to ${command},`, send: 'no\n' },
+    ]);
+    assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr);
+  }
+});
+
 test('npx install and uninstall guide rollback then continue after interruptions', async t => {
   const box = await packageBox(t);
   const app = join(box.directory, 'home/Applications/Resume.app');
@@ -548,7 +581,15 @@ test('npx install and uninstall guide rollback then continue after interruptions
   assert.deepEqual(await readFile(target), patched);
   const steps = command => [
     { waitFor: 'Type yes to recover', send: 'yes\n' },
-    { waitFor: `Type yes to ${command},`, send: 'yes\n' },
+    { waitFor: `Type yes to ${command},`, send: 'yes\n', beforeSend: async () => {
+      assert.deepEqual(await readFile(target), command === 'install' ? source : patched);
+      const checked = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
+      assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+      const inspection = JSON.parse(checked.stdout).data.inspection;
+      assert.equal(inspection.state, command === 'install' ? 'original' : 'tool-applied');
+      assert.equal(inspection.operation.data.groupState, 'complete');
+      assert.deepEqual(inspection.operation.data.pendingTransactions, []);
+    } },
   ];
   const installed = await change('install', steps('install'));
   assert.equal(installed.status, 0, installed.stdout + installed.stderr);
@@ -565,6 +606,192 @@ test('npx install and uninstall guide rollback then continue after interruptions
   assert.deepEqual(await readFile(target), source);
 });
 
+
+test('npx recovery restores each transaction before state and cancellation or EOF never authorizes continuation', async t => {
+  const box = await packageBox(t);
+  for (const command of ['install', 'uninstall']) {
+    for (const [confirmation, send] of [['cancel', 'no\n'], ['inexact', ' yes \n'], ['eof', '\u0004']]) {
+      const { app, target, source } = await syntheticInstallation(box, `${command}-${confirmation}`);
+      const change = steps => npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps });
+      if (command === 'uninstall') {
+        const installed = await npmPackage.runNpmExecPty(['install', '--app', app], {
+          ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }],
+        });
+        assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+      }
+      const before = await readFile(target);
+      const scenario = join(box.directory, 'boundary.json');
+      await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
+      assert.notEqual((await change([{ waitFor: `Type yes to ${command},`, send: 'yes\n' }])).status, 0);
+      await rm(scenario);
+      assert.notDeepEqual(await readFile(target), before);
+      let recoveredFiles;
+      let recoveredIdentity;
+      const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
+      const cancelled = await change([
+        { waitFor: 'Type yes to recover', send: 'yes\n' },
+        { waitFor: `Type yes to ${command},`, send, beforeSend: async () => {
+          assert.deepEqual(await readFile(target), before);
+          recoveredFiles = await snapshotFiles(root);
+          recoveredIdentity = await stat(target);
+        } },
+      ]);
+      assert.equal(cancelled.status, 0, cancelled.stdout + cancelled.stderr);
+      assert.match(cancelled.stdout, /Recovery completed; subsequent action cancelled/);
+      assert.match(cancelled.stdout, new RegExp(`file state: ${command === 'install' ? 'original' : 'tool-applied'}; write readiness: ready`));
+      assert.doesNotMatch(cancelled.stdout, /installation unchanged/);
+      assert.deepEqual(await readFile(target), before);
+      assert.equal((await stat(target)).ino, recoveredIdentity.ino);
+      assert.equal((await stat(target)).mode & 0o7777, 0o640);
+      assert.deepEqual(await snapshotFiles(root), recoveredFiles);
+      const checked = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
+      assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+      const inspection = JSON.parse(checked.stdout).data.inspection;
+      assert.equal(inspection.state, command === 'install' ? 'original' : 'tool-applied');
+      assert.deepEqual(inspection.operation.data.pendingTransactions, []);
+      assert.equal(inspection.operation.data.groupState, 'complete');
+      if (command === 'uninstall') assert.notDeepEqual(before, source);
+    }
+  }
+});
+
+test('npx install and uninstall recover again after an interrupted rollback and npm cache removal', async t => {
+  const box = await packageBox(t);
+  for (const command of ['install', 'uninstall']) {
+    const { app, target, source } = await syntheticInstallation(box, `${command}-retry`);
+    const change = (action, steps) => npmPackage.runNpmExecPty([action, '--app', app], { ...box, steps });
+    const confirm = action => [{ waitFor: `Type yes to ${action},`, send: 'yes\n' }];
+    if (command === 'uninstall') assert.equal((await change('install', confirm('install'))).status, 0);
+    const before = await readFile(target);
+    const scenario = join(box.directory, 'boundary.json');
+    await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
+    assert.notEqual((await change(command, confirm(command))).status, 0);
+    const interrupted = await readFile(target);
+    assert.notDeepEqual(interrupted, before);
+    await rm(scenario);
+    const checked = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
+    assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+    const inspection = JSON.parse(checked.stdout).data.inspection;
+    assert.equal(inspection.state, 'incomplete');
+    const pending = inspection.operation.data.pendingTransactions[0];
+    assert.equal(pending.operation, command === 'install' ? 'apply' : 'restore');
+    assert.equal(pending.targets[0].pending.before, command === 'install' ? 'original' : 'tool-applied');
+    const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
+    const recoveryFiles = await snapshotFiles(root);
+    const previous = JSON.parse(await readFile(join(box.directory, 'final-bin.json'), 'utf8')).entry;
+    await rm(join(box.directory, 'npm-cache'), { recursive: true });
+    await assert.rejects(readFile(previous), { code: 'ENOENT' });
+    assert.deepEqual(await snapshotFiles(root), recoveryFiles);
+    assert.equal((await stat(root)).mode & 0o777, 0o700);
+    assert.equal((await stat(join(root, 'key'))).mode & 0o777, 0o600);
+    inside(root, inspection.recovery.store);
+    inside(root, inspection.recovery.preparation);
+    await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
+    const killedRecovery = await change(command, [{ waitFor: 'Type yes to recover', send: 'yes\n' }]);
+    assert.notEqual(killedRecovery.status, 0, killedRecovery.stdout + killedRecovery.stderr);
+    assert.doesNotMatch(killedRecovery.stdout, /Type yes to (?:install|uninstall),/);
+    await rm(scenario);
+    assert.deepEqual(await readFile(target), before);
+    const stillPending = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
+    assert.equal(stillPending.status, 0, stillPending.stdout + stillPending.stderr);
+    const retry = JSON.parse(stillPending.stdout).data.inspection;
+    assert.equal(retry.state, 'incomplete');
+    assert.equal(retry.operation.data.pendingTransactions[0].transaction, pending.transaction);
+    const recovered = await change(command, [
+      { waitFor: 'Type yes to recover', send: 'yes\n' },
+      { waitFor: `Type yes to ${command},`, send: 'yes\n', beforeSend: async () => {
+        assert.deepEqual(await readFile(target), before);
+      } },
+    ]);
+    assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr);
+    assert.match(recovered.stdout, /rolled-back/);
+    assert.deepEqual(await readFile(target), interrupted);
+    const final = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
+    assert.equal(final.status, 0, final.stdout + final.stderr);
+    const complete = JSON.parse(final.stdout).data.inspection;
+    assert.equal(complete.state, command === 'install' ? 'tool-applied' : 'original');
+    assert.deepEqual(complete.operation.data.pendingTransactions, []);
+    assert.equal((await stat(target)).mode & 0o7777, 0o640);
+    assert.deepEqual(await readdir(join(target, '..')), ['browser-service.mjs']);
+    if (command === 'uninstall') assert.deepEqual(await readFile(target), source);
+  }
+});
+
+test('npx recovery rechecks a process blocker before rollback and before the separately confirmed continuation', async t => {
+  const box = await packageBox(t);
+  const { app, target, source } = await syntheticInstallation(box, 'RecoveryRecheck');
+  const scenario = join(box.directory, 'boundary.json');
+  await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
+  assert.notEqual((await npmPackage.runNpmExecPty(['install', '--app', app], {
+    ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }],
+  })).status, 0);
+  await writeFile(scenario, JSON.stringify({ processRows: [{ pid: 998877, executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' }] }));
+  const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
+  let recoveredFiles;
+  const recovered = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [
+    { waitFor: 'Action (recheck, cancel)', send: 'recheck\n', beforeSend: () => writeFile(scenario, '{}') },
+    { waitFor: 'Type yes to recover', send: 'yes\n' },
+    { waitFor: 'Type yes to install,', send: 'yes\n', beforeSend: async () => {
+      assert.deepEqual(await readFile(target), source);
+      recoveredFiles = await snapshotFiles(root);
+      await writeFile(scenario, JSON.stringify({ processFailure: true }));
+    } },
+  ] });
+  assert.equal(recovered.status, 1, recovered.stdout + recovered.stderr);
+  assert.match(recovered.stdout, /PROCESSES_RUNNING/);
+  assert.match(recovered.stdout, /rolled-back/);
+  assert.match(recovered.stdout, /PROCESS_ENUMERATION_FAILED/);
+  assert.deepEqual(await readFile(target), source);
+  assert.deepEqual(await snapshotFiles(root), recoveredFiles);
+});
+
+test('npx recovery refuses unknown contents and changed identities without continuing or changing recovery data', async t => {
+  const box = await packageBox(t);
+  for (const command of ['install', 'uninstall']) {
+    for (const conflict of ['unknown-before', 'unknown-at-confirmation', 'identity-at-confirmation', 'parent-before']) {
+      const { app, target, source } = await syntheticInstallation(box, `${command}-${conflict}`);
+      const change = steps => npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps });
+      if (command === 'uninstall') assert.equal((await npmPackage.runNpmExecPty(['install', '--app', app], {
+        ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }],
+      })).status, 0);
+      const scenario = join(box.directory, 'boundary.json');
+      await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
+      assert.notEqual((await change([{ waitFor: `Type yes to ${command},`, send: 'yes\n' }])).status, 0);
+      await rm(scenario);
+      const interrupted = await readFile(target);
+      const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
+      const recoveryFiles = await snapshotFiles(root);
+      let preserved = interrupted;
+      const mutate = async () => {
+        if (conflict.startsWith('unknown')) {
+          preserved = Buffer.concat([source, Buffer.from('\n// unknown external content\n')]);
+          await writeFile(target, preserved);
+        } else if (conflict === 'identity-at-confirmation') {
+          const originalIdentity = await stat(target);
+          await rename(target, join(box.directory, `${command}-retained-target.mjs`));
+          await writeFile(target, interrupted, { mode: 0o640 });
+          assert.notEqual((await stat(target)).ino, originalIdentity.ino);
+        } else {
+          const parent = join(target, '..');
+          await rename(parent, join(box.directory, `${command}-retained-scripts`));
+          await mkdir(parent);
+          await writeFile(target, interrupted, { mode: 0o640 });
+        }
+      };
+      const atConfirmation = conflict.endsWith('at-confirmation');
+      if (!atConfirmation) await mutate();
+      const refused = await change(atConfirmation
+        ? [{ waitFor: 'Type yes to recover', send: 'yes\n', beforeSend: mutate }]
+        : [{ waitFor: 'Action (recheck, cancel)', send: 'cancel\n' }]);
+      assert.equal(refused.status, 4, refused.stdout + refused.stderr);
+      assert.match(refused.stdout, atConfirmation ? /INSPECTION_CHANGED/ : /TARGET_CONFLICT|IDENTITY_CHANGED|RECOVERY_CONFLICT/);
+      assert.doesNotMatch(refused.stdout, /rolled-back|Type yes to (?:install|uninstall),/);
+      if (atConfirmation) assert.match(refused.stdout, /Recovery did not complete/);
+      assert.deepEqual(await readFile(target), preserved);
+      assert.deepEqual(await snapshotFiles(root), recoveryFiles);
+    }
+  }
+});
 
 test('blocked install exits unsuccessfully and cancelled continuation reports completed recovery', async t => {
   const box = await packageBox(t);

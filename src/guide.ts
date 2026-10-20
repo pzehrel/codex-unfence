@@ -49,7 +49,7 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
       if (command !== 'apply' && command !== 'restore' && command !== 'recover') throw new Error('Choose a listed action.');
       if ((requested === 'install' || requested === 'uninstall') && inspection.state === 'incomplete' && inspection.allowedActions.includes('recover')) {
         process.stdout.write('An interrupted operation must be rolled back before continuing. Recovery returns to its before state; it does not finish that operation.\nExit the host and related services yourself before writing.\n');
-        const confirmed = await ask('Type yes to recover before continuing, anything else cancels: ');
+        const confirmed = await ask('Type yes to recover before continuing, anything else cancels: ', true);
         if (confirmed !== 'yes') { cancelled(); return null; }
         if (!inspection.inspectionToken) throw new Error('No verified inspection token; inspect again.');
         const recovered = await managed.recover({ candidate: inspection.candidate, inspectionToken: inspection.inspectionToken, confirmed: true });
