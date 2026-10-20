@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -115,6 +115,11 @@ export function runNpmExecPty(args, options) {
 
 // Fixed offline package operations and the public npm exec bin, never arbitrary commands.
 export function packPackage(directory) {
+  const metadata = JSON.parse(readFileSync(join(repository, 'package.json'), 'utf8'));
+  const missing = metadata.bundleDependencies.filter(name => !existsSync(join(repository, 'node_modules', name, 'package.json')));
+  if (missing.length) {
+    throw new Error(`Missing worktree-local bundled dependencies: ${missing.join(', ')}. Run npm ci --ignore-scripts in ${repository} before packaging.`);
+  }
   return npm(['pack', '--ignore-scripts', '--json', '--pack-destination', directory], directory, repository);
 }
 
