@@ -1,7 +1,7 @@
 import { createInterface } from 'node:readline';
 import type { createManagedPatches, Inspection, Candidate } from './managed-patches.js';
 import type { OperationResult } from './result.js';
-import { renderHuman } from './result.js';
+import { publicActionName, renderHuman } from './result.js';
 
 type Managed = ReturnType<typeof createManagedPatches>;
 export async function guide(managed: Managed, selection: { appPath?: string }, action?: string): Promise<OperationResult | null> {
@@ -13,7 +13,6 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
     const line = await lines.next();
     return line.done ? null : exact ? line.value : line.value.trim();
   }
-  const publicName = (command: string) => command === 'apply' ? 'install' : command === 'restore' ? 'uninstall' : command;
   let recoveredOperation = false;
   function cancelled() {
     process.stdout.write(recoveredOperation ? 'Recovery completed; subsequent action cancelled. Check the reported file state before reopening the host.\n' : 'Cancelled; installation unchanged.\n');
@@ -42,7 +41,7 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
       process.stdout.write(`Installation: ${inspection.candidate.appPath}\nTarget: ${inspection.candidate.targetPath}\nStructural support: ${inspection.support}; file state: ${inspection.state}; write readiness: ${inspection.writeReadiness}\n`);
       for (const diagnostic of [...inspection.diagnostics, ...inspection.blockers]) process.stdout.write(`[${diagnostic.code}] ${diagnostic.message}\n`);
       if (inspection.recovery) process.stdout.write(`Recovery tool: ${inspection.recovery.tool.packageName}@${inspection.recovery.tool.version}; executable: ${inspection.recovery.tool.executable}\nKeep access to the matching tool version and all recovery data.\n`);
-      const requested = action ?? await ask(`Action (${[...inspection.allowedActions.map(publicName), 'recheck', 'cancel'].join(', ')}): `);
+      const requested = action ?? await ask(`Action (${[...inspection.allowedActions.map(publicActionName), 'recheck', 'cancel'].join(', ')}): `);
       if (requested === null || requested === 'cancel') { cancelled(); return null; }
       if (requested === 'recheck') { inspection = await managed.inspect(candidate); continue; }
       const command = requested === 'install' ? 'apply' : requested === 'uninstall' ? 'restore' : requested;
@@ -67,7 +66,7 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
         return null;
       }
       if (!inspection.allowedActions.includes(command)) {
-        process.stdout.write(`Action ${publicName(command)} is unavailable; resolve the diagnostics and recheck.\n`);
+        process.stdout.write(`Action ${publicActionName(command)} is unavailable; resolve the diagnostics and recheck.\n`);
         if (!action) continue;
         const choice = await ask('Action (recheck, cancel): ');
         if (choice !== 'recheck') {
@@ -83,7 +82,7 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
       for (const evidence of inspection.derivation?.evidence ?? []) process.stdout.write(`Support: ${evidence.description}\n`);
       for (const assumption of inspection.derivation?.assumptions ?? []) process.stdout.write(`Assumption: ${assumption}\n`);
       process.stdout.write(`Target: ${inspection.candidate.targetPath}\nScope: site-status response only; original request and predicate stay.\nBackups and recovery data remain private outside npm cache.\nChanging sealed resources invalidates the application signature; this tool does not sign it.\nExit the host and related services yourself before writing.\n${command === 'recover' ? 'Recover rolls back to the interrupted operation before state; it never continues apply or restore.\n' : ''}`);
-      const confirmed = await ask(`Type yes to ${publicName(command)}, anything else cancels: `, true);
+      const confirmed = await ask(`Type yes to ${publicActionName(command)}, anything else cancels: `, true);
       if (confirmed !== 'yes') { cancelled(); return null; }
       if (!inspection.inspectionToken) throw new Error('No verified inspection token; inspect again.');
       const result = await managed[command]({ candidate: inspection.candidate, inspectionToken: inspection.inspectionToken, confirmed: true });

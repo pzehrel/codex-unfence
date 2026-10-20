@@ -868,6 +868,39 @@ test('unprovable owner and aliased operation stores fail closed without touching
   assert.equal(await readFile(box.target, 'utf8'), source);
 });
 
+test('recovery rejects same-byte new identities across forward and rollback interruption windows', async (t) => {
+  for (const operation of ['apply', 'restore']) {
+    for (const [phase, boundary] of [
+      ['forward', 'after-intent-publication'], ['forward', 'before-target-rename'],
+      ['forward', 'after-target-rename'], ['forward', 'after-progress-journal'], ['forward', 'before-commit'],
+      ['rollback', 'after-rollback-intent'], ['rollback', 'before-target-rename'],
+      ['rollback', 'after-target-rename'], ['rollback', 'before-rollback-commit'],
+    ]) {
+      const box = await sandbox(t);
+      if (operation === 'restore') response(apply(box));
+      const interrupted = await paused(t, box, operation, phase === 'forward' ? boundary : 'after-target-rename');
+      await interrupted.kill();
+      if (phase === 'rollback') {
+        const recovering = await paused(t, box, 'recover', boundary);
+        await recovering.kill();
+      }
+      const id = response(status(box)).data.transaction;
+      const journal = join(box.store, 'transactions', id, 'journal.json');
+      const beforeJournal = await readFile(journal);
+      const bytes = await readFile(box.target);
+      await replaceIdentity(box);
+      const identity = await stat(box.target);
+      const rejected = response(recover(box), 4);
+      assert.equal(rejected.diagnostics[0].code, 'RECOVERY_CONFLICT', `${operation} ${phase} ${boundary}`);
+      assert.deepEqual(await readFile(box.target), bytes);
+      assert.equal((await stat(box.target)).ino, identity.ino);
+      assert.equal((await stat(box.target)).mode & 0o7777, 0o640);
+      assert.deepEqual(await readFile(journal), beforeJournal);
+      assert.equal(response(status(box), 4).data.targets[0].state, 'conflict');
+    }
+  }
+});
+
 test('unknown external contents prevent recovery and ordinary writes while preserving journal and backup', async (t) => {
   const box = await sandbox(t);
   const interrupted = await paused(t, box, 'apply', 'after-target-rename');

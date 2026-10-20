@@ -3,9 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { packPackage, runNpmExec, runNpmExecPty } from './helpers/npm-package.mjs';
-
-const service = 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs';
+import { packPackage, runNpmExec, runNpmExecPty, syntheticInstallation as installation } from './helpers/npm-package.mjs';
 
 async function packageBox(t) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'codex-npx-check-')));
@@ -17,15 +15,6 @@ async function packageBox(t) {
   await mkdir(cwd);
   await mkdir(join(directory, 'home'));
   return { directory, cwd, tarball: join(directory, metadata.filename) };
-}
-
-async function installation(box, name, source) {
-  const app = join(box.directory, 'home/Applications', `${name}.app`);
-  const target = join(app, service);
-  const bytes = source ?? await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
-  await mkdir(join(target, '..'), { recursive: true });
-  await writeFile(target, bytes, { mode: 0o640 });
-  return { app, target, source: bytes };
 }
 
 function check(box, args = []) {
@@ -169,6 +158,41 @@ test('npx check aggregates incompatibility and reports write blockers separately
     assert.ok(denied.result.data.inspection.blockers.some(entry => entry.code === 'TARGET_NOT_WRITABLE' && entry.path === parent));
   } finally { await chmod(parent, parentMode); }
   assert.deepEqual(await snapshot(join(box.directory, 'home')), before);
+});
+
+test('npx check reports an unwritable coordination root per installation without probing storage', async t => {
+  const box = await packageBox(t);
+  const first = await installation(box, 'CoordinationFirst');
+  const second = await installation(box, 'CoordinationSecond');
+  const coordination = join(box.directory, 'home/.codex-unfence');
+  await mkdir(coordination, { mode: 0o500 });
+  try {
+    const before = await snapshot(join(box.directory, 'home'));
+    const blocked = check(box);
+    assert.equal(blocked.code, 0);
+    for (const inspection of blocked.result.data.inspections) {
+      assert.equal(inspection.support, 'supported');
+      assert.equal(inspection.state, 'original');
+      assert.equal(inspection.writeReadiness, 'blocked');
+      assert.deepEqual(inspection.allowedActions, []);
+      assert.ok(inspection.blockers.some(entry => entry.code === 'COORDINATION_NOT_WRITABLE' && entry.path === coordination));
+    }
+    const human = runNpmExec(['check'], box);
+    assert.equal(human.status, 0, human.stdout + human.stderr);
+    assert.match(human.stdout, /Can install: no/);
+    for (const { app } of [first, second]) {
+      assert.ok(human.stdout.includes(`Installation: ${app}`));
+      assert.ok(human.stdout.includes(`(installation: ${app})`));
+      assert.ok(blocked.result.diagnostics.some(entry => entry.code === 'COORDINATION_NOT_WRITABLE' && entry.path === coordination && entry.installation === app));
+    }
+    assert.deepEqual(await snapshot(join(box.directory, 'home')), before);
+    const refused = await runNpmExecPty(['install', '--app', first.app], { ...box, steps: [
+      { waitFor: 'Action (recheck, cancel)', send: 'cancel\n' },
+    ] });
+    assert.equal(refused.status, 4, refused.stdout + refused.stderr);
+    assert.match(refused.stdout, /COORDINATION_NOT_WRITABLE/);
+    assert.deepEqual(await snapshot(join(box.directory, 'home')), before);
+  } finally { await chmod(coordination, 0o700); }
 });
 
 test('npx check handles empty discovery, missing explicit paths and usage errors noninteractively and read-only', async t => {

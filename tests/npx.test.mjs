@@ -16,14 +16,7 @@ async function packageBox(t) {
   return { directory, cwd, tarball: join(directory, metadata.filename) };
 }
 
-async function syntheticInstallation(box, name) {
-  const app = join(box.directory, 'home/Applications', `${name}.app`);
-  const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
-  const source = await readFile(new URL('./fixtures/deferred-site-status.js.txt', import.meta.url));
-  await mkdir(join(target, '..'), { recursive: true });
-  await writeFile(target, source, { mode: 0o640 });
-  return { app, target, source };
-}
+const { syntheticInstallation } = npmPackage;
 
 async function snapshotFiles(directory) {
   const snapshot = {};
@@ -743,6 +736,51 @@ test('npx recovery rechecks a process blocker before rollback and before the sep
   assert.match(recovered.stdout, /PROCESS_ENUMERATION_FAILED/);
   assert.deepEqual(await readFile(target), source);
   assert.deepEqual(await snapshotFiles(root), recoveredFiles);
+});
+
+test('npx recovery preserves a same-byte replacement made before restart after install or uninstall interruption', async t => {
+  const box = await packageBox(t);
+  for (const [command, interruptedPhase] of [['install', 'operation'], ['uninstall', 'operation'], ['install', 'rollback'], ['uninstall', 'rollback']]) {
+    const { app, target } = await syntheticInstallation(box, `${command}-${interruptedPhase}-replaced-before-restart`);
+    const confirm = action => npmPackage.runNpmExecPty([action, '--app', app], {
+      ...box, steps: [{ waitFor: `Type yes to ${action},`, send: 'yes\n' }],
+    });
+    if (command === 'uninstall') assert.equal((await confirm('install')).status, 0);
+    const scenario = join(box.directory, 'boundary.json');
+    await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
+    const interrupted = await confirm(command);
+    assert.notEqual(interrupted.status, 0, interrupted.stdout + interrupted.stderr);
+    if (interruptedPhase === 'rollback') {
+      const killedRecovery = await npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps: [
+        { waitFor: 'Type yes to recover', send: 'yes\n' },
+      ] });
+      assert.notEqual(killedRecovery.status, 0, killedRecovery.stdout + killedRecovery.stderr);
+    }
+    await rm(scenario);
+    const bytes = await readFile(target);
+    const originalIdentity = await stat(target);
+    // Retain the interrupted target so the replacement cannot reuse its inode.
+    await rename(target, join(box.directory, `${command}-${interruptedPhase}-external-retained.mjs`));
+    await writeFile(target, bytes, { mode: originalIdentity.mode & 0o7777 });
+    const replacement = await stat(target);
+    assert.notEqual(replacement.ino, originalIdentity.ino);
+    const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
+    const recoveryFiles = await snapshotFiles(root);
+    const checked = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
+    const conflicted = JSON.parse(checked.stdout).data.inspection.state === 'conflict';
+    const refused = await npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps: conflicted
+      ? [{ waitFor: 'Action (recheck, cancel)', send: 'cancel\n' }]
+      : [{ waitFor: 'Type yes to recover', send: 'yes\n' }, { waitFor: `Type yes to ${command},`, send: 'no\n' }],
+    });
+    assert.equal(refused.status, 4, refused.stdout + refused.stderr);
+    assert.doesNotMatch(refused.stdout, /Type yes to recover|rolled-back|Type yes to (?:install|uninstall),/);
+    assert.deepEqual(await readFile(target), bytes);
+    assert.equal((await stat(target)).ino, replacement.ino);
+    assert.equal((await stat(target)).mode & 0o7777, originalIdentity.mode & 0o7777);
+    assert.deepEqual(await snapshotFiles(root), recoveryFiles);
+    assert.equal(checked.status, 4, checked.stdout + checked.stderr);
+    assert.equal(JSON.parse(checked.stdout).data.inspection.state, 'conflict');
+  }
 });
 
 test('npx recovery refuses unknown contents and changed identities without continuing or changing recovery data', async t => {

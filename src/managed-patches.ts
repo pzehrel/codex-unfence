@@ -11,6 +11,7 @@ import { EXIT_CODES } from './result.js';
 import { check, exists, regularBytes, TransactionError } from './transaction-storage.js';
 import { cuaBlockingProcesses, cuaExecutor } from './cua-admission.js';
 import { managedPaths, managedRecord, prepareManaged } from './managed-state.js';
+import { externalTargetLock } from './transaction-locks.js';
 import type { PreparationExpectation, ToolIdentity } from './managed-state.js';
 export type { Candidate, DiscoveryReport } from './installations.js';
 export type { ToolIdentity } from './managed-state.js';
@@ -111,6 +112,17 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
       for (const path of writable) {
         try { await access(path, constants.W_OK | constants.X_OK); }
         catch { blockers.push({ code: 'STORE_NOT_WRITABLE', severity: 'error', message: 'Managed recovery state must permit transaction publication without elevation.', path }); }
+      }
+      // Use the writer's account-scoped namespace, inspecting existing parents only.
+      const leaseDirectory = dirname(await externalTargetLock(actual.targetPath));
+      for (const path of [dirname(dirname(leaseDirectory)), dirname(leaseDirectory), leaseDirectory]) {
+        if (!await exists(path)) break;
+        try { await access(path, constants.W_OK | constants.X_OK); }
+        catch {
+          const entry: Diagnostic = { code: 'COORDINATION_NOT_WRITABLE', severity: 'error', message: 'Target coordination directory must permit lease and replacement publication without elevation.', path };
+          blockers.push(entry);
+          diagnostics.push(entry);
+        }
       }
     } catch (error) {
       const entry = diagnostic(error);

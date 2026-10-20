@@ -95,6 +95,10 @@ export interface CheckResult extends ResultBase {
 
 export type CommandResult = DetectionResult | PreparationResult | OperationResult | CheckResult | (ResultBase & { command: null; data: null });
 
+export function publicActionName(command: string): string {
+  return command === 'apply' ? 'install' : command === 'restore' ? 'uninstall' : command;
+}
+
 export function renderHuman(result: CommandResult): string {
   const lines = [`${result.command ?? 'CLI'}: ${result.outcome}`];
   if (result.data) {
@@ -105,7 +109,7 @@ export function renderHuman(result: CommandResult): string {
         lines.push(`Structural support: ${inspection.support}; file state: ${inspection.state}; write readiness: ${inspection.writeReadiness}`);
         for (const evidence of inspection.derivation?.evidence ?? []) lines.push(`Support: ${evidence.description}`);
         for (const assumption of inspection.derivation?.assumptions ?? []) lines.push(`Assumption: ${assumption}`);
-        lines.push(`Can install: ${inspection.allowedActions.includes('apply') ? 'yes' : 'no'}; available actions: ${inspection.allowedActions.map(action => action === 'apply' ? 'install' : action === 'restore' ? 'uninstall' : action).join(', ') || 'none'}`);
+        lines.push(`Can install: ${inspection.allowedActions.includes('apply') ? 'yes' : 'no'}; available actions: ${inspection.allowedActions.map(publicActionName).join(', ') || 'none'}`);
         for (const blocker of inspection.blockers) lines.push(`[${blocker.code}] ${blocker.message}`);
       }
     }

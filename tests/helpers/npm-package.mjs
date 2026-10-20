@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,6 +59,15 @@ function execInvocation(args, { directory, cwd, tarball }) {
       CODEX_NPX_SANDBOX: root,
     },
   }];
+}
+
+export async function syntheticInstallation(box, name, source) {
+  const app = join(box.directory, 'home/Applications', `${name}.app`);
+  const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
+  const bytes = source ?? await readFile(new URL('../fixtures/deferred-site-status.js.txt', import.meta.url));
+  await mkdir(join(target, '..'), { recursive: true });
+  await writeFile(target, bytes, { mode: 0o640 });
+  return { app, target, source: bytes };
 }
 
 export function runNpmExec(args, options) {
