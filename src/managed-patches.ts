@@ -9,7 +9,7 @@ import { EXIT_CODES } from './result.js';
 import { check, regularBytes, TransactionError } from './transaction-storage.js';
 import { cuaBlockingProcesses, cuaExecutor } from './cua-admission.js';
 import { managedPaths, managedRecord, prepareManaged } from './managed-state.js';
-import type { ToolIdentity } from './managed-state.js';
+import type { PreparationExpectation, ToolIdentity } from './managed-state.js';
 export type { Candidate, DiscoveryReport } from './installations.js';
 export type { ToolIdentity } from './managed-state.js';
 export interface Inspection {
@@ -35,6 +35,7 @@ function diagnostic(error: unknown): Diagnostic {
 /** One public business boundary for discovery, read-only inspection and managed transactions. */
 export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool: ToolIdentity }) {
   const executor = cuaExecutor(derive);
+  const inspectedSources = new WeakMap<Inspection, { bytes: Buffer; identity: PreparationExpectation }>();
   async function status(candidate: Candidate): Promise<OperationResult> {
     try {
       const actual = await installationAt(candidate.appPath);
@@ -52,6 +53,7 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
     let state: TargetState = 'incompatible';
     let operation: OperationResult | null = null;
     let recovery: Inspection['recovery'] = null;
+    let snapshot: { bytes: Buffer; identity: PreparationExpectation } | null = null;
     if (process.platform !== 'darwin') blockers.push({ code: 'UNSUPPORTED_PLATFORM', severity: 'error', message: `Only macOS is supported; received ${process.platform}.` });
     if (Number(process.versions.node.split('.')[0]) < 22 || Number(process.versions.node.split('.')[0]) === 22 && Number(process.versions.node.split('.')[1]) < 13) blockers.push({ code: 'UNSUPPORTED_RUNTIME', severity: 'error', message: 'Node.js >=22.13.0 is required.' });
     try {
@@ -64,6 +66,7 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
       const text = bytes.toString('utf8');
       check(Buffer.from(text).equals(bytes), 'INVALID_SOURCE', 'Target must be lossless UTF-8.');
       source = { sha256: digest(bytes), size: bytes.length };
+      snapshot = { bytes, identity: { device: String(before.dev), inode: String(before.ino), mode: Number(before.mode & 0o7777n), ctime: String(before.ctimeNs), mtime: String(before.mtimeNs) } };
       const record = await managedRecord(actual.targetPath, derive);
       // An authenticated stored plan supplies the original when the actual target is patched.
       derivation = record?.plan.derivation ?? derive(text);
@@ -74,12 +77,20 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
       if (record) recovery = { tool: record.locator.tool, command: record.locator.recovery, store: record.locator.store, preparation: record.locator.preparation };
       inspectionToken = digest(canonical({ target: actual.targetPath, device: String(before.dev), inode: String(before.ino), mode: String(before.mode), ctime: String(before.ctimeNs), mtime: String(before.mtimeNs), source, derivation, tool, locator: record?.locator ?? null, state, pending: operation.data?.pendingTransactions ?? [] }));
       candidate = actual;
-    } catch (error) { diagnostics.push(diagnostic(error)); }
+    } catch (error) {
+      const entry = diagnostic(error);
+      diagnostics.push(entry);
+      blockers.push(entry);
+      state = 'conflict';
+    }
+    if (state === 'conflict' || state === 'incomplete') blockers.push({ code: state === 'incomplete' ? 'INCOMPLETE_TRANSACTION' : 'TARGET_CONFLICT', severity: 'error', message: state === 'incomplete' ? 'Recover the incomplete transaction before ordinary writes.' : 'Target or recovery state is not trusted for writing.' });
     try {
       const running = cuaBlockingProcesses(await processTable());
       if (running.length) blockers.push({ code: 'PROCESSES_RUNNING', severity: 'error', message: `Exit related processes before writing: ${running.map((entry) => `PID ${entry.pid} ${entry.executable}`).join('; ')}` });
     } catch (error) { blockers.push({ code: 'PROCESS_ENUMERATION_FAILED', severity: 'error', message: error instanceof Error ? error.message : 'Cannot safely enumerate processes.' }); }
-    return { candidate, support: derivation?.support ?? 'unsupported', state, derivation, source, writeReadiness: blockers.some((entry) => entry.code === 'PROCESS_ENUMERATION_FAILED') ? 'unknown' : blockers.length ? 'blocked' : 'ready', blockers, diagnostics, inspectionToken, operation, recovery, runtime: 'not-verified' };
+    const inspection: Inspection = { candidate, support: derivation?.support ?? 'unsupported', state, derivation, source, writeReadiness: blockers.some((entry) => entry.code === 'PROCESS_ENUMERATION_FAILED') ? 'unknown' : blockers.length ? 'blocked' : 'ready', blockers, diagnostics, inspectionToken, operation, recovery, runtime: 'not-verified' };
+    if (snapshot) inspectedSources.set(inspection, snapshot);
+    return inspection;
   }
   async function change(command: 'apply' | 'restore' | 'recover', selection: ConfirmedSelection): Promise<OperationResult> {
     try {
@@ -98,7 +109,9 @@ export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool
       check(current.state !== 'conflict' && current.state !== 'incomplete', current.state === 'incomplete' ? 'INCOMPLETE_TRANSACTION' : 'TARGET_CONFLICT', current.state === 'incomplete' ? 'An incomplete transaction requires recover; recovery rolls back rather than continuing.' : 'Current target is not a trusted original or tool-applied state.');
       if (!record) {
         check(command === 'apply' && current.support === 'supported', 'RESTORE_SOURCE_REQUIRED', 'No trusted managed preparation. Unknown or historical patches require their original tool version and entrypoint.');
-        record = await prepareManaged(current.candidate, await regularBytes(current.candidate.targetPath), derive, tool);
+        const snapshot = inspectedSources.get(current);
+        check(snapshot, 'INSPECTION_CHANGED', 'Cannot establish the confirmed source snapshot.');
+        record = await prepareManaged(current.candidate, snapshot.bytes, snapshot.identity, derive, tool);
       }
       return executor[command]({ plan: record.locator.preparation, store: record.locator.store });
     } catch (error) { return failed(command, error); }

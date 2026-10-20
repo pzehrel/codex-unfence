@@ -148,13 +148,15 @@ export function recoveryCommand(tool: ToolIdentity): string {
   return `npx --package ${tool.packageName}@${tool.version} ${tool.executable}`;
 }
 
-export async function prepareManaged(candidate: Candidate, original: Buffer, derive: DeriveCua, tool: ToolIdentity): Promise<{ locator: Locator; plan: ManagedPlan }> {
+export interface PreparationExpectation { device: string; inode: string; mode: number; ctime: string; mtime: string }
+export async function prepareManaged(candidate: Candidate, original: Buffer, expected: PreparationExpectation, derive: DeriveCua, tool: ToolIdentity): Promise<{ locator: Locator; plan: ManagedPlan }> {
   const target = candidate.targetPath;
   const existing = await managedRecord(target, derive);
   if (existing) return existing;
   check(await realpath(target) === target, 'PATH_ALIAS', 'Target must be canonical.');
   const metadata = await lstat(target, { bigint: true });
   check(metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1n, 'PATH_ALIAS', 'Target must be an unaliased regular file.');
+  check(String(metadata.dev) === expected.device && String(metadata.ino) === expected.inode && Number(metadata.mode & 0o7777n) === expected.mode && String(metadata.ctimeNs) === expected.ctime && String(metadata.mtimeNs) === expected.mtime, 'TARGET_CHANGED', 'Target identity changed after confirmation.');
   check((await regularBytes(target)).equals(original), 'TARGET_CHANGED', 'Target changed before preparation.');
   const identity: TransactionIdentity = { path: target, realPath: target, device: String(metadata.dev), inode: String(metadata.ino), mode: Number(metadata.mode & 0o7777n) };
   const text = original.toString('utf8');
