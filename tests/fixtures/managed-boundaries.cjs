@@ -11,7 +11,10 @@ let snapshots = 0;
 childProcess.execFile = function (file, args, ...rest) {
   if (file === '/bin/ps' && args.includes('pid=,command=')) {
     snapshots++;
-    if (snapshots === 2 && process.env.CODEX_TEST_FAULT === 'managed-confirmation-change') fs.writeFileSync(process.env.CODEX_TEST_TARGET, fs.readFileSync(process.env.CODEX_TEST_REPLACEMENT));
+    if (snapshots === 2 && ['managed-confirmation-change', 'managed-locator-change'].includes(process.env.CODEX_TEST_FAULT)) {
+      if (process.env.CODEX_TEST_FAULT === 'managed-confirmation-change') fs.writeFileSync(process.env.CODEX_TEST_TARGET, fs.readFileSync(process.env.CODEX_TEST_REPLACEMENT));
+      if (process.env.CODEX_TEST_FAULT === 'managed-locator-change') fs.writeFileSync(process.env.CODEX_TEST_LOCATOR, fs.readFileSync(process.env.CODEX_TEST_LOCATOR_COPY), { mode: 0o600 });
+    }
   }
   return execFile(file, args, ...rest);
 };
