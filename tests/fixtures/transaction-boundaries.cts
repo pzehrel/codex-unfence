@@ -126,7 +126,7 @@ promises.rename = async function (from, to) {
 };
 promises.open = async function (path, ...args) {
   if (String(path).includes('.codex-unfence-') && String(path).endsWith('.tmp') && args[0] === 'wx') {
-    if (fault === 'write-failure' && dirname(String(path)) === dirname(target ?? '')) throw ioError();
+    if (fault === 'write-failure' && String(path).includes('/.codex-unfence/target-leases/')) throw ioError();
     if (fault === 'prewrite-change') fs.writeFileSync(target ?? requiredEnvironment('CODEX_TEST_TARGET'), 'external boundary change');
     if (fault === 'parent-replaced') {
       const parent = dirname(target ?? requiredEnvironment('CODEX_TEST_TARGET'));

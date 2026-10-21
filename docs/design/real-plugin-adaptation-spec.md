@@ -1,6 +1,8 @@
 # Spec：指定真实浏览器插件的结构适配与静态验收
 
-已发布：[GitHub Spec #9](https://github.com/pzehrel/codex-browser-liberation-patch/issues/9)，标签 `ready-for-agent`。
+状态：已废弃的显式 review plan 结构路线规格。2026-10-21，用户明确删除该路线；下文插件缓存发现、完整证明及 detect／prepare 不再作为实现契约。保留原始需求、样本身份及未通过记录，不补称真实验收已完成。当前入口见 [README](../../README.md)。
+
+原发布记录：[GitHub Spec #9](https://github.com/pzehrel/codex-browser-liberation-patch/issues/9)，当时标签 `ready-for-agent`；此处不代表当前 issue 状态。
 
 ## Problem Statement
 

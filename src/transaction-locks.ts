@@ -35,16 +35,12 @@ export async function inspectLease(path: string): Promise<Lease | null> {
   throw new TransactionError('INVALID_LOCK', 'Lock history exceeds supported length.', 'conflict', path);
 }
 
-export function targetLock(path: string): string {
-  return join(dirname(path), '.codex-unfence.lock');
-}
-
 export function checkCoordinationPaths(paths: string[]): void {
   const base = join(userInfo().homedir, '.codex-unfence');
   for (const path of paths) check(path !== base && !path.startsWith(base + sep) && !base.startsWith(path + sep), 'PATH_ALIAS', 'Preparation, operation store and targets must not overlap the fixed coordination namespace.', path);
 }
 
-/** OS account home, not HOME/XDG or --store: all current writers share one namespace. */
+/** OS account home determines the shared coordination namespace independently of HOME/XDG. */
 export async function externalTargetLock(path: string, create = false): Promise<string> {
   const home = userInfo().homedir;
   const base = join(home, '.codex-unfence');

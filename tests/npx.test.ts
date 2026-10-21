@@ -90,7 +90,8 @@ test('offline npx exposes help through a real PTY and propagates the public bin 
   const documented = await npmPackage.runNpmExecPty(['--help'], box);
   help(documented);
   assert.match(documented.stdout, /check aggregates runtime failure, conflict, incompatibility, then success/);
-  assert.match(documented.stdout, /check exits 1 when no installations are found; empty legacy detect succeeds/);
+  assert.match(documented.stdout, /check exits 1 when no installations are found/);
+  assert.doesNotMatch(documented.stdout, /codex-unfence (?:detect|prepare)|--plan|--store/);
   assert.match(documented.stdout, /Write blockers are reported separately; check success does not authorize writes/);
   const observed = finalBin(await readFile(join(box.directory, 'final-bin.json'), 'utf8'));
   inside(join(box.directory, 'npm-cache'), observed.entry);

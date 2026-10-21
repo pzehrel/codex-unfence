@@ -1,4 +1,4 @@
-import type { SourceAnalysis, SourceRange } from './analysis.js';
+import type { Range } from './cua-contract.js';
 import type { DiscoveryReport, Inspection } from './managed-patches.js';
 
 export const EXIT_CODES = {
@@ -17,30 +17,7 @@ export interface Diagnostic {
   path?: string;
   installation?: string;
   systemCode?: string;
-  range?: SourceRange;
-}
-
-export interface Artifact {
-  plugin: 'browser' | 'chrome';
-  version: string;
-  path: string;
-  realPath: string | null;
-  availability: 'readable' | 'unavailable';
-  compatibility: 'not-analyzed' | 'compatible' | 'incompatible';
-  analysis?: SourceAnalysis;
-}
-
-export interface Detection {
-  pluginRoot: string;
-  artifacts: Artifact[];
-  runtime: 'not-verified';
-}
-
-export interface Preparation {
-  pluginRoot: string;
-  plan: { id: string; directory: string; manifestPath: string; targetCount: number };
-  pluginFiles: 'unchanged';
-  runtime: 'not-verified';
+  range?: Range;
 }
 
 interface ResultBase {
@@ -48,16 +25,6 @@ interface ResultBase {
   outcome: 'success' | 'usage-error' | 'runtime-error' | 'incompatible' | 'conflict';
   exitCode: number;
   diagnostics: Diagnostic[];
-}
-
-export interface DetectionResult extends ResultBase {
-  command: 'detect';
-  data: Detection | null;
-}
-
-export interface PreparationResult extends ResultBase {
-  command: 'prepare';
-  data: Preparation | null;
 }
 
 export type TransactionCommand = 'apply' | 'restore' | 'status' | 'recover';
@@ -93,7 +60,7 @@ export interface CheckResult extends ResultBase {
   data: { discovery: DiscoveryReport; inspections: Inspection[]; inspection: Inspection | null; runtime: 'not-verified' } | null;
 }
 
-export type CommandResult = DetectionResult | PreparationResult | OperationResult | CheckResult | (ResultBase & { command: null; data: null });
+export type CommandResult = OperationResult | CheckResult | (ResultBase & { command: null; data: null });
 
 export function publicActionName(command: string): string {
   return command === 'apply' ? 'install' : command === 'restore' ? 'uninstall' : command;
@@ -102,7 +69,6 @@ export function publicActionName(command: string): string {
 export function renderHuman(result: CommandResult): string {
   const lines = [`${result.command ?? 'CLI'}: ${result.outcome}`];
   if (result.data) {
-    if ('pluginRoot' in result.data) lines.push(`Plugin root: ${result.data.pluginRoot}`);
     if (result.command === 'check') {
       for (const inspection of result.data.inspections) {
         lines.push(`Installation: ${inspection.candidate.appPath}; target: ${inspection.candidate.targetPath}`);
@@ -118,21 +84,7 @@ export function renderHuman(result: CommandResult): string {
       if (result.data.groupState) lines.push(`Group: ${result.data.groupState}`);
       if (result.data.targets.some((target) => target.state === 'incomplete') || result.data.pendingTransactions?.length) lines.push('Explicit recover rolls back to the preoperation state; it does not continue apply or restore.');
       for (const target of result.data.targets) lines.push(`${target.path}: ${target.state}${target.action ? ` (${target.action})` : ''}${target.pending ? ` [pending ${target.pending.transaction}; current ${target.pending.current}; before ${target.pending.before}]` : ''}`);
-      for (const pending of result.data.pendingTransactions ?? []) lines.push(`Pending group: ${pending.transaction} (${pending.operation}, ${pending.state}, ${pending.targets.length} targets); recover --store ${pending.store}`);
-    }
-    for (const artifact of result.command === 'detect' ? result.data.artifacts : []) {
-      lines.push(
-        `${artifact.plugin} ${artifact.version}: ${artifact.realPath ?? artifact.path}`,
-        `  Availability: ${artifact.availability}; structural compatibility: ${artifact.compatibility}`,
-      );
-      const premise = artifact.analysis?.ambientPremise;
-      if (premise) lines.push(`  Accepted semantic assumption: ${premise.identity.id} v${premise.identity.version}; environment ${premise.environment}; ${premise.operations.length} exact source operations. This is not a live descriptor check or whole-factory trust.`);
-      for (const evidence of artifact.analysis?.evidence ?? []) {
-        lines.push(`  Evidence ${evidence.kind}: ${evidence.range.start}..${evidence.range.end} ${evidence.range.unit}. ${evidence.description}`);
-      }
-    }
-    if (result.command === 'prepare') {
-      lines.push(`Review plan: ${result.data.plan.directory}`, `Manifest: ${result.data.plan.manifestPath}`, `Targets: ${result.data.plan.targetCount}; plugin files unchanged.`);
+      for (const pending of result.data.pendingTransactions ?? []) lines.push(`Pending group: ${pending.transaction} (${pending.operation}, ${pending.state}, ${pending.targets.length} targets); rerun install or uninstall to recover`);
     }
     lines.push('Runtime: not-verified. Versions do not identify the running installation.');
   }

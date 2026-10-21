@@ -109,7 +109,7 @@ function managedOperations({ derive, tool }: { derive: DeriveCua; tool: ToolIden
       // An authenticated stored plan supplies the original when the actual target is patched.
       derivation = record?.plan.derivation ?? derive(text);
       diagnostics.push(...derivation.diagnostics);
-      if (!record && derivation.support === 'unsupported') diagnostics.push({ code: 'UNVERIFIED_SOURCE', severity: 'warning', message: 'No trusted managed origin exists; original tool version is unknown. If this is a historical patch, use its original entrypoint, preparation and operation store to restore. Similar wrapper bytes never prove tool provenance.' });
+      if (!record && derivation.support === 'unsupported') diagnostics.push({ code: 'UNVERIFIED_SOURCE', severity: 'warning', message: 'No trusted managed origin exists. Unsupported or modified contents cannot be adopted or restored. Similar wrapper bytes never prove tool provenance.' });
       operation = await status(actual);
       diagnostics.push(...operation.diagnostics.filter((entry) => entry.code !== 'PROCESS_CHECK_LIMITATION'));
       state = operation.data?.targets[0]?.state ?? 'conflict';
@@ -184,12 +184,12 @@ function managedOperations({ derive, tool }: { derive: DeriveCua; tool: ToolIden
       let record = await managedRecord(current.candidate.targetPath, derive);
       check(inspectedLocators.get(current) === (record ? canonical(record.locator) : null), 'INSPECTION_CHANGED', 'Managed selection changed after confirmation; inspect and confirm again.');
       if (command === 'recover') {
-        check(record, 'RESTORE_SOURCE_REQUIRED', 'No managed recovery record. Use the original tool entrypoint and operation store for historical preparations.');
+        check(record, 'RESTORE_SOURCE_REQUIRED', 'No trusted managed recovery record exists for this installation.');
         return executor.recover({ store: record.locator.store });
       }
       check(current.state !== 'conflict' && current.state !== 'incomplete', current.state === 'incomplete' ? 'INCOMPLETE_TRANSACTION' : 'TARGET_CONFLICT', current.state === 'incomplete' ? 'An incomplete transaction requires recover; recovery rolls back rather than continuing.' : 'Current target is not a trusted original or tool-applied state.');
       if (!record) {
-        check(command === 'apply' && current.support === 'supported', 'RESTORE_SOURCE_REQUIRED', 'No trusted managed preparation. Unknown or historical patches require their original tool version and entrypoint.');
+        check(command === 'apply' && current.support === 'supported', 'RESTORE_SOURCE_REQUIRED', 'No trusted managed preparation. Unknown modifications cannot be restored.');
         const snapshot = inspectedSources.get(current);
         check(snapshot, 'INSPECTION_CHANGED', 'Cannot establish the confirmed source snapshot.');
         record = await prepareManaged(current.candidate, snapshot.bytes, snapshot.identity, derive, tool);

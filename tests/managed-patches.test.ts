@@ -432,7 +432,7 @@ test('similar patch bytes without trusted provenance never authorize restore and
   assert.equal(inspection.support, 'unsupported');
   assert.equal(inspection.recovery, null);
   assert.deepEqual(inspection.allowedActions, []);
-  assert.ok(inspection.diagnostics.some(entry => entry.code === 'UNVERIFIED_SOURCE' && /unknown/.test(entry.message)));
+  assert.ok(inspection.diagnostics.some(entry => entry.code === 'UNVERIFIED_SOURCE' && /No trusted managed origin/.test(entry.message)));
   assert.notEqual(run(box, 'restore', untracked).exitCode, 0);
   assert.deepEqual(await readFile(untracked.targetPath), patched);
 });

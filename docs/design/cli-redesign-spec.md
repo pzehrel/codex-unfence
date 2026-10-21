@@ -1,6 +1,6 @@
 # Spec：基于结构兼容性的 Codex 浏览器补丁 CLI
 
-历史规格：保留下文当时的设计边界；其中保留 Python 分析工具的安排已被旧开发脚本清理取代。当前维护代码统一使用 TypeScript，使用入口见 [README](../../README.md)。
+已废弃的显式 review plan 方案规格。2026-10-21，用户明确删除该路线；下文插件缓存发现、detect／prepare、显式 plan／store 与完整依赖证明不再作为实现契约。原文仅保存当时的需求和证据边界；旧开发脚本已移除，维护代码统一使用 TypeScript。当前托管入口见 [README](../../README.md)。真实备份与恢复资料仍须保留，不能随代码清理删除。
 
 ## Problem Statement
 

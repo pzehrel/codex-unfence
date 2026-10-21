@@ -5,7 +5,7 @@ import { EXIT_CODES } from './result.js';
 import type { Diagnostic, OperationResult, OperationTarget, PendingTransaction, TargetState, TransactionCommand } from './result.js';
 import { PROCESS_LIMITATION, processTable } from './processes.js';
 import type { ProcessIdentity } from './processes.js';
-import { acquireLease, checkCoordinationPaths, externalTargetLock, inspectLease, releaseLease, targetLock } from './transaction-locks.js';
+import { acquireLease, checkCoordinationPaths, externalTargetLock, inspectLease, releaseLease } from './transaction-locks.js';
 import type { LeaseRecord } from './transaction-locks.js';
 import { canonical, digest } from './integrity.js';
 import { atomicJSON, canonicalDirectory, check, exists, privateDirectory, readJSON, regularBytes, sign, syncDirectory, TransactionError, verify, writeExclusive } from './transaction-storage.js';
@@ -22,7 +22,7 @@ export interface ValidatedTransactionPlan {
 }
 export interface TransactionOptions { plan?: string; store: string; targets?: string[] }
 export interface TransactionAdapter {
-  scheme: 'structural' | 'cua-site-status-transport-v1';
+  scheme: 'cua-site-status-transport-v1';
   loadSelected(options: TransactionOptions): Promise<ValidatedTransactionPlan>;
   loadStored(directory: string): Promise<ValidatedTransactionPlan>;
   copy(plan: ValidatedTransactionPlan, destination: string): Promise<void>;
@@ -46,12 +46,12 @@ interface JournalTarget {
   afterHash: string;
   afterSize: number;
   final: Snapshot | null;
-  replacement?: { before: Snapshot; after: Snapshot } | null;
+  replacement: { before: Snapshot; after: Snapshot } | null;
   previous: string | null;
 }
 interface Journal {
   formatVersion: 2;
-  scheme?: TransactionAdapter['scheme'];
+  scheme: TransactionAdapter['scheme'];
   id: string;
   store: string;
   operation: Operation;
@@ -60,8 +60,7 @@ interface Journal {
   phase: 'prepared' | 'writing' | 'verifying' | 'committed' | 'rolling-back' | 'rolled-back';
   targets: JournalTarget[];
 }
-type LegacyJournal = Omit<Journal, 'formatVersion' | 'targets'> & { formatVersion: 1; target: JournalTarget };
-interface RecordEntry { directory: string; journal: Journal; plan: ValidatedTransactionPlan; legacy: boolean }
+interface RecordEntry { directory: string; journal: Journal; plan: ValidatedTransactionPlan }
 type PlanItem = ValidatedTransactionPlan['targets'][number];
 interface Classified { state: TargetState; snapshot: Snapshot; previous: string | null }
 interface Store { path: string; key: Buffer }
@@ -69,9 +68,8 @@ type Options = TransactionOptions;
 const terminal = (journal: Journal) => journal.phase === 'committed' || journal.phase === 'rolled-back';
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 
-/** Bound only by the two closed admission adapters, never by user input. */
+/** Bound by managed CUA admission, never by user input. */
 export function transactionExecutor(adapter: TransactionAdapter) {
-const sealedTarget = adapter.scheme !== 'structural';
 async function storeAt(path: string, create: boolean): Promise<Store | null> {
   check(resolve(path) === path, 'PATH_ALIAS', 'Operation store must be a normalized absolute path.', path);
   if (!await exists(path)) {
@@ -125,24 +123,22 @@ function validSnapshot(value: unknown): value is Snapshot {
   return [item.device, item.inode, item.parentDevice, item.parentInode].every((value) => typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)) && Number.isSafeInteger(item.mode) && item.mode >= 0 && item.mode <= 0o7777 && typeof item.sha256 === 'string' && /^[a-f0-9]{64}$/.test(item.sha256) && Number.isSafeInteger(item.size) && item.size >= 0;
 }
 
-/** Authenticate the original representation before normalizing v1 in memory. */
-function normalizeJournal(value: unknown, id: string, store: string): { journal: Journal; legacy: boolean } {
+/** Validate the authenticated CUA transaction representation. */
+function validateJournal(value: unknown, id: string, store: string): Journal {
   check(value !== null && typeof value === 'object', 'INVALID_JOURNAL', 'Missing transaction intent.');
-  const item = value as Journal | LegacyJournal;
-  check(adapter.scheme === 'structural' ? item.scheme === undefined : item.scheme === adapter.scheme && item.formatVersion === 2, 'SCHEME_MISMATCH', 'Transaction belongs to a different admission scheme.');
-  check((item.formatVersion === 1 || item.formatVersion === 2) && item.id === id && uuid.test(id) && item.store === store && (item.operation === 'apply' || item.operation === 'restore') && Number.isSafeInteger(item.sequence) && item.sequence >= 0 && /^[a-f0-9]{64}$/.test(item.planHash) && ['prepared', 'writing', 'verifying', 'committed', 'rolling-back', 'rolled-back'].includes(item.phase), 'INVALID_JOURNAL', 'Invalid transaction intent.');
-  const targets = item.formatVersion === 1 ? [item.target] : item.targets;
+  const item = value as Journal;
+  check(item.scheme === adapter.scheme && item.formatVersion === 2, 'SCHEME_MISMATCH', 'Transaction belongs to a different admission scheme.');
+  check(item.formatVersion === 2 && item.id === id && uuid.test(id) && item.store === store && (item.operation === 'apply' || item.operation === 'restore') && Number.isSafeInteger(item.sequence) && item.sequence >= 0 && /^[a-f0-9]{64}$/.test(item.planHash) && ['prepared', 'writing', 'verifying', 'committed', 'rolling-back', 'rolled-back'].includes(item.phase), 'INVALID_JOURNAL', 'Invalid transaction intent.');
+  const targets = item.targets;
   check(Array.isArray(targets) && targets.length > 0, 'INVALID_JOURNAL', 'Missing target transaction intents.');
   const paths = new Set<string>();
   for (const target of targets) {
     check(target && typeof target.path === 'string' && resolve(target.path) === target.path && !paths.has(target.path) && validSnapshot(target.before) && typeof target.afterHash === 'string' && /^[a-f0-9]{64}$/.test(target.afterHash) && Number.isSafeInteger(target.afterSize) && target.afterSize >= 0 && (target.previous === null || uuid.test(target.previous)) && (target.final === null || validSnapshot(target.final)), 'INVALID_JOURNAL', 'Invalid target transaction intent.');
-    check(!sealedTarget || target.replacement !== undefined, 'INVALID_JOURNAL', 'Transaction lacks authenticated replacement identities; preserve recovery data and use its matching tool version.');
-    check(target.replacement === undefined || target.replacement === null || validSnapshot(target.replacement.before) && validSnapshot(target.replacement.after) && parentMatches(target.replacement.before, target.before) && parentMatches(target.replacement.after, target.before) && [target.replacement.before, target.replacement.after].every((state) => state.sha256 === target.before.sha256 && state.size === target.before.size || state.sha256 === target.afterHash && state.size === target.afterSize), 'INVALID_JOURNAL', 'Invalid authenticated replacement identities.');
+    check(target.replacement !== undefined, 'INVALID_JOURNAL', 'Transaction lacks authenticated replacement identities; preserve recovery data and use its matching tool version.');
+    check(target.replacement === null || validSnapshot(target.replacement.before) && validSnapshot(target.replacement.after) && parentMatches(target.replacement.before, target.before) && parentMatches(target.replacement.after, target.before) && [target.replacement.before, target.replacement.after].every((state) => state.sha256 === target.before.sha256 && state.size === target.before.size || state.sha256 === target.afterHash && state.size === target.afterSize), 'INVALID_JOURNAL', 'Invalid authenticated replacement identities.');
     paths.add(target.path);
   }
-  if (item.formatVersion === 2) return { journal: item, legacy: false };
-  const { target, ...base } = item;
-  return { journal: { ...base, formatVersion: 2, targets: [target] }, legacy: true };
+  return item;
 }
 
 function backupName(count: number, index: number): string {
@@ -160,11 +156,10 @@ async function recordAt(store: Store, id: string): Promise<RecordEntry> {
   check(uuid.test(id), 'INVALID_JOURNAL', 'Invalid transaction directory.');
   const directory = join(store.path, 'transactions', id);
   await canonicalDirectory(directory, true);
-  const normalized = normalizeJournal(verify(await readJSON(join(directory, 'journal.json')), store.key), id, store.path);
-  const journal = normalized.journal;
+  const journal = validateJournal(verify(await readJSON(join(directory, 'journal.json')), store.key), id, store.path);
   const plan = await adapter.loadStored(join(directory, 'plan'));
   check(plan.manifest.contentHash === journal.planHash && plan.targets.length === journal.targets.length, 'INVALID_JOURNAL', 'Stored plan does not match authenticated transaction.');
-  const entry = { directory, journal, plan, legacy: normalized.legacy };
+  const entry = { directory, journal, plan };
   for (const [index, target] of plan.targets.entries()) {
     const intent = journal.targets[index]!;
     const desired = journal.operation === 'apply' ? target.target.patched : target.target.original;
@@ -205,17 +200,12 @@ async function records(store: Store | null): Promise<RecordEntry[]> {
 
 async function persist(store: Store, entry: RecordEntry): Promise<void> {
   try {
-    // Existing v1 transactions keep their signed wire representation, including on recovery.
-    const { targets, ...base } = entry.journal;
-    const wire = entry.legacy ? { ...base, formatVersion: 1, target: targets[0] } : entry.journal;
-    await atomicJSON(join(entry.directory, 'journal.json'), sign(wire, store.key));
+    await atomicJSON(join(entry.directory, 'journal.json'), sign(entry.journal, store.key));
   } catch (error) {
     // The write may have renamed and then failed. Only the persisted journal defines terminal state.
     entry.journal.phase = 'verifying'; // Unreadable persistence must never release a possibly incomplete lease.
     const value = verify(await readJSON(join(entry.directory, 'journal.json')), store.key);
-    const normalized = normalizeJournal(value, entry.journal.id, store.path);
-    entry.journal = normalized.journal;
-    entry.legacy = normalized.legacy;
+    entry.journal = validateJournal(value, entry.journal.id, store.path);
     throw new TransactionError('JOURNAL_WRITE_FAILED', `Journal persistence failed; explicit recover may be required: ${error instanceof Error ? error.message : 'unknown error'}`, 'runtime-error');
   }
 }
@@ -236,12 +226,12 @@ async function createIntent(store: Store, id: string, operation: Operation, plan
       const desired = operation === 'apply' ? item.target.patched : item.target.original;
       targets.push({ path: item.target.identity.path, before, afterHash: desired.sha256, afterSize: desired.size, final: null, replacement: null, previous });
     }
-    const journal: Journal = { formatVersion: 2, ...(adapter.scheme === 'structural' ? {} : { scheme: adapter.scheme }), id, store: store.path, operation, sequence, planHash: plan.manifest.contentHash, phase: 'prepared', targets };
+    const journal: Journal = { formatVersion: 2, scheme: adapter.scheme, id, store: store.path, operation, sequence, planHash: plan.manifest.contentHash, phase: 'prepared', targets };
     await writeExclusive(join(staging, 'journal.json'), JSON.stringify(sign(journal, store.key)) + '\n');
     await syncDirectory(staging);
     await rename(staging, destination);
     await syncDirectory(parent);
-    return { directory: destination, journal, plan: await adapter.loadStored(join(destination, 'plan')), legacy: false };
+    return { directory: destination, journal, plan: await adapter.loadStored(join(destination, 'plan')) };
   } finally { await rm(staging, { force: true, recursive: true }); }
 }
 
@@ -255,16 +245,15 @@ async function previousTransaction(record: LeaseRecord, own: RecordEntry | null,
   }
   const entry = await recordAt(store, record.transaction);
   if (own && entry.journal.id === own.journal.id && recovering) return;
-  check(terminal(entry.journal), 'INCOMPLETE_TRANSACTION', `Recover transaction ${entry.journal.id} using --store ${record.store} before ordinary writes.`);
+  check(terminal(entry.journal), 'INCOMPLETE_TRANSACTION', `Recover transaction ${entry.journal.id} before ordinary writes; rerun install or uninstall for its installation.`);
 }
 
 async function targetRoots(paths: string[], create = false): Promise<string[]> {
   const external = await Promise.all(paths.map((path) => externalTargetLock(path, create)));
-  return [...new Set(external)].sort().concat(sealedTarget ? [] : [...new Set(paths.map(targetLock))].sort());
+  return [...new Set(external)].sort();
 }
 
 async function checkTargetArtifacts(path: string): Promise<void> {
-  if (!sealedTarget) return;
   const names = await readdir(dirname(path));
   check(!names.some((name) => name.startsWith('.codex-unfence') || name.startsWith('.codex-browser-patch') || name.startsWith('.publish-')), 'LEGACY_TARGET_ARTIFACTS', 'Target directory contains old or interrupted transaction artifacts; offline maintenance is required. No artifacts were removed.', path);
 }
@@ -276,16 +265,12 @@ async function pendingAtLease(root: string, path: string): Promise<RecordEntry |
   check(store, 'INVALID_LOCK', 'Target lock references an unavailable store.');
   if (!await exists(join(store.path, 'transactions', lease.record.transaction))) return null;
   const entry = await recordAt(store, lease.record.transaction);
-  check(entry.journal.targets.some((target) => targetLock(target.path) === targetLock(path)), 'INVALID_LOCK', 'Target lock references an unrelated transaction.', path);
+  check(entry.journal.targets.some((target) => dirname(target.path) === dirname(path)), 'INVALID_LOCK', 'Target lock references an unrelated transaction.', path);
   return terminal(entry.journal) ? null : entry;
 }
 
 async function pendingAtTarget(path: string): Promise<RecordEntry | null> {
-  for (const root of [await externalTargetLock(path), targetLock(path)]) {
-    const pending = await pendingAtLease(root, path);
-    if (pending) return pending;
-  }
-  return null;
+  return pendingAtLease(await externalTargetLock(path), path);
 }
 
 async function classify(item: PlanItem, entries: RecordEntry[]): Promise<Classified> {
@@ -297,7 +282,7 @@ async function classify(item: PlanItem, entries: RecordEntry[]): Promise<Classif
   const trusted = latest?.journal.targets.find((target) => target.path === path)?.final;
   const priorItem = latest?.plan.targets.find((target) => target.target.identity.path === path);
   const sameTransformation = priorItem?.original.equals(item.original) && priorItem.patched.equals(item.patched);
-  if (current.sha256 === item.target.original.sha256 && current.size === item.original.length && ((adapter.scheme === 'structural' || !latest) && matchesPlan(current, item.target.identity) || trusted && same(current, trusted) && (adapter.scheme === 'structural' || sameTransformation))) {
+  if (current.sha256 === item.target.original.sha256 && current.size === item.original.length && (!latest && matchesPlan(current, item.target.identity) || trusted && same(current, trusted) && sameTransformation)) {
     return { state: 'original', snapshot: current, previous: latest?.journal.id ?? null };
   }
   if (current.sha256 === item.target.patched.sha256 && current.size === item.patched.length && trusted && same(current, trusted) && sameTransformation) {
@@ -312,7 +297,7 @@ async function replaceTarget(store: Store, entry: RecordEntry, target: JournalTa
   check(same(await snapshot(path), expected), 'TARGET_CHANGED', 'Target changed immediately before replacement.', path);
   // CUA staging also stays outside sealed resources, including after SIGKILL.
   // rename across filesystems fails closed rather than falling back to a copy.
-  const stagingDirectory = sealedTarget ? dirname(await externalTargetLock(path, true)) : dirname(path);
+  const stagingDirectory = dirname(await externalTargetLock(path, true));
   const temporary = join(stagingDirectory, `.codex-unfence-${randomUUID()}.tmp`);
   try {
     await writeExclusive(temporary, bytes, expected.mode);
@@ -378,8 +363,7 @@ function result(command: TransactionCommand, outcome: OperationResult['outcome']
 
 function failure(command: TransactionCommand, error: unknown): OperationResult {
   const known = error instanceof TransactionError;
-  const invalidPlan = error instanceof Error && 'code' in error && error.code === 'INVALID_PLAN';
-  return result(command, known ? error.kind : invalidPlan ? 'conflict' : 'runtime-error', null, [{ code: known ? error.code : invalidPlan ? 'INVALID_PLAN' : 'OPERATION_FAILED', severity: 'error', message: error instanceof Error ? error.message : 'Operation failed.', ...(known && error.path ? { path: error.path } : {}), ...(error instanceof Error && 'code' in error && !known && !invalidPlan ? { systemCode: String(error.code) } : {}) }]);
+  return result(command, known ? error.kind : 'runtime-error', null, [{ code: known ? error.code : 'OPERATION_FAILED', severity: 'error', message: error instanceof Error ? error.message : 'Operation failed.', ...(known && error.path ? { path: error.path } : {}), ...(error instanceof Error && 'code' in error && !known ? { systemCode: String(error.code) } : {}) }]);
 }
 
 async function apply(options: Options): Promise<OperationResult> {
@@ -499,7 +483,7 @@ async function status(options: Options): Promise<OperationResult> {
     const history = await records(store);
     const plan = options.plan ? await adapter.loadSelected(options) : null;
     const paths = plan ? plan.targets.map((item) => item.target.identity.path) : options.targets ?? [];
-    if (!paths.length) throw new TransactionError('SELECTION_REQUIRED', 'status requires --plan or --target.', 'usage-error');
+    if (!paths.length) throw new TransactionError('SELECTION_REQUIRED', 'Status requires a managed target selection.', 'usage-error');
     const pendingEntries = new Map(history.filter((entry) => !terminal(entry.journal)).map((entry) => [`${entry.journal.store}/${entry.journal.id}`, entry]));
     for (const path of paths) {
       await checkTargetArtifacts(path);
@@ -521,7 +505,7 @@ async function status(options: Options): Promise<OperationResult> {
           const state = (await classify(item, history)).state;
           // CUA status retains the last actual committed content change across
           // no-op records. A restore of an already-original file proves no restore.
-          const changed = adapter.scheme === 'structural' ? undefined : history.filter((entry) => entry.journal.phase === 'committed' && entry.journal.targets.some((target) => target.path === path && (target.before.sha256 !== target.afterHash || target.before.size !== target.afterSize))).at(-1);
+          const changed = history.filter((entry) => entry.journal.phase === 'committed' && entry.journal.targets.some((target) => target.path === path && (target.before.sha256 !== target.afterHash || target.before.size !== target.afterSize))).at(-1);
           const restored = state === 'original' && changed?.journal.operation === 'restore';
           targets.push({ path, state, ...(restored ? { action: 'restored' as const } : {}) });
         }
