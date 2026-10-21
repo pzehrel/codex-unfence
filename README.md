@@ -4,7 +4,7 @@
 
 ## 安装
 
-> 当前版本 `0.2.0` 尚未发布到公共 npm registry，请先按下方[本地安装](#本地安装)操作。发布后可直接运行：
+直接从 npm 安装：
 
 ```bash
 npx codex-unfence install
@@ -35,7 +35,7 @@ pnpm pack
 使用生成的安装包：
 
 ```bash
-npx --offline --package "$PWD/codex-unfence-0.2.0.tgz" codex-unfence install
+npx --offline --package "$PWD/codex-unfence-0.0.1.tgz" codex-unfence install
 ```
 
 按上述安装步骤确认并重启应用。请保留本地包，以便后续使用相同工具版本。
