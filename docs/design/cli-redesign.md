@@ -67,6 +67,10 @@ codex-unfence recover --store ABSOLUTE_STORE [--json]
 
 `--target` 可重复。`--plan`／`--store` 包括等号形式均触发显式方案解析，缺项、空值、重复和与托管参数混搭会拒绝，不回退自动管理。固定 CUA 配方及其准备／操作脚本已移除；[准备切片](cua-request-wrapper-slice.md)和[应用恢复切片](cua-wrapper-application-slice.md)仅保存开发方案记录。
 
+### 验证性能与重复操作
+
+CUA 候选定位一次扫描 awaited member fetch，再沿父节点保留所有相关异步声明，避免为每个无关函数重扫整个 AST。每次公开托管操作只复用该操作内相同源码的纯结构分析结果；操作之间不共享缓存，返回值独立。目标文件、准备材料、权限、来源签名和事务备份仍按原有边界重新读取并验证。重复安装／卸载保留确认与事务保护，不替换已处于目标状态的文件。
+
 ### 验证边界
 
 ```bash

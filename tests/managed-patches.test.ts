@@ -133,6 +133,49 @@ test('managed operations persist private recovery state and restore original byt
   assert.deepEqual(await readdir(join(candidate.targetPath, '..')), ['browser-service.mjs']);
 });
 
+test('repeated managed operations derive each source once per operation while preserving identity on no-ops', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate } = await supportedInstallation(box);
+  const child = runCli(['repeat-validation', JSON.stringify(candidate)], { binary, fixture, directory: box.directory });
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  const result: { steps: { operation: OperationResult; derivations: number; identityUnchanged: boolean }[] } = JSON.parse(child.stdout);
+  assert.deepEqual(result.steps.map(step => step.operation.exitCode), [0, 0, 0, 0, 0], JSON.stringify(result.steps.map(step => step.operation.diagnostics)));
+  assert.deepEqual(result.steps.map(step => required(required(step.operation.data).targets[0]).action), ['applied', 'already-applied', 'restored', 'already-original', 'applied']);
+  assert.deepEqual(result.steps.map(step => step.identityUnchanged), [false, true, false, true, false]);
+  assert.deepEqual(result.steps.map(step => step.derivations), [1, 1, 1, 1, 1]);
+});
+
+test('a large synthetic installation supports repeated apply without long validation or target replacement', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  const source = Buffer.concat([original, Buffer.from(Array.from({ length: 3000 }, (_, index) =>
+    `\nasync function unrelated${index}(value) { return value + ${index}; }`).join('')), Buffer.from(`\n/*${'inert data;'.repeat(160000)}*/`)]);
+  await writeFile(candidate.targetPath, source);
+  const started = performance.now();
+  const child = runCli(['repeat-validation', JSON.stringify(candidate)], { binary, fixture, directory: box.directory, timeout: 15000 });
+  assert.equal(child.status, 0, child.stdout + child.stderr + String(child.error ?? ''));
+  const result: { steps: { operation: OperationResult; identityUnchanged: boolean }[] } = JSON.parse(child.stdout);
+  assert.deepEqual(result.steps.map(step => step.operation.exitCode), [0, 0, 0, 0, 0], JSON.stringify(result.steps.map(step => step.operation.diagnostics)));
+  assert.deepEqual(result.steps.map(step => step.identityUnchanged), [false, true, false, true, false]);
+  assert.ok(performance.now() - started < 15000);
+});
+
+test('managed analysis reuse cannot survive caller mutation or changed preparation bytes between operations', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const patched = await readFile(candidate.targetPath);
+  const child = runCli(['inspect-after-mutation', JSON.stringify(candidate)], { binary, fixture, directory: box.directory });
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  const result: { independent: Inspection; changed: Inspection; restored: Inspection } = JSON.parse(child.stdout);
+  assert.equal(result.independent.support, 'supported');
+  assert.equal(result.independent.state, 'tool-applied');
+  assert.equal(result.changed.state, 'conflict');
+  assert.deepEqual(result.changed.allowedActions, []);
+  assert.equal(result.restored.state, 'tool-applied');
+  assert.deepEqual(await readFile(candidate.targetPath), patched);
+});
+
 test('apply rejects a supported original changed after confirmation token validation', async (t: TestContext) => {
   const box = await sandbox(t);
   const { candidate, original } = await supportedInstallation(box);

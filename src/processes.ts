@@ -17,29 +17,36 @@ export interface ProcessIdentity {
   command: string;
 }
 
-/** Fail closed when either executable identity or command enumeration is unavailable. */
+// BSD/macOS ps accepts field widths through headers, rather than GNU's comm:width syntax.
+// Keep command last so -ww leaves its arguments unbounded. Reject a full comm field:
+// its executable identity might have been truncated, even if the resulting path looks valid.
+const executableHeader = 'EXECUTABLE' + '_'.repeat(2038);
+const processFormat = `pid=PID,lstart=START,comm=${executableHeader},command=COMMAND`;
+
+/** Capture executable identity and arguments together; unrelated process churn is harmless. */
 export async function processTable(): Promise<ProcessIdentity[]> {
-  const identities = await execute(['-axww', '-o', 'pid=,lstart=,comm=']);
-  const commands = await execute(['-axww', '-o', 'pid=,command=']);
-  const args = new Map<number, string>();
-  for (const line of commands.split('\n').filter((line) => line.trim())) {
-    const match = /^\s*(\d+)\s+(.+)$/.exec(line);
-    if (!match || args.has(Number(match[1]))) throw new Error('Invalid process command enumeration.');
-    if (/^\/?(?:bin\/)?ps\s+-axww\s+-o\s+pid=,command=$/.test(match[2] ?? '')) continue;
-    args.set(Number(match[1]), match[2] ?? '');
-  }
+  const output = await execute(['-axww', '-o', processFormat]);
+  const [header = '', ...lines] = output.split('\n');
+  if (!new RegExp(`^\\s*PID\\s+START\\s+${executableHeader} COMMAND\\s*$`).test(header)) throw new Error('Invalid process enumeration header.');
+  const startOffset = header.indexOf('START');
+  const executableOffset = header.indexOf(executableHeader);
+  const commandOffset = header.indexOf('COMMAND');
+  if (commandOffset !== executableOffset + executableHeader.length + 1) throw new Error('Invalid process enumeration columns.');
   const table: ProcessIdentity[] = [];
   const seen = new Set<number>();
-  for (const line of identities.split('\n').filter((line) => line.trim())) {
-    const match = /^\s*(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/.exec(line);
-    if (!match) throw new Error('Invalid process executable enumeration.');
-    const pid = Number(match[1]);
-    if (match[3] === '/bin/ps' || match[3] === 'ps') continue;
-    if (seen.has(pid) || !args.has(pid)) throw new Error('Process enumeration changed; retry after processes settle.');
+  for (const line of lines.filter((line) => line.trim())) {
+    const pidText = line.slice(0, startOffset).trim();
+    const pid = Number(pidText);
+    const start = line.slice(startOffset, executableOffset).trim().replace(/\s+/g, ' ');
+    const executable = line.slice(executableOffset, commandOffset - 1).trimEnd();
+    const command = line.slice(commandOffset);
+    if (!/^\d+$/.test(pidText) || !Number.isSafeInteger(pid) || pid <= 0 || seen.has(pid)
+      || !/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(start)
+      || !executable.trim() || executable.length >= executableHeader.length
+      || line[commandOffset - 1] !== ' ' || !command.trim()) throw new Error('Invalid process identity enumeration.');
     seen.add(pid);
-    table.push({ pid, start: (match[2] ?? '').replace(/\s+/g, ' '), executable: match[3] ?? '', command: args.get(pid) ?? '' });
+    table.push({ pid, start, executable, command });
   }
-  if ([...args.keys()].some((pid) => !seen.has(pid))) throw new Error('Process enumeration changed; retry after processes settle.');
   if (!seen.has(process.pid)) throw new Error('Cannot establish this process identity.');
   return table;
 }

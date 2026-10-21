@@ -22,6 +22,7 @@ if (process.env.CODEX_TEST_ALTERNATE_HOME) {
 }
 Object.defineProperty(process, 'platform', { value: 'darwin' });
 const execute = childProcess.execFile;
+let processSnapshots = 0;
 childProcess.execFile = function (this: unknown, file: string, args: unknown, ...rest: unknown[]) {
   if (file !== '/bin/ps') return Reflect.apply(execute, this, [file, args, ...rest]);
   const callback = rest.at(-1);
@@ -29,9 +30,32 @@ childProcess.execFile = function (this: unknown, file: string, args: unknown, ..
   const started = 'Fri Oct 16 10:00:00 2026';
   const rows: { pid: number; start?: string; executable: string; command: string }[] = process.env.CODEX_TEST_PROCESS_ROWS ? JSON.parse(process.env.CODEX_TEST_PROCESS_ROWS) : [];
   const all = [{ pid: process.pid, start: started, executable: process.execPath, command: process.argv.map(argument => /\s/.test(argument) ? JSON.stringify(argument) : argument).join(' ') }, ...rows];
-  const output = args.includes('pid=,lstart=,comm=')
-    ? all.map((row) => `${row.pid} ${row.start ?? started} ${row.executable}\n`).join('') + `999991 ${started} /bin/ps\n`
-    : all.map((row) => `${row.pid} ${row.command}\n`).join('') + '999992 /bin/ps -axww -o pid=,command=\n';
+  if (process.env.CODEX_TEST_PROCESS_CHURN) all.push({
+    pid: 900000 + ++processSnapshots, start: started, executable: '/usr/bin/unrelated', command: '/usr/bin/unrelated',
+  });
+  const format = args.at(-1);
+  let output: string;
+  if (typeof format === 'string' && format.startsWith('pid=PID,lstart=START,comm=')) {
+    // Independently render BSD columns (and GNU's narrower lstart column) at the OS seam.
+    const executableHeader = 'EXECUTABLE' + '_'.repeat(2038);
+    if (format !== `pid=PID,lstart=START,comm=${executableHeader},command=COMMAND`) throw new Error('Unexpected synthetic ps format.');
+    const startWidth = process.env.CODEX_TEST_PROCESS_LAYOUT === 'linux' ? 24 : 28;
+    const selected = process.env.CODEX_TEST_PROCESS_MALFORMED === 'missing-self' ? all.filter((row) => row.pid !== process.pid) : all;
+    if (process.env.CODEX_TEST_PROCESS_MALFORMED === 'duplicate-pid') selected.push({ pid: process.pid, start: started, executable: process.execPath, command: 'node' });
+    const render = (row: typeof all[number]) => `${String(row.pid).padStart(6)} ${row.start ?? started}${' '.repeat(Math.max(1, startWidth - (row.start ?? started).length + 1))}${row.executable.padEnd(2048)} ${row.command}\n`;
+    output = `${'PID'.padStart(6)} ${'START'.padEnd(startWidth)} ${executableHeader} COMMAND\n`
+      + selected.map(render).join('') + render({ pid: 999991, start: started, executable: '/bin/ps', command: '/bin/ps -axww -o synthetic' });
+    const malformed = process.env.CODEX_TEST_PROCESS_MALFORMED;
+    if (malformed === 'header') output = output.replace('START', 'BROKE');
+    if (malformed === 'row') output += 'unparseable process row\n';
+    if (malformed === 'truncated-comm') output += render({ pid: 999993, start: started, executable: 'x'.repeat(2048), command: 'node' });
+    if (malformed === 'overwide-comm') output += render({ pid: 999993, start: started, executable: 'x'.repeat(2049), command: 'node' });
+    if (malformed === 'empty-command') output += render({ pid: 999993, start: started, executable: '/usr/bin/unknown', command: '' });
+  } else {
+    output = args.includes('pid=,lstart=,comm=')
+      ? all.map((row) => `${row.pid} ${row.start ?? started} ${row.executable}\n`).join('') + `999991 ${started} /bin/ps\n`
+      : all.map((row) => `${row.pid} ${row.command}\n`).join('') + '999992 /bin/ps -axww -o pid=,command=\n';
+  }
   queueMicrotask(() => callback(process.env.CODEX_TEST_PROCESS_FAILURE ? new Error('synthetic ps unavailable') : null, output, ''));
   return {};
 } as typeof childProcess.execFile;

@@ -34,6 +34,28 @@ const fixture = await readFile(sourceFixture('deferred-site-status.js.txt'), 'ut
  */
 const expectedTransport = 'await runtime.fetch(endpoint, options)';
 
+test('derives a bundled site-status chain without rescanning every node for unrelated async functions', () => {
+  const source = fixture + Array.from({ length: 3000 }, (_, index) =>
+    `\nasync function unrelated${index}(value) { return value + ${index}; }`).join('');
+  const started = performance.now();
+  const result = deriveCua(source);
+  const elapsed = performance.now() - started;
+  assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+  assert.equal(required(result.change).before, expectedTransport);
+  assert.ok(elapsed < 2000, `Synthetic bundle analysis took ${elapsed.toFixed(0)}ms; budget is 2000ms`);
+});
+
+test('derives a megabyte-scale bundle with unrelated async functions across independent scopes', () => {
+  const source = fixture + Array.from({ length: 100 }, (_, group) =>
+    `\nfunction unrelatedGroup${group}() {` + Array.from({ length: 300 }, (_, index) =>
+      `async function unrelated${index}(value) { return value + ${index}; }`).join('') + '}').join('');
+  const started = performance.now();
+  const result = deriveCua(source);
+  assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
+  assert.equal(required(result.change).before, expectedTransport);
+  assert.ok(performance.now() - started < 5000, 'Megabyte-scale synthetic analysis exceeded 5000ms');
+});
+
 function structuralCases(group: string, cases: {name: string; source: string; support: string; diagnostic?: string}[]) {
   for (const { name, source, support, diagnostic } of cases) {
     test(`matrix ${group}: ${name}`, () => {
