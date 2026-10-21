@@ -110,7 +110,7 @@ test('managed operations persist private recovery state and restore original byt
   assert.equal(after.state, 'tool-applied');
   assert.equal(after.support, 'supported');
   assert.equal(after.recovery.tool.version, '9.8.7-synthetic');
-  assert.equal(after.recovery.command, 'npx --package codex-browser-liberation-patch@9.8.7-synthetic codex-browser-patch');
+  assert.equal(after.recovery.command, 'npx --package codex-unfence@9.8.7-synthetic codex-unfence');
   assert.equal(run(box, 'apply', candidate).data.targets[0].action, 'already-applied');
   assert.deepEqual(await readFile(candidate.targetPath), patched);
   assert.equal(run(box, 'restore', candidate).data.targets[0].action, 'restored');
@@ -156,7 +156,7 @@ test('interrupted managed apply is discoverable and recover rolls back without c
   const box = await sandbox(t);
   const { candidate, original } = await supportedInstallation(box);
   const interrupted = await pauseOperation(t, box, candidate, 'apply', 'after-target-rename');
-  const root = join(box.directory, 'home/Library/Application Support/codex-browser-liberation-patch');
+  const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
   assert.equal((await readdir(join(root, 'targets'))).length, 1);
   await interrupted.kill();
   assert.notDeepEqual(await readFile(candidate.targetPath), original);

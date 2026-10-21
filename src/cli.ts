@@ -8,15 +8,17 @@ import { EXIT_CODES, renderHuman } from './result.js';
 import type { CommandResult } from './result.js';
 import { managedCli } from './managed-cli.js';
 
-const help = `codex-browser-patch — macOS Codex browser plugin structural detection
+const help = `codex-unfence — macOS Codex browser plugin structural detection
 
 Usage:
-  codex-browser-patch                         interactive discovery, check and action selection
-  codex-browser-patch check [--app <absolute-app-path>] [--json]
-  codex-browser-patch status [--app <absolute-app-path>] [--json]
-  codex-browser-patch apply [--app <absolute-app-path>]
-  codex-browser-patch restore [--app <absolute-app-path>]
-  codex-browser-patch recover [--app <absolute-app-path>]
+  codex-unfence                         interactive discovery, check and action selection
+  codex-unfence check [--app <absolute-app-path>] [--json]
+  codex-unfence install [--app <absolute-app-path>]
+  codex-unfence uninstall [--app <absolute-app-path>]
+
+check reports every discovered installation without writing.
+install and uninstall guide rollback of interrupted operations before continuing.
+Advanced managed aliases: apply, restore, status, recover.
 
 Managed changes require interactive stdin/stdout and explicit confirmation; --json cannot authorize writes.
 Exit and reopen the host manually. Sealed-resource changes invalidate its signature.
@@ -24,15 +26,15 @@ Recovery data stays private outside npm cache; keep the matching local tarball w
 Structural support, write readiness and runtime verification are separate. Runtime: not-verified.
 
 Legacy explicit review-plan commands:
-  codex-browser-patch detect [--plugin-root <directory>] [--json]
-  codex-browser-patch prepare [--plugin-root <directory>] --target <absolute-artifact-path> [--target <path> ...] --output <new-plan-directory> [--json]
-  codex-browser-patch prepare [--plugin-root <directory>] --all-compatible --output <new-plan-directory> [--json]
-  codex-browser-patch apply --plan <directory> --store <private-directory> [--json]
-  codex-browser-patch restore --plan <directory> --store <private-directory> [--json]
-  codex-browser-patch status --plan <directory> --store <private-directory> [--json]
-  codex-browser-patch status --target <absolute-artifact-path> [--target <path> ...] --store <private-directory> [--json]
-  codex-browser-patch recover --store <private-directory> [--json]
-  codex-browser-patch --help
+  codex-unfence detect [--plugin-root <directory>] [--json]
+  codex-unfence prepare [--plugin-root <directory>] --target <absolute-artifact-path> [--target <path> ...] --output <new-plan-directory> [--json]
+  codex-unfence prepare [--plugin-root <directory>] --all-compatible --output <new-plan-directory> [--json]
+  codex-unfence apply --plan <directory> --store <private-directory> [--json]
+  codex-unfence restore --plan <directory> --store <private-directory> [--json]
+  codex-unfence status --plan <directory> --store <private-directory> [--json]
+  codex-unfence status --target <absolute-artifact-path> [--target <path> ...] --store <private-directory> [--json]
+  codex-unfence recover --store <private-directory> [--json]
+  codex-unfence --help
 
 Default root: ~/.codex/plugins/cache/openai-bundled
 Read-only discovery and finite AST structural proof are available.
@@ -64,7 +66,7 @@ Patched contents require verified tool records and backups; patch shape alone pr
 An incomplete transaction blocks ordinary writes, including from other stores.
 recover always rolls back to that operation's before state; it never continues apply or restore.
 An interrupted restore is rolled back to its actual pre-restore state, usually tool-applied.
-Keep the store and sibling .codex-browser-patch.lock history until recovery is complete.
+Keep the store and sibling .codex-unfence.lock history until recovery is complete.
 Unknown contents and aliases are conflicts. Exit Codex/ChatGPT and browser-service first.
 Process checks use ps snapshots; detection is limited and never terminates processes.
 Files and parent directories are fsynced; crash recovery is tested with SIGKILL.
@@ -76,7 +78,9 @@ not identify the running version. detect creates no patch plans or backups.
 
 Output protocol: schemaVersion 1. Exit codes: 0 success, 1 runtime failure,
 2 invalid arguments, 3 incompatible (including mixed compatible/incompatible), 4 conflict.
-Runtime failures take precedence over incompatibility; empty discovery succeeds.
+check aggregates runtime failure, conflict, incompatibility, then success.
+check exits 1 when no installations are found; empty legacy detect succeeds.
+Write blockers are reported separately; check success does not authorize writes.
 JSON results (including errors) go to stdout.
 `;
 
@@ -91,7 +95,7 @@ async function main(): Promise<CommandResult | null> {
       'all-compatible': { type: 'boolean' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
     } });
     const legacy = route.tokens.some(token => token.kind === 'option' && (token.name === 'plan' || token.name === 'store'));
-    if (!route.values.help && !legacy && (route.positionals.length === 0 || ['check', 'status', 'apply', 'restore', 'recover'].includes(route.positionals[0] ?? ''))) return await managedCli(args);
+    if (!route.values.help && !legacy && (route.positionals.length === 0 || ['install', 'uninstall', 'check', 'status', 'apply', 'restore', 'recover'].includes(route.positionals[0] ?? ''))) return await managedCli(args);
     const { values, positionals, tokens } = parseArgs({
       args,
       options: {
@@ -114,7 +118,7 @@ async function main(): Promise<CommandResult | null> {
       if (token.name !== 'target' && seen.has(token.name)) throw new Error(`Duplicate option: --${token.name}`);
       seen.add(token.name);
     }
-    if (values.help && (positionals.length === 0 || (positionals.length === 1 && ['check', 'detect', 'prepare', 'apply', 'restore', 'status', 'recover'].includes(positionals[0] ?? '')))) {
+    if (values.help && (positionals.length === 0 || (positionals.length === 1 && ['install', 'uninstall', 'check', 'detect', 'prepare', 'apply', 'restore', 'status', 'recover'].includes(positionals[0] ?? '')))) {
       process.stdout.write(help);
       return null;
     }
@@ -160,7 +164,7 @@ async function main(): Promise<CommandResult | null> {
   } catch (error) {
     return {
       schemaVersion: 1,
-      command: args[0] === 'check' || args[0] === 'detect' || args[0] === 'prepare' || args[0] === 'apply' || args[0] === 'restore' || args[0] === 'status' || args[0] === 'recover' ? args[0] : null,
+      command: args[0] === 'install' || args[0] === 'uninstall' || args[0] === 'check' || args[0] === 'detect' || args[0] === 'prepare' || args[0] === 'apply' || args[0] === 'restore' || args[0] === 'status' || args[0] === 'recover' ? args[0] : null,
       outcome: 'usage-error',
       exitCode: EXIT_CODES.usageError,
       data: null,

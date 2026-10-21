@@ -12,8 +12,10 @@ export const EXIT_CODES = {
 export interface Diagnostic {
   code: string;
   severity: 'info' | 'warning' | 'error';
+  outcome?: 'runtime-error' | 'conflict' | 'usage-error';
   message: string;
   path?: string;
+  installation?: string;
   systemCode?: string;
   range?: SourceRange;
 }
@@ -74,7 +76,7 @@ export interface PendingTransaction {
   targets: OperationTarget[];
 }
 export interface OperationResult extends ResultBase {
-  command: TransactionCommand;
+  command: TransactionCommand | 'install' | 'uninstall';
   data: {
     store: string;
     transaction: string | null;
@@ -88,22 +90,26 @@ export interface OperationResult extends ResultBase {
 
 export interface CheckResult extends ResultBase {
   command: 'check';
-  data: { discovery: DiscoveryReport; inspection: Inspection | null; runtime: 'not-verified' } | null;
+  data: { discovery: DiscoveryReport; inspections: Inspection[]; inspection: Inspection | null; runtime: 'not-verified' } | null;
 }
 
 export type CommandResult = DetectionResult | PreparationResult | OperationResult | CheckResult | (ResultBase & { command: null; data: null });
+
+export function publicActionName(command: string): string {
+  return command === 'apply' ? 'install' : command === 'restore' ? 'uninstall' : command;
+}
 
 export function renderHuman(result: CommandResult): string {
   const lines = [`${result.command ?? 'CLI'}: ${result.outcome}`];
   if (result.data) {
     if ('pluginRoot' in result.data) lines.push(`Plugin root: ${result.data.pluginRoot}`);
     if (result.command === 'check') {
-      for (const candidate of result.data.discovery.candidates) lines.push(`Installation: ${candidate.appPath}; target: ${candidate.targetPath}`);
-      const inspection = result.data.inspection;
-      if (inspection) {
+      for (const inspection of result.data.inspections) {
+        lines.push(`Installation: ${inspection.candidate.appPath}; target: ${inspection.candidate.targetPath}`);
         lines.push(`Structural support: ${inspection.support}; file state: ${inspection.state}; write readiness: ${inspection.writeReadiness}`);
         for (const evidence of inspection.derivation?.evidence ?? []) lines.push(`Support: ${evidence.description}`);
         for (const assumption of inspection.derivation?.assumptions ?? []) lines.push(`Assumption: ${assumption}`);
+        lines.push(`Can install: ${inspection.allowedActions.includes('apply') ? 'yes' : 'no'}; available actions: ${inspection.allowedActions.map(publicActionName).join(', ') || 'none'}`);
         for (const blocker of inspection.blockers) lines.push(`[${blocker.code}] ${blocker.message}`);
       }
     }
@@ -131,7 +137,7 @@ export function renderHuman(result: CommandResult): string {
     lines.push('Runtime: not-verified. Versions do not identify the running installation.');
   }
   for (const diagnostic of result.diagnostics) {
-    lines.push(`[${diagnostic.code}] ${diagnostic.message}${diagnostic.systemCode ? ` ${diagnostic.systemCode}` : ''}${diagnostic.path ? ` (${diagnostic.path})` : ''}${diagnostic.range ? ` [${diagnostic.range.start}..${diagnostic.range.end} ${diagnostic.range.unit}]` : ''}`);
+    lines.push(`[${diagnostic.code}] ${diagnostic.message}${diagnostic.systemCode ? ` ${diagnostic.systemCode}` : ''}${diagnostic.path ? ` (${diagnostic.path})` : ''}${diagnostic.installation ? ` (installation: ${diagnostic.installation})` : ''}${diagnostic.range ? ` [${diagnostic.range.start}..${diagnostic.range.end} ${diagnostic.range.unit}]` : ''}`);
   }
   return `${lines.join('\n')}\n`;
 }

@@ -46,6 +46,7 @@ interface JournalTarget {
   afterHash: string;
   afterSize: number;
   final: Snapshot | null;
+  replacement?: { before: Snapshot; after: Snapshot } | null;
   previous: string | null;
 }
 interface Journal {
@@ -135,6 +136,8 @@ function normalizeJournal(value: unknown, id: string, store: string): { journal:
   const paths = new Set<string>();
   for (const target of targets) {
     check(target && typeof target.path === 'string' && resolve(target.path) === target.path && !paths.has(target.path) && validSnapshot(target.before) && typeof target.afterHash === 'string' && /^[a-f0-9]{64}$/.test(target.afterHash) && Number.isSafeInteger(target.afterSize) && target.afterSize >= 0 && (target.previous === null || uuid.test(target.previous)) && (target.final === null || validSnapshot(target.final)), 'INVALID_JOURNAL', 'Invalid target transaction intent.');
+    check(!sealedTarget || target.replacement !== undefined, 'INVALID_JOURNAL', 'Transaction lacks authenticated replacement identities; preserve recovery data and use its matching tool version.');
+    check(target.replacement === undefined || target.replacement === null || validSnapshot(target.replacement.before) && validSnapshot(target.replacement.after) && parentMatches(target.replacement.before, target.before) && parentMatches(target.replacement.after, target.before) && [target.replacement.before, target.replacement.after].every((state) => state.sha256 === target.before.sha256 && state.size === target.before.size || state.sha256 === target.afterHash && state.size === target.afterSize), 'INVALID_JOURNAL', 'Invalid authenticated replacement identities.');
     paths.add(target.path);
   }
   if (item.formatVersion === 2) return { journal: item, legacy: false };
@@ -231,7 +234,7 @@ async function createIntent(store: Store, id: string, operation: Operation, plan
       check(digest(bytes) === before.sha256 && bytes.length === before.size && same(await snapshot(item.target.identity.path), before), 'TARGET_CHANGED', 'Target changed before intent publication.');
       await writeExclusive(join(staging, backupName(plan.targets.length, index)), bytes);
       const desired = operation === 'apply' ? item.target.patched : item.target.original;
-      targets.push({ path: item.target.identity.path, before, afterHash: desired.sha256, afterSize: desired.size, final: null, previous });
+      targets.push({ path: item.target.identity.path, before, afterHash: desired.sha256, afterSize: desired.size, final: null, replacement: null, previous });
     }
     const journal: Journal = { formatVersion: 2, ...(adapter.scheme === 'structural' ? {} : { scheme: adapter.scheme }), id, store: store.path, operation, sequence, planHash: plan.manifest.contentHash, phase: 'prepared', targets };
     await writeExclusive(join(staging, 'journal.json'), JSON.stringify(sign(journal, store.key)) + '\n');
@@ -263,7 +266,7 @@ async function targetRoots(paths: string[], create = false): Promise<string[]> {
 async function checkTargetArtifacts(path: string): Promise<void> {
   if (!sealedTarget) return;
   const names = await readdir(dirname(path));
-  check(!names.some((name) => name.startsWith('.codex-browser-patch') || name.startsWith('.publish-')), 'LEGACY_TARGET_ARTIFACTS', 'Target directory contains old or interrupted transaction artifacts; offline maintenance is required. No artifacts were removed.', path);
+  check(!names.some((name) => name.startsWith('.codex-unfence') || name.startsWith('.codex-browser-patch') || name.startsWith('.publish-')), 'LEGACY_TARGET_ARTIFACTS', 'Target directory contains old or interrupted transaction artifacts; offline maintenance is required. No artifacts were removed.', path);
 }
 
 async function pendingAtLease(root: string, path: string): Promise<RecordEntry | null> {
@@ -304,28 +307,37 @@ async function classify(item: PlanItem, entries: RecordEntry[]): Promise<Classif
 }
 
 /** The intent is already durable. Check actual bytes after failures, including rename-then-error. */
-async function replaceTarget(path: string, bytes: Buffer, expected: Snapshot): Promise<Snapshot> {
+async function replaceTarget(store: Store, entry: RecordEntry, target: JournalTarget, bytes: Buffer, expected: Snapshot): Promise<Snapshot> {
+  const path = target.path;
   check(same(await snapshot(path), expected), 'TARGET_CHANGED', 'Target changed immediately before replacement.', path);
   // CUA staging also stays outside sealed resources, including after SIGKILL.
   // rename across filesystems fails closed rather than falling back to a copy.
   const stagingDirectory = sealedTarget ? dirname(await externalTargetLock(path, true)) : dirname(path);
-  const temporary = join(stagingDirectory, `.codex-browser-patch-${randomUUID()}.tmp`);
+  const temporary = join(stagingDirectory, `.codex-unfence-${randomUUID()}.tmp`);
   try {
     await writeExclusive(temporary, bytes, expected.mode);
+    const staged = await snapshot(temporary);
+    const after = { ...staged, parentDevice: expected.parentDevice, parentInode: expected.parentInode };
+    check(parentMatches(after, expected) && after.sha256 === digest(bytes) && after.size === bytes.length, 'POSTVERIFY_FAILED', 'Staged replacement failed verification.', path);
+    // Authenticate both sides before rename: either inode may be current after a kill.
+    // Rollback publishes its own pair, so a second interruption has the same proof.
+    target.replacement = { before: expected, after };
+    await persist(store, entry);
+    check(same(await snapshot(temporary), staged), 'TARGET_CHANGED', 'Staged replacement changed before publication.', temporary);
     check(same(await snapshot(path), expected), 'TARGET_CHANGED', 'Target changed while staging replacement.', path);
     await rename(temporary, path);
     await syncDirectory(dirname(path));
     if (stagingDirectory !== dirname(path)) await syncDirectory(stagingDirectory);
     const current = await snapshot(path);
-    check(parentMatches(current, expected) && current.sha256 === digest(bytes) && current.size === bytes.length, 'POSTVERIFY_FAILED', 'Target failed post-write verification.', path);
+    check(same(current, after), 'POSTVERIFY_FAILED', 'Target failed post-write verification.', path);
     return current;
   } finally { await rm(temporary, { force: true }); }
 }
 
 async function recoverySnapshot(target: JournalTarget): Promise<Snapshot> {
   const current = await snapshot(target.path);
-  const before = target.before;
-  check(parentMatches(current, before) && ((current.sha256 === before.sha256 && current.size === before.size) || (current.sha256 === target.afterHash && current.size === target.afterSize)), 'RECOVERY_CONFLICT', 'Unknown current contents or target identity; recovery preserves the target and journal.', target.path);
+  const trusted = target.replacement ? [target.replacement.before, target.replacement.after] : [target.final ?? target.before];
+  check(trusted.some((state) => same(current, state)), 'RECOVERY_CONFLICT', 'Unknown current contents or target identity; recovery preserves the target and journal.', target.path);
   return current;
 }
 
@@ -348,10 +360,11 @@ async function rollback(store: Store, entry: RecordEntry): Promise<void> {
     // Revalidate immediately before each rollback, including after journal I/O.
     const bytes = await backupBytes(entry, index);
     let final = current;
-    if (current.sha256 !== before.sha256 || current.size !== before.size) final = await replaceTarget(target.path, bytes, current);
+    if (current.sha256 !== before.sha256 || current.size !== before.size) final = await replaceTarget(store, entry, target, bytes, current);
     check(final.sha256 === before.sha256 && final.size === before.size, 'ROLLBACK_FAILED', 'Rollback did not restore preoperation content.');
     check(same(await snapshot(target.path), final), 'TARGET_CHANGED', 'Target changed before rollback commit.', target.path);
     target.final = final;
+    target.replacement = null;
     await persist(store, entry);
   }
   for (const target of journal.targets) check(target.final && same(await snapshot(target.path), target.final), 'TARGET_CHANGED', 'Target changed before group rollback commit.', target.path);
@@ -432,9 +445,10 @@ async function changeTransaction(operation: Operation, options: Options): Promis
       const path = item.target.identity.path;
       const state = current[index]!;
       const noop = state.state === desiredState;
-      const final = noop ? state.snapshot : await replaceTarget(path, operation === 'apply' ? item.patched : item.original, state.snapshot);
+      const final = noop ? state.snapshot : await replaceTarget(store, entry, entry.journal.targets[index]!, operation === 'apply' ? item.patched : item.original, state.snapshot);
       check(same(await snapshot(path), final), 'POSTVERIFY_FAILED', 'Target changed before commit.', path);
       entry.journal.targets[index]!.final = final;
+      entry.journal.targets[index]!.replacement = null;
       if (writing) { entry.journal.phase = 'verifying'; await persist(store, entry); }
       targets.push({ path, state: desiredState, action: operation === 'apply' ? noop ? 'already-applied' : 'applied' : noop ? 'already-original' : 'restored' });
     }

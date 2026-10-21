@@ -2,7 +2,7 @@ import { lstat, readdir, realpath } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { Diagnostic } from './result.js';
-import { canonicalDirectory, check, regularBytes } from './transaction-storage.js';
+import { canonicalDirectory, check, regularBytes, TransactionError } from './transaction-storage.js';
 
 export const CUA_SERVICE = 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs';
 export interface Candidate {
@@ -20,7 +20,7 @@ export interface DiscoveryReport {
 
 function diagnostic(error: unknown, path: string): Diagnostic {
   const code = error instanceof Error && 'code' in error ? String(error.code) : 'INSTALLATION_UNAVAILABLE';
-  return { code, severity: 'error', message: error instanceof Error ? error.message : 'Cannot inspect installation.', path };
+  return { code, severity: 'error', outcome: error instanceof TransactionError ? error.kind : 'runtime-error', message: error instanceof Error ? error.message : 'Cannot inspect installation.', path };
 }
 async function versionAt(appPath: string): Promise<Pick<Candidate, 'version' | 'build'>> {
   let text: string;
