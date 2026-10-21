@@ -1,6 +1,6 @@
 # Spec: codex-unfence 三命令使用体验与项目改名
 
-2026-10-21 当前说明：GitHub 仓库已更名为 `pzehrel/codex-unfence`，npm 包仍未公共发布，没有旧发布版本兼容负担。下文旧工具使用者／原工具恢复的叙述及尚未改名的状态仅保留为原规格背景，不再是当前使用指引；旧开发脚本已移除，真实恢复资料与历史证据仍须保留。当前使用见 [README](../../README.md)。
+2026-10-21 当前说明：GitHub 仓库已更名为 `pzehrel/codex-unfence`，npm 包仍未公共发布，没有旧发布版本兼容负担。用户已明确废弃显式 review plan 结构路线，当前仅保留托管 install／check／uninstall、无 plan／store 的高级命令及默认引导。下文旧工具使用者、原工具恢复、旧结构门禁及高级入口去留的叙述仅保留为原规格背景，不再要求保留废案实现；旧开发脚本已移除，真实恢复资料与历史证据仍须保留。当前使用见 [README](../../README.md)。
 
 状态：测试边界已由用户确认；正式规格见 [codex-unfence 三命令使用体验与项目改名](https://github.com/pzehrel/codex-browser-liberation-patch/issues/27)，后续规格变更以该 issue 为准。需求来自本轮已确认的产品决策；已有工作区实现仅作为待验收候选，不反向决定需求。
 

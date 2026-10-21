@@ -7,7 +7,7 @@
 - 仓库使用固定版本 pnpm 和唯一 `pnpm-lock.yaml`；维护代码全部是 TypeScript，包括配置、脚本、测试和 preload。产品构建先清理 `dist/` 再编译，发布清单按该目录声明；测试与工具每次先清理 `.build/`，再严格编译到该镜像后由 Node 执行，同步 preload 使用 `.cts` 生成 `.cjs`。生成目录不作为源码提交，插件语法文本样本不经过编译。
 - 所有源码及已安装 CLI 测试通过 `tests/helpers/cli.ts` 启动。同步与异步共用隔离策略，支持显式外部 preload、IPC 暂停和已安装可执行文件。
 - 启动目录必须位于系统临时目录内。最终 cwd、HOME、XDG 目录及 PWD 固定到该 sandbox；环境只继承必要宿主变量，并在调用方覆盖之后清空 NODE_OPTIONS、NODE_PATH。环境覆盖只用于显式测试 fixture 输入。
-- 真实 CLI 默认发现回归验证调用方 HOME/cwd 覆盖不会改变发现位置。外部 fixture 同时验证同步、异步子进程的 cwd 与环境；不绑定生产内部 AST。
+- [托管 CLI 隔离回归](../../tests/cli.test.ts)通过 `check` 验证调用方 HOME/cwd 覆盖不会改变默认应用发现位置，并验证发现的 service 只作为文本读取。外部 fixture 同时验证同步、异步子进程的 cwd 与环境；不绑定生产内部 AST。废弃显式 plan 路线的专属测试不再作为当前隔离契约。
 - 子进程限制的文件范围与例外以 [ESLint 配置](../../eslint.config.ts) 和各 fixture 的精确行级豁免为准；夹具的必需 preload 组合与加载时序以 [组合规则](../../scripts/eslint-test-boundaries.ts) 为准。维护规则时同步核对 [公共 ESLint 接口回归](../../tests/guardrails.test.ts)，其中覆盖完整合法夹具、缺失或无效加载、受限属性访问及合法保存／包装／委托。这里不另存一份例外清单。
 - `pnpm run check --base <ref>` 依次运行显式基线的 `git diff --check`、pnpm/TypeScript 工程政策检查、typecheck、lint、test。typecheck 覆盖产品与全部工程代码；test 包含产品和工具构建，因此不再重复 build。任一步失败立即返回其状态。
 - `pnpm run check --base <ref> --whitespace-only` 只运行相同空白检查；`--help` 提供用法。缺失或不可解析基线返回 2。ref 经校验并解析为 tree ID，所有子命令使用参数数组，不使用 shell 拼接。
@@ -18,7 +18,7 @@
 
 空白检查遵循 `git diff <base>`：覆盖已提交、暂存及工作区的 tracked 差异，不检查尚未 git add 的新文件。lint 限制实用的直接访问路径，不尝试阻止任意字符串计算或恶意规则规避。GitHub Actions 矩阵需由 [现有 CI](../../.github/workflows/ci.yml) 实际执行；本地验证不代表已运行远端工作流。
 
-结构变体的有限覆盖表及独立预期维护在 [公开 deriveCua 回归](../../tests/cua-structure.test.ts)。规则与结构矩阵的任务契约、回退敏感性及各提交的实际检查范围分别见 [隔离任务](https://github.com/pzehrel/codex-browser-liberation-patch/issues/23) 和 [矩阵任务](https://github.com/pzehrel/codex-browser-liberation-patch/issues/24)。定向检查与最终统一门禁按下述协议分别记录。
+结构变体的有限覆盖表及独立预期维护在 [公开 deriveCua 回归](../../tests/cua-structure.test.ts)。当前事务与恢复行为由[托管操作回归](../../tests/managed-patches.test.ts)验证，公开参数和结果见[托管 CLI 回归](../../tests/managed-cli.test.ts)，离线消费者入口见 [npx 回归](../../tests/npx.test.ts)。规则与结构矩阵的任务契约、回退敏感性及各提交的实际检查范围分别见 [隔离任务](https://github.com/pzehrel/codex-browser-liberation-patch/issues/23) 和 [矩阵任务](https://github.com/pzehrel/codex-browser-liberation-patch/issues/24)。定向检查与最终统一门禁按下述协议分别记录。
 
 ## 协作协议
 

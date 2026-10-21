@@ -1,7 +1,7 @@
 {
   "name": "codex-unfence",
   "version": "0.2.0",
-  "description": "Structural review plans and recoverable transactions for Codex browser plugins on macOS",
+  "description": "Install, check and uninstall a recoverable Codex browser site-status patch on macOS",
   "author": {
     "name": "pzehrel",
     "url": "https://github.com/pzehrel"

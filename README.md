@@ -127,7 +127,7 @@ pnpm run check --base HEAD
 
 检查包括空白、全部 TypeScript 类型检查、lint、构建和测试；未跟踪新文件不进入空白差异检查。测试使用合成源码、临时文件系统和本地安装包，不需要真实 Codex 安装。
 
-完整 CLI 帮助还提供高级别名和显式方案入口：
+无子命令时进入交互引导；`apply`／`restore`／`status`／`recover` 保留为托管高级入口，使用同一账户恢复资料，不接受 `--plan`／`--store`。完整用法见 CLI 帮助：
 
 ```bash
 npx codex-unfence --help

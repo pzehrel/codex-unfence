@@ -78,12 +78,13 @@ test('check classifies a discovered path alias as conflict while retaining other
   assert.deepEqual(await readdir(join(box.directory, 'home')), ['Applications']);
 });
 
-test('managed status is read-only while explicit legacy selectors retain strict old parsing including equals forms', async (t: TestContext) => {
+test('managed status is read-only while abandoned commands and selectors are rejected including equals forms', async (t: TestContext) => {
   const box = await sandbox(t);
   const status = run(box, ['status', '--app', box.app]);
   assert.equal(status.code, 0, JSON.stringify(status));
   assert.equal(required(required(status.result.data).targets[0]).state, 'original');
   for (const args of [
+    ['detect'], ['prepare'], ['detect', '--app', box.app], ['prepare', '--app', box.app],
     ['apply', '--plan='], ['apply', '--store='], ['apply', '--plan', box.directory],
     ['apply', '--store', box.directory], ['restore', `--plan=${box.directory}`],
     ['recover', `--plan=${box.directory}`, `--store=${box.directory}`],
@@ -117,7 +118,7 @@ test('help documents managed commands and accepts command-specific help', async 
     assert.equal(child.status, 0, child.stdout + child.stderr);
     assert.match(child.stdout, /check \[--app/);
     assert.match(child.stdout, /interactive/);
-    assert.match(child.stdout, /--plan/);
+    assert.doesNotMatch(child.stdout, /--plan|--store|codex-unfence (?:detect|prepare)/);
   }
 });
 

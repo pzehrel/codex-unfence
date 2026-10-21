@@ -1,160 +1,86 @@
-# 浏览器补丁 CLI 重构设计
+# 浏览器补丁 CLI 设计
 
-状态：本文包含当前命令约定和 2026-10-16 原结构 CLI 的设计背景。2026-10-20 的[规格 #18](https://github.com/pzehrel/codex-browser-liberation-patch/issues/18)引入托管 CUA 结构方案与临时 npm 交互入口；当前普通使用流程见 [README](../../README.md)。固定配方等旧开发脚本已移除；工具尚未发布，没有旧发布版本兼容负担。历史调查与验收只证明当时的方案及样本。
+当前产品仅使用托管 CUA 请求／响应结构模式。2026-10-21，用户明确废弃另一套显式 review plan 结构方案；其命令、插件缓存发现与完整依赖证明不再作为产品入口或实现契约。原设计保留在[历史规格](cli-redesign-spec.md)，当前使用见 [README](../../README.md)。工具尚未公共发布，没有旧发布版本兼容负担；历史调查与验收只证明当时的工具及样本。
 
-## codex-unfence 命令约定
+## 命令与安装发现
 
-项目、npm 包和可执行文件统一命名为 `codex-unfence`。公开主入口为 `npx codex-unfence install`、`npx codex-unfence check` 和 `npx codex-unfence uninstall`；`apply`／`restore`／`status`／`recover` 保留为高级入口。
+项目、npm 包和可执行文件统一命名为 `codex-unfence`。普通入口为：
 
-- `check` 只读检查全部发现的安装，逐项报告结构支持、文件状态、写入条件和阻断原因；`--app` 可缩小为一个安装。JSON 的 `data.inspections` 为完整结果，单一安装时保留 `data.inspection`。混合结果按运行失败、冲突、不兼容、成功的顺序聚合退出码。
+```text
+codex-unfence install [--app <absolute-app-path>]
+codex-unfence check [--app <absolute-app-path>] [--json]
+codex-unfence uninstall [--app <absolute-app-path>]
+```
+
+默认发现 `/Applications` 与操作系统账户的 `~/Applications` 中的应用安装；`--app` 指定应用绝对路径。只检查相应应用内的 CUA service，不扫描插件 cache，不依据版本大小推断活跃安装。
+
+- `check` 只读检查全部发现的安装，逐项报告结构支持、文件状态、写入条件和阻断原因。JSON 的 `data.inspections` 为完整结果，单一安装时提供 `data.inspection`。混合结果按运行失败、冲突、不兼容、成功聚合退出码，分别为 `1`、`4`、`3`、`0`；参数错误为 `2`。
 - `install`／`uninstall` 在多个安装时交互选择，写前精确输入 `yes`。遇到未完成事务时，先单独确认回滚；成功后重新检查，再确认继续原请求。拒绝或恢复失败时停止，未知内容不能覆盖。
-- 重复安装／卸载保持幂等；受支持的原版文件无需先有备份才能报告已卸载。所有托管写入保留进程检查、来源校验、备份与事务门禁。
-- 恢复根目录为 `~/Library/Application Support/codex-unfence/`，协调目录为 `~/.codex-unfence/`。历史开发资料不作为当前工具的可信恢复记录；保留真实备份和维护证据，不自动迁移或删除。历史 GitHub issue 和验收记录保留原地址及身份。
-- GitHub 仓库已更名为 `pzehrel/codex-unfence`，保持私有。公共 npm 发布仍待外部交付；本地实现和测试不表示已发布。
+- 重复安装／卸载保持幂等；受支持的原版文件可直接报告未安装补丁。所有托管写入保留进程检查、来源校验、备份与事务门禁。相关进程仍运行或状态无法核实时拒绝写入，工具不结束或启动应用。
 
-## 当前开发与本地交付
+无子命令时进入默认交互 guide：选择安装、查看检查结果，再选择可用动作、重新检查或取消。保留的高级命令也使用同一托管流程及账户存储：
 
-Node.js >=22.13.0；无需真实安装即可测试。构建并生成带 bundled 运行依赖的本地产物：
+```text
+codex-unfence apply [--app <absolute-app-path>]
+codex-unfence restore [--app <absolute-app-path>]
+codex-unfence status [--app <absolute-app-path>] [--json]
+codex-unfence recover [--app <absolute-app-path>]
+```
+
+`apply`／`restore` 请求托管安装／卸载动作；`recover` 单独回滚未完成操作到开始前的状态，不继续原操作。`status` 只读查询一个安装，多安装时需用 `--app` 选择。默认 guide 和所有写入口要求真实 stdin/stdout 终端，拒绝 `--json` 自动写入；只有 `check`、`status` 支持 JSON。不再提供 `detect`、`prepare`、`--plan`／`--store` 或显式插件目标参数。
+
+## 恢复资料与文件状态
+
+原文、补丁副本、目标记录、工具版本、密钥及事务备份由托管层管理，位于 `~/Library/Application Support/codex-unfence/`；账户级协调历史位于 `~/.codex-unfence/target-leases/`。目录按操作系统账户身份确定，不受调用方 `HOME`／XDG 覆盖影响，独立于仓库和 npm cache。
+
+保留匹配工具版本和完整本机恢复资料。历史开发方案、备份与维护证据仍须保留，但不作为当前产品自动接管的可信记录；删除废案代码不授权删除这些资料。不要移动存储或手工删除记录、密钥与锁，也不要用旧备份覆盖升级后的未知文件。历史 GitHub issue 和验收记录保留当时地址及身份。
+
+`support`、`state`、`writeReadiness`、`allowedActions` 与 `runtime` 分别表示结构支持、磁盘状态、写入条件、可用动作和运行验证。未完成操作可以允许 `recover`，不能仅凭 blocked 状态推断恢复永不可用。回滚后取消后续动作时，报告必须承认已发生的恢复。目标旁旧事务残留和未知内容保留现场并报告，不提供跳过保护的入口。
+
+补丁会使应用严格资源签名校验失败，工具不重新签名或关闭系统验证。恢复目标原文也不自动证明整个应用签名、宿主加载或网站访问成功。
+
+## 结构模式与假设
+
+当前模式只接受有限的专用站点状态链：请求来源与运输调用、同一响应的 `ok` 与无参 await `json()`、原 body 到 agent 严格 true 判定，再到原缓存／inflight 和对应阻断消费链。相关绑定、接收者与可见写入必须满足模式；未知相关语义、多个候选和额外消费会拒绝。不按变量名、桌面版本或历史整文件哈希准入。
+
+对于包含 ZXing 的关联形态，仅识别同一 local factory 的有限资源加载与解码接口：configure／decoder wrapper 绑定、明确 `./zxing_reader.wasm` 及既有 `node_modules/zxing-wasm/dist/reader/zxing_reader.wasm` fallback、读取字节经 `Uint8Array` 拷贝到 `overrides.wasmBinary`、factory 内两方法 handle table、global-selector arrow 唯一作为 imports slot，并将 imports 关联到同一 factory 的 instantiate／instantiateStreaming（直接或有限 builder）。decoder 等待同一 prepare(factory,...)，再使用同一 module 的 `_malloc`、`HEAPU8`、`readBarcodesFromPixmap` 或 `readBarcodesFromImage`、`_free`。此处 prepare 是被分析源码中的调用，不是 CLI 命令；这不是对任意 ZXing 桥的普遍准入。
+
+标准 URL／Map／Date／Object／Reflect／Error／JSON、runtime.fetch 和 response.json 按宿主契约行为；有限终端 formatter、bypass、display、origin、log 和 Error 构造保留原调用与返回用途，但展示和遥测行为不递归审计。文件内可见相关修改仍拒绝。特定资源与桥的核心前提按公开派生结果原文为：
+
+> Only the linked finite ZXing reader resource and host bridge are assumed not to mutate the site-status chain, its configuration or standard capabilities throughout their lifetime; this noninterference is not proved. Resource bytes are not read or executed.
+
+即只对已关联的有限资源与桥假设生命周期非干扰；没有证明完整依赖生命周期，也不读取或执行 Wasm。人类检查和写前确认都会显示依据与假设。ADR 0002–0004 的旧完整证明义务不再作为当前实现契约。
+
+## 验证性能与交付
+
+CUA 候选定位一次扫描 awaited member fetch，再沿父节点保留所有相关异步声明，避免为每个无关函数重扫整个 AST。每次公开托管操作只复用该操作内相同源码的纯结构分析结果；操作之间不共享缓存，返回值独立。目标文件、准备材料、权限、来源签名和事务备份仍按原有边界重新读取并验证。重复安装／卸载保留确认与事务保护，不替换已处于目标状态的文件。
+
+Node.js >=22.13.0；开发与打包使用固定版本 pnpm：
 
 ```bash
 pnpm install --frozen-lockfile --ignore-scripts
 ```
 
 ```bash
-pnpm run build
+pnpm pack
 ```
 
-```bash
-pnpm pack --config.ignore-scripts=true
-```
-
-以 `pnpm pack` 实际返回的文件名为准。当前版本 `0.2.0` 未公共发布；运行已构建本地包：
+打包会构建产品。以实际返回的文件名运行本地包；当前 `0.2.0` 未公共发布：
 
 ```bash
 npx --offline --package /absolute/path/codex-unfence-0.2.0.tgz codex-unfence --help
 ```
 
-托管入口按准确安装路径检查、选择和明确确认。准备副本、目标记录、工具版本及可信 store 由 managed 层管理，位于账户主目录的 `Library/Application Support/codex-unfence/`，独立于临时代码和 npm cache。check 完全只读；`support`、`state`、`writeReadiness`、`allowedActions` 与 `runtime` 各有含义。incomplete 时可以只允许 recover，不能用全局 blocked 状态推断 recover 永不可用。托管写命令拒绝非 TTY、EOF 自动确认和 `--json` 自动化写入；显式方案入口另有参数契约。
-
-### 结构模式与假设
-
-当前新方案只接受有限的专用站点状态模式：请求来源与运输调用、同一响应的 `ok` 与无参 await `json()`、原 body 到 agent 严格 true 判定，再到原缓存／inflight 和对应阻断消费链。相关绑定、接收者与可见写入必须满足模式；未知相关语义、多个候选和额外消费会拒绝。不按变量名、桌面版本或历史整文件哈希准入。
-
-对于包含 ZXing 的关联形态，仅识别同一 local factory 的有限资源加载与解码接口：configure／decoder wrapper 绑定、明确 `./zxing_reader.wasm` 及既有 `node_modules/zxing-wasm/dist/reader/zxing_reader.wasm` fallback、读取字节经 `Uint8Array` 拷贝到 `overrides.wasmBinary`、factory 内两方法 handle table、global-selector arrow 唯一作为 imports slot，并将 imports 关联到同一 factory 的 instantiate／instantiateStreaming（直接或有限 builder）。decoder 等待同一 prepare(factory,...)，再使用同一 module 的 `_malloc`、`HEAPU8`、`readBarcodesFromPixmap` 或 `readBarcodesFromImage`、`_free`。这不是对任意 ZXing 桥的普遍准入。
-
-标准 URL／Map／Date／Object／Reflect／Error／JSON、runtime.fetch 和 response.json 按宿主契约行为；有限终端 formatter、bypass、display、origin、log 和 Error 构造保留原调用与返回用途，但展示和遥测行为不递归审计。文件内可见相关修改仍拒绝。特定资源与桥的核心前提按公开派生结果原文为：
-
-> Only the linked finite ZXing reader resource and host bridge are assumed not to mutate the site-status chain, its configuration or standard capabilities throughout their lifetime; this noninterference is not proved. Resource bytes are not read or executed.
-
-即只对已关联的有限资源与桥假设生命周期非干扰；没有证明完整依赖生命周期，也不读取或执行 Wasm。人类 check 和写前确认都会显示依据与假设。
-
-结构任务在 `9756b61` 上通过 30 个纯行为测试，并仅以数据读取和解析既存历史私有副本：1,938,669 bytes，SHA-256 `44594ea0a8238c09dfb46e28acdd610e5053a05011047e1c78fb98f210195a4e`，结果为 supported、7 项 evidence，动态 UTF-16 半开范围 `[1084567,1084585)`。该结果由结构任务报告，不代表重新读取当前安装；不执行真实插件或资源，不验证当前安装、签名、宿主加载和网站行为，runtime 仍为 not-verified。哈希与区间仅记录该次样本事实，不成为准入常量。
-
-### 高级显式方案入口
-
-以下命令使用结构分析、review plan 和显式 store，不会自动转为 CUA 托管方案。所有文件选择用绝对路径，完整说明见 `--help`。
-
-```text
-codex-unfence detect [--plugin-root DIRECTORY] [--json]
-codex-unfence prepare [--plugin-root DIRECTORY] --target ABSOLUTE_ARTIFACT --output NEW_PLAN [--json]
-codex-unfence prepare [--plugin-root DIRECTORY] --all-compatible --output NEW_PLAN [--json]
-codex-unfence apply --plan ABSOLUTE_PLAN --store ABSOLUTE_STORE [--json]
-codex-unfence restore --plan ABSOLUTE_PLAN --store ABSOLUTE_STORE [--json]
-codex-unfence status --plan ABSOLUTE_PLAN --store ABSOLUTE_STORE [--json]
-codex-unfence status --target ABSOLUTE_ARTIFACT --store ABSOLUTE_STORE [--json]
-codex-unfence recover --store ABSOLUTE_STORE [--json]
-```
-
-`--target` 可重复。`--plan`／`--store` 包括等号形式均触发显式方案解析，缺项、空值、重复和与托管参数混搭会拒绝，不回退自动管理。固定 CUA 配方及其准备／操作脚本已移除；[准备切片](cua-request-wrapper-slice.md)和[应用恢复切片](cua-wrapper-application-slice.md)仅保存开发方案记录。
-
-### 验证性能与重复操作
-
-CUA 候选定位一次扫描 awaited member fetch，再沿父节点保留所有相关异步声明，避免为每个无关函数重扫整个 AST。每次公开托管操作只复用该操作内相同源码的纯结构分析结果；操作之间不共享缓存，返回值独立。目标文件、准备材料、权限、来源签名和事务备份仍按原有边界重新读取并验证。重复安装／卸载保留确认与事务保护，不替换已处于目标状态的文件。
-
-### 验证边界
+统一检查使用明确基线：
 
 ```bash
 pnpm run check --base <implementation-base>
 ```
 
-```bash
-pnpm run test:package
-```
+默认测试包含真实离线 npx 本地 tarball、独立 config/cache、外部最终 bin 系统夹具及合成 `.app`。macOS/Linux PTY 由 TypeScript helper 驱动系统 script 命令；Linux 通过夹具模拟 macOS 产品边界，核心场景不因无产品安装而 skip。测试不执行真实插件、不发业务请求。发布清单按 `dist/` 目录声明，构建先清理旧产物；测试、preload、源码与真实材料不进入包。工程隔离和当前测试入口见[协作协议](retro-guardrails.md)。
 
-默认测试包含真实离线 npx 本地 tarball、独立 config/cache、外部最终 bin 系统夹具及合成 `.app`。macOS/Linux PTY 由 TypeScript helper 驱动系统 script 命令；Linux 通过夹具模拟 macOS 产品边界，核心场景不因无产品安装而 skip。测试不执行真实插件、不发业务请求。发布清单按 `dist/` 目录声明，产品构建先清理旧产物，并保留发布边界和安装产物回归；preload、测试、源码、真实材料不进入包。测试通过不表示当前真实 bundle 已支持或运行生效。
+## 历史证据边界
 
-以下原设计保留其当时的范围和术语。
+结构任务在 `9756b61` 上通过 30 个纯行为测试，并仅以数据读取和解析既存历史私有副本：1,938,669 bytes，SHA-256 `44594ea0a8238c09dfb46e28acdd610e5053a05011047e1c78fb98f210195a4e`，结果为 supported、7 项 evidence，动态 UTF-16 半开范围 `[1084567,1084585)`。该结果由结构任务报告，不代表重新读取当前安装；不执行真实插件或资源，不验证当前安装、签名、宿主加载和网站行为，runtime 仍为 not-verified。哈希与区间仅记录该次样本事实，不成为准入常量。
 
-## 已确认的产品边界
-
-2026-10-16，用户接受 Q1–Q4：
-
-- 首版为可分发的命令行工具，提供检测、预览、应用、状态和恢复，不加入任务面板或通用扩展系统。
-- 正式工具采用 Node.js + TypeScript，建立依赖锁定、构建、类型检查、测试和 CI；当时允许保留 Python 分析脚本，现已移除旧开发脚本。
-- 兼容性依据明确的结构条件，不依据固定版本或整文件已知哈希。哈希用于文件身份、外部修改检测及恢复校验。目标缺失或候选不唯一时停止并输出诊断。
-- 首版只承诺 macOS；安装位置发现与补丁核心分离，为其他平台留出适配位置。
-
-## 已确认的补丁与恢复策略
-
-用户接受 Q5–Q8：
-
-- 使用 AST 及作用域绑定关系定位站点状态消费链；通过字段语义、请求来源和消费关系识别目标，不依赖压缩函数名或局部变量名。
-- 只替换目标表达式的源码区间，不重新打印整个 bundle。容忍变量改名、引号及空白变化；结构模式不满足或候选有歧义时停止。
-- 补丁范围为浏览器工具的站点状态限制，处理发现的 browser/chrome 插件；首版不修改 Electron 主进程中的侧栏评论模式。
-- 检测逐一展示发现的插件版本、路径及兼容状态。应用命令明确指定目标或明确选择全部兼容目标，不推断目录名最大的版本就是正在使用的版本。
-- 文件补丁状态与运行时已加载状态分别报告；仅凭文件修改成功不能宣布运行时生效。
-- 使用操作锁、持久事务记录和逐文件校验。强制终止后，下次运行识别未完成操作并提供恢复。
-- 恢复发现升级或用户外部修改时保留现场、报告冲突，避免覆盖未知内容。
-
-## 已确认的运行与交付边界
-
-用户接受 Q9–Q11：
-
-- 应用或恢复补丁前，要求相关 Codex 浏览器工具进程已停止；工具不自动终止进程。检测到相关进程仍运行时，停止写入并列出信息；无法确认时报告检测局限，不声明运行时已生效。
-- 使用标准 npm CLI 包组织项目，首版交付本地构建、安装及 npm pack 产物；公共 npm 发布另行确认。
-- 自动化测试使用可随仓库分发的精简样例，不依赖真实 Codex 安装。CI 在未安装 Codex 的环境通过。
-- 测试覆盖局部变量改名、格式变化、不支持结构、多候选、重复操作、外部修改及事务中断恢复。真实安装样本属于额外兼容性检查。
-- “自动化验证通过”“真实插件文件兼容”“真实 Codex 加载并执行成功”分别记录。真实运行时加载和网站操作未测试时明确标记。
-
-## 工程落实方案
-
-以下是已确认边界的具体落实方式；作为整份设计一并确认。
-
-### 组件边界
-
-- 安装发现：枚举允许的 macOS 插件根目录下 browser/chrome 工件，返回实际路径、插件种类和版本元数据；版本号不作为准入条件。
-- 补丁分析：输入源码，返回兼容性状态、唯一目标、证据、原始/补丁后内容及摘要；不执行被分析的 JavaScript，也不依赖文件系统或当前安装。
-- 事务管理：管理操作锁、备份、清单、日志、逐文件替换及冲突恢复；只操作已明确选择且校验通过的目标。
-- 命令入口：解析参数、目标选择和人类可读/JSON 输出，将操作交给组件。参数错误、不兼容、冲突和运行失败使用可区分的非零退出码。
-
-### 命令与状态
-
-- detect：只读枚举并诊断所有发现的工件；允许显式提供插件根目录。
-- prepare：明确选择目标或全部兼容目标；生成包含证据、前后哈希、局部差异及备份的可审阅方案，不修改插件。
-- apply：引用已生成的方案，先验证所有目标和备份、检查进程及未完成事务，再执行写入。prepare 后出现外部修改即拒绝该方案。
-- status：区分未修改、已应用本工具补丁、不兼容、冲突及未完成事务。没有本工具记录时不把未知修改认定为本工具补丁。
-- restore：按本工具已校验的备份恢复；发现外部修改则保留现场并报告冲突。
-- recover：显式处理未完成事务；首版将工具已完成的修改回滚至操作前状态，不自动继续应用。所有写操作在未完成事务被处理前停止。
-- JSON 输出提供稳定的结构化诊断；文件状态和运行时状态分开，不把结构兼容或文件哈希验证当作运行时验证。
-
-### 兼容性与变换约束
-
-- 首版支持明确且有限的 AST 结构模式，验证站点状态来源、响应对象、agent 禁止判定及消费链的绑定关系。
-- 无法证明绑定、候选多于一个、相关控制流已超出模式或解析失败时，返回不兼容及诊断。
-- 使用目标表达式的源码范围局部替换，保留请求、原始响应及其他字段；对输出进行语法解析验证。
-- 不扩大到其他站点策略、用户授权、企业规则或 Electron 主进程。通过站点状态检查后仍可能触发原有下游检查。
-- 不以检测失败为理由退回宽松的字符串替换。未来新增结构模式需要相应正反样例和审阅。
-
-### 测试与交付验收
-
-- 自带样例覆盖格式、压缩命名、作用域遮蔽、无关相似代码、多个候选、语义变化和已补丁状态。
-- 临时文件系统测试覆盖整套准备、应用、状态、恢复、外部修改、并发锁，以及写入与进程中断的恢复路径。
-- CLI 测试覆盖 JSON、退出码、目标选择和拒绝行为；打包检查覆盖 npm pack 产物的本地安装及命令执行。
-- CI 运行类型检查、静态检查、测试和构建；发布包排除研究证据、真实应用 bundle、备份及本机方案。
-- 真实样本静态验证可执行；修改实际安装、退出用户进程、公共发布及 Git 提交/推送分别需要相应授权。
-
-## 关联资料
-
-- [结构兼容性决策](../adr/0001-structural-compatibility.md)
-- [领域术语](../../GLOSSARY.md)
-- [当前实现与使用说明](../../README.md)
+后续真实往返、签名核验、用户反馈及未验证项见[真实验收记录](cua-wrapper-runtime-acceptance.md)。固定配方的[准备切片](cua-request-wrapper-slice.md)与[应用恢复切片](cua-wrapper-application-slice.md)只保存历史开发记录；测试通过、磁盘修改和用户反馈各自保留证据范围，不追溯扩大为本轮或任意版本验收。
