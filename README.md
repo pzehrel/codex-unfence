@@ -91,22 +91,20 @@ npx codex-unfence uninstall
 
 这些资料独立于仓库、调用目录和 npm 缓存，不受 `HOME`／XDG 环境变量覆盖影响。请保留匹配版本的工具及完整恢复资料，不要移动存储或手工删除记录、密钥与锁。
 
-本项目不读取或迁移旧名 `codex-browser-liberation-patch` 的恢复记录。旧补丁请先用原工具恢复，再使用 `codex-unfence`。
-
 恢复目标文件不会自动验证整个应用签名或网站访问。
 
 ## 本地运行
 
-发布前，从当前仓库生成 `.tgz`。在仓库目录安装依赖：
+仓库统一使用 `package.json` 中固定版本的 pnpm 管理依赖、构建和打包。发布前，从当前仓库生成 `.tgz`。在仓库目录安装依赖：
 
 ```bash
-npm ci --ignore-scripts
+pnpm install --frozen-lockfile --ignore-scripts
 ```
 
 打包会自动构建：
 
 ```bash
-npm pack
+pnpm pack
 ```
 
 用产物的绝对路径替代 registry 包即可；后续把 `install` 换成 `check` 或 `uninstall`：
@@ -122,10 +120,12 @@ npx --offline --package "$PWD/codex-unfence-0.2.0.tgz" codex-unfence install
 使用明确的比较基线运行统一检查：
 
 ```bash
-npm run check -- --base HEAD
+pnpm run check --base HEAD
 ```
 
-检查包括空白、类型、lint、构建和测试；未跟踪新文件不进入空白差异检查。测试使用合成源码、临时文件系统和本地安装包，不需要真实 Codex 安装。
+维护代码全部使用 TypeScript，包括测试、预加载夹具、工程脚本和 ESLint 配置。`dist/` 是公开 CLI 的编译产物；`.build/` 是测试与工具的独立编译产物，两者均不作为源码提交。插件 JavaScript 语法样本是文本数据，不经 TypeScript 编译。开发使用 pnpm；npm／npx 保留为用户获取工具与分发兼容性验收入口。
+
+检查包括空白、全部 TypeScript 类型检查、lint、构建和测试；未跟踪新文件不进入空白差异检查。测试使用合成源码、临时文件系统和本地安装包，不需要真实 Codex 安装。
 
 完整 CLI 帮助还提供高级别名和显式方案入口：
 
@@ -135,4 +135,3 @@ npx codex-unfence --help
 
 - [CLI 设计与结构模式](docs/design/cli-redesign.md)
 - [测试隔离与协作协议](docs/design/retro-guardrails.md)
-- [历史固定安装的运行与恢复记录](docs/design/cua-wrapper-runtime-acceptance.md)

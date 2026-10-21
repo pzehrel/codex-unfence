@@ -1,10 +1,10 @@
 # CUA 包装器真实验收
 
-本文的真实证据仅对应下述固定安装与当时工具。2026-10-20 的新结构准入和 npm 交互入口另以合成安装验收，不能据此宣称当前真实 bundle 已被新分析器接受或运行生效。当前使用见 [README](../../README.md)。
+状态：已移除的开发方案验收记录。固定配方工具已删除，本文保留的真实证据仅对应下述固定安装与当时工具。当前结构准入和 npm 交互入口的合成验收另行记录，不能据此宣称当前真实 bundle 已被当前分析器接受或运行生效。当前使用见 [README](../../README.md)。
 
-状态：2026-10-20，固定版本的真实应用、用户试用、原文字节恢复及严格签名恢复已验证。包外协调协议另完成一次真实 apply／restore 往返，无需手工清理应用内文件。活跃模块路径、目标响应字段改写、具体站点访问和其他权限场景仍未独立验证。
+2026-10-20 验收结果：固定版本的真实应用、用户试用、原文字节恢复及严格签名恢复已验证。包外协调协议另完成一次真实 apply／restore 往返，无需手工清理应用内文件。活跃模块路径、目标响应字段改写、具体站点访问和其他权限场景仍未独立验证。
 
-实现契约见 [准备副本](cua-request-wrapper-slice.md)、[应用与恢复](cua-wrapper-application-slice.md)及[恢复收尾](cua-wrapper-restore-completion.md)。本文记录可复用的验收流程、结果和证据边界；此前维护授权不自动授权新的安装操作。
+实现契约见 [准备副本](cua-request-wrapper-slice.md)、[应用与恢复](cua-wrapper-application-slice.md)及[恢复收尾](cua-wrapper-restore-completion.md)。本文记录当时的验收流程、结果和证据边界；此前维护授权不自动授权新的安装操作。
 
 ## 固定目标与签名影响
 
@@ -35,39 +35,19 @@
 5. **核对其他权限。** 仅在现成且获准的拒绝场景核对原行为，没有场景则标记未验证。
 6. **恢复并独立核对。** 检查原文字节、目标目录布局、可信 restored 状态、未完成事务及严格签名，再确认宿主可用。未知内容或更新导致冲突时保留现场，不强写覆盖。
 
-## 命令
+## 历史工具状态语义
 
-以下绝对路径均需替换为审阅后的路径。在仓库根目录构建；工具不提供自动重启命令。apply、status、restore 需要原准备目录；recover 使用存储内保存并重新验证的方案。
+固定配方的准备与操作脚本已移除，其命令不再可执行。当前安装、检查、卸载及中断处理见 [README](../../README.md)。历史准备目录、存储及真实备份仍应保留；它们不是当前产品的自动接管入口。
 
-```bash
-npm run build
-```
+当时 status 的 `state: original` 表示当前字节为原始内容；只有可信、实际完成的恢复历史才另有 `action: restored`。首次未应用或空操作 restore 不产生该标记。`state: tool-applied` 表示当时工具的可信应用状态，外部身份变化返回冲突。
 
-```bash
-node scripts/cua-wrapper-operations.mjs status --preparation /absolute/private-preparation --target /absolute/browser-service.mjs --store /absolute/private-operation-store
-```
-
-```bash
-node scripts/cua-wrapper-operations.mjs apply --preparation /absolute/private-preparation --target /absolute/browser-service.mjs --store /absolute/private-operation-store
-```
-
-```bash
-node scripts/cua-wrapper-operations.mjs restore --preparation /absolute/private-preparation --target /absolute/browser-service.mjs --store /absolute/private-operation-store
-```
-
-status 的 `state: original` 表示当前字节为原始内容；只有可信、实际完成的恢复历史才另有 `action: restored`。首次未应用或空操作 restore 不产生该标记。`state: tool-applied` 表示本工具可信应用状态，外部身份变化返回冲突。
-
-recover 回到未完成操作开始前的状态，与普通 restore 返回原文不同。只有状态报告存在未完成事务时，按提示使用所属存储：
-
-```bash
-node scripts/cua-wrapper-operations.mjs recover --store /absolute/private-operation-store
-```
+当时 recover 回到未完成操作开始前的状态，与普通 restore 返回原文不同；恢复依赖所属存储内保存并重新验证的方案。
 
 ## 已验证结果
 
 2026-10-20 首次真实应用核对了固定补丁摘要、原始备份及 committed journal，status 为 tool-applied、groupState=complete、无未完成事务。用户反馈 Codex 可工作且效果良好。随后恢复原始字节，用户重新使用后确认默认安全策略重新生效，符合预期。没有捕获原始站点状态响应或直接观察字段改写。
 
-首次恢复曾因旧协议在应用内留下四个已释放租约文件，使原文恢复后严格签名仍失败。经独立离线核验并定向清理后签名通过；该一次性维护不是生产接口。当前协议已将 CUA 协调历史及暂存移出应用包，遇到旧残留返回 `LEGACY_TARGET_ARTIFACTS`，不自动删除。
+首次恢复曾因旧协议在应用内留下四个已释放租约文件，使原文恢复后严格签名仍失败。经独立离线核验并定向清理后签名通过；该一次性维护不是生产接口。随后修订的协议将 CUA 协调历史及暂存移出应用包，遇到旧残留返回 `LEGACY_TARGET_ARTIFACTS`，不自动删除。
 
 包外协议在提交 `1ee78d0` 上于 2026-10-20 再次进行真实往返：
 

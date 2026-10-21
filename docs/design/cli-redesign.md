@@ -1,6 +1,6 @@
 # 浏览器补丁 CLI 重构设计
 
-状态：下面保留 2026-10-16 原结构 CLI 的设计背景。2026-10-20 的[规格 #18](https://github.com/pzehrel/codex-browser-liberation-patch/issues/18)新增托管 CUA 结构方案与临时 npm 交互入口；当前普通使用流程见[README](../../README.md)。新旧方案身份与来源验证分开，历史固定配方不因新入口放宽。
+状态：本文包含当前命令约定和 2026-10-16 原结构 CLI 的设计背景。2026-10-20 的[规格 #18](https://github.com/pzehrel/codex-browser-liberation-patch/issues/18)引入托管 CUA 结构方案与临时 npm 交互入口；当前普通使用流程见 [README](../../README.md)。固定配方等旧开发脚本已移除；工具尚未发布，没有旧发布版本兼容负担。历史调查与验收只证明当时的方案及样本。
 
 ## codex-unfence 命令约定
 
@@ -9,32 +9,32 @@
 - `check` 只读检查全部发现的安装，逐项报告结构支持、文件状态、写入条件和阻断原因；`--app` 可缩小为一个安装。JSON 的 `data.inspections` 为完整结果，单一安装时保留 `data.inspection`。混合结果按运行失败、冲突、不兼容、成功的顺序聚合退出码。
 - `install`／`uninstall` 在多个安装时交互选择，写前精确输入 `yes`。遇到未完成事务时，先单独确认回滚；成功后重新检查，再确认继续原请求。拒绝或恢复失败时停止，未知内容不能覆盖。
 - 重复安装／卸载保持幂等；受支持的原版文件无需先有备份才能报告已卸载。所有托管写入保留进程检查、来源校验、备份与事务门禁。
-- 新恢复根目录为 `~/Library/Application Support/codex-unfence/`，协调目录为 `~/.codex-unfence/`。不发现、不读取或迁移旧产品名的恢复记录；旧补丁由原工具处理。历史 GitHub issue 和验收记录保留原地址及身份。
-- 公共 npm 发布及 GitHub 仓库改名属于后续外部交付；本地实现和测试不表示二者已执行。
+- 恢复根目录为 `~/Library/Application Support/codex-unfence/`，协调目录为 `~/.codex-unfence/`。历史开发资料不作为当前工具的可信恢复记录；保留真实备份和维护证据，不自动迁移或删除。历史 GitHub issue 和验收记录保留原地址及身份。
+- GitHub 仓库已更名为 `pzehrel/codex-unfence`，保持私有。公共 npm 发布仍待外部交付；本地实现和测试不表示已发布。
 
 ## 当前开发与本地交付
 
 Node.js >=22.13.0；无需真实安装即可测试。构建并生成带 bundled 运行依赖的本地产物：
 
 ```bash
-npm ci --ignore-scripts
+pnpm install --frozen-lockfile --ignore-scripts
 ```
 
 ```bash
-npm run build
+pnpm run build
 ```
 
 ```bash
-npm pack --ignore-scripts
+pnpm pack --config.ignore-scripts=true
 ```
 
-以 `npm pack` 实际返回的文件名为准。当前版本 `0.2.0` 未公共发布；运行已构建本地包：
+以 `pnpm pack` 实际返回的文件名为准。当前版本 `0.2.0` 未公共发布；运行已构建本地包：
 
 ```bash
 npx --offline --package /absolute/path/codex-unfence-0.2.0.tgz codex-unfence --help
 ```
 
-新入口按准确安装路径检查、选择和明确确认。准备副本、目标记录、工具版本及可信 store 由 managed 层管理，位于账户主目录的 `Library/Application Support/codex-unfence/`，独立于临时代码和 npm cache。check 完全只读；`support`、`state`、`writeReadiness`、`allowedActions` 与 `runtime` 各有含义。incomplete 时可以只允许 recover，不能用全局 blocked 状态推断 recover 永不可用。新写命令拒绝非 TTY、EOF 自动确认和 `--json` 自动化写入；旧显式语法保留原契约。
+托管入口按准确安装路径检查、选择和明确确认。准备副本、目标记录、工具版本及可信 store 由 managed 层管理，位于账户主目录的 `Library/Application Support/codex-unfence/`，独立于临时代码和 npm cache。check 完全只读；`support`、`state`、`writeReadiness`、`allowedActions` 与 `runtime` 各有含义。incomplete 时可以只允许 recover，不能用全局 blocked 状态推断 recover 永不可用。托管写命令拒绝非 TTY、EOF 自动确认和 `--json` 自动化写入；显式方案入口另有参数契约。
 
 ### 结构模式与假设
 
@@ -50,9 +50,9 @@ npx --offline --package /absolute/path/codex-unfence-0.2.0.tgz codex-unfence --h
 
 结构任务在 `9756b61` 上通过 30 个纯行为测试，并仅以数据读取和解析既存历史私有副本：1,938,669 bytes，SHA-256 `44594ea0a8238c09dfb46e28acdd610e5053a05011047e1c78fb98f210195a4e`，结果为 supported、7 项 evidence，动态 UTF-16 半开范围 `[1084567,1084585)`。该结果由结构任务报告，不代表重新读取当前安装；不执行真实插件或资源，不验证当前安装、签名、宿主加载和网站行为，runtime 仍为 not-verified。哈希与区间仅记录该次样本事实，不成为准入常量。
 
-### 高级旧入口
+### 高级显式方案入口
 
-以下命令继续使用原结构分析、review plan 和显式 store，不会自动转为 CUA 托管方案。所有文件选择用绝对路径，完整说明见 `--help`。
+以下命令使用结构分析、review plan 和显式 store，不会自动转为 CUA 托管方案。所有文件选择用绝对路径，完整说明见 `--help`。
 
 ```text
 codex-unfence detect [--plugin-root DIRECTORY] [--json]
@@ -65,19 +65,19 @@ codex-unfence status --target ABSOLUTE_ARTIFACT --store ABSOLUTE_STORE [--json]
 codex-unfence recover --store ABSOLUTE_STORE [--json]
 ```
 
-`--target` 可重复。`--plan`／`--store` 包括等号形式均触发严格旧解析，缺项、空值、重复和与新参数混搭会拒绝，不回退自动管理。旧固定 CUA 仓库脚本仍使用其原准备与存储入口，见[准备切片](cua-request-wrapper-slice.md)和[应用恢复切片](cua-wrapper-application-slice.md)。未知旧记录不自动迁移或接管。
+`--target` 可重复。`--plan`／`--store` 包括等号形式均触发显式方案解析，缺项、空值、重复和与托管参数混搭会拒绝，不回退自动管理。固定 CUA 配方及其准备／操作脚本已移除；[准备切片](cua-request-wrapper-slice.md)和[应用恢复切片](cua-wrapper-application-slice.md)仅保存开发方案记录。
 
 ### 验证边界
 
 ```bash
-npm run check -- --base <implementation-base>
+pnpm run check --base <implementation-base>
 ```
 
 ```bash
-npm run test:package
+pnpm run test:package
 ```
 
-默认测试包含真实离线 npx 本地 tarball、独立 config/cache、外部最终 bin 系统夹具及合成 `.app`。macOS PTY 使用系统 expect，Linux 使用 util-linux script；Linux 通过夹具模拟 macOS 产品边界，核心场景不因无产品安装而 skip。测试不执行真实插件、不发业务请求。包文件逐项白名单并保留安装产物回归；preload、测试、源码、真实材料不进入包。测试通过不表示当前真实 bundle 已支持或运行生效。
+默认测试包含真实离线 npx 本地 tarball、独立 config/cache、外部最终 bin 系统夹具及合成 `.app`。macOS/Linux PTY 由 TypeScript helper 驱动系统 script 命令；Linux 通过夹具模拟 macOS 产品边界，核心场景不因无产品安装而 skip。测试不执行真实插件、不发业务请求。发布清单按 `dist/` 目录声明，产品构建先清理旧产物，并保留发布边界和安装产物回归；preload、测试、源码、真实材料不进入包。测试通过不表示当前真实 bundle 已支持或运行生效。
 
 以下原设计保留其当时的范围和术语。
 
@@ -86,7 +86,7 @@ npm run test:package
 2026-10-16，用户接受 Q1–Q4：
 
 - 首版为可分发的命令行工具，提供检测、预览、应用、状态和恢复，不加入任务面板或通用扩展系统。
-- 正式工具采用 Node.js + TypeScript，建立依赖锁定、构建、类型检查、测试和 CI；Python 分析脚本可保留为研究资料。
+- 正式工具采用 Node.js + TypeScript，建立依赖锁定、构建、类型检查、测试和 CI；当时允许保留 Python 分析脚本，现已移除旧开发脚本。
 - 兼容性依据明确的结构条件，不依据固定版本或整文件已知哈希。哈希用于文件身份、外部修改检测及恢复校验。目标缺失或候选不唯一时停止并输出诊断。
 - 首版只承诺 macOS；安装位置发现与补丁核心分离，为其他平台留出适配位置。
 

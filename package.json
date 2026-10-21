@@ -2,7 +2,20 @@
   "name": "codex-unfence",
   "version": "0.2.0",
   "description": "Structural review plans and recoverable transactions for Codex browser plugins on macOS",
+  "author": {
+    "name": "pzehrel",
+    "url": "https://github.com/pzehrel"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pzehrel/codex-unfence.git"
+  },
+  "homepage": "https://github.com/pzehrel/codex-unfence#readme",
+  "bugs": {
+    "url": "https://github.com/pzehrel/codex-unfence/issues"
+  },
   "type": "module",
+  "packageManager": "pnpm@10.34.5",
   "bin": {
     "codex-unfence": "dist/cli.js"
   },
@@ -10,44 +23,17 @@
     "node": ">=22.13.0"
   },
   "files": [
-    "dist/analysis.js",
-    "dist/source-context.js",
-    "dist/deferred-analysis.js",
-    "dist/dependency-analysis.js",
-    "dist/dependency-contracts.js",
-    "dist/dependency-source.js",
-    "dist/descriptor-provenance.js",
-    "dist/resource-provenance.js",
-    "dist/loader-configuration-proof.js",
-    "dist/handle-provenance.js",
-    "dist/cli.js",
-    "dist/managed-cli.js",
-    "dist/guide.js",
-    "dist/cua-contract.js",
-    "dist/cua-analysis.js",
-    "dist/cua-recipe.js",
-    "dist/cua-admission.js",
-    "dist/installations.js",
-    "dist/managed-patches.js",
-    "dist/managed-state.js",
-    "dist/discovery.js",
-    "dist/integrity.js",
-    "dist/plan.js",
-    "dist/processes.js",
-    "dist/result.js",
-    "dist/transaction-engine.js",
-    "dist/transaction-locks.js",
-    "dist/transaction-storage.js",
-    "dist/transactions.js"
+    "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit",
+    "build": "tsx scripts/build.ts",
+    "build:tools": "tsx scripts/build-tools.ts",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.tools.json",
     "lint": "eslint .",
-    "check": "node scripts/check.mjs",
-    "test": "npm run build && node --test tests/*.test.mjs",
-    "test:package": "npm run build && node --test tests/package.test.mjs",
-    "prepack": "npm run build"
+    "check": "tsx scripts/check.ts",
+    "test": "pnpm run build && pnpm run build:tools && node --test .build/tests/*.test.js",
+    "test:package": "pnpm run build && pnpm run build:tools && node --test .build/tests/package.test.js",
+    "prepack": "pnpm run build"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
@@ -55,6 +41,9 @@
     "@types/estree": "1.0.8",
     "@types/node": "22.20.5",
     "eslint": "9.39.5",
+    "jiti": "2.7.0",
+    "pnpm": "10.34.5",
+    "tsx": "4.23.15",
     "typescript": "5.9.3",
     "typescript-eslint": "8.71.2"
   },

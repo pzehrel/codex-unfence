@@ -4,19 +4,21 @@
 
 ## 工程检查契约
 
-- 所有源码及已安装 CLI 测试通过 `tests/helpers/cli.mjs` 启动。同步与异步共用隔离策略，支持显式外部 preload、IPC 暂停和已安装可执行文件。
+- 仓库使用固定版本 pnpm 和唯一 `pnpm-lock.yaml`；维护代码全部是 TypeScript，包括配置、脚本、测试和 preload。产品构建先清理 `dist/` 再编译，发布清单按该目录声明；测试与工具每次先清理 `.build/`，再严格编译到该镜像后由 Node 执行，同步 preload 使用 `.cts` 生成 `.cjs`。生成目录不作为源码提交，插件语法文本样本不经过编译。
+- 所有源码及已安装 CLI 测试通过 `tests/helpers/cli.ts` 启动。同步与异步共用隔离策略，支持显式外部 preload、IPC 暂停和已安装可执行文件。
 - 启动目录必须位于系统临时目录内。最终 cwd、HOME、XDG 目录及 PWD 固定到该 sandbox；环境只继承必要宿主变量，并在调用方覆盖之后清空 NODE_OPTIONS、NODE_PATH。环境覆盖只用于显式测试 fixture 输入。
 - 真实 CLI 默认发现回归验证调用方 HOME/cwd 覆盖不会改变发现位置。外部 fixture 同时验证同步、异步子进程的 cwd 与环境；不绑定生产内部 AST。
-- 子进程限制的文件范围与例外以 [ESLint 配置](../../eslint.config.mjs) 和各 fixture 的精确行级豁免为准；夹具的必需 preload 组合与加载时序以 [组合规则](../../scripts/eslint-test-boundaries.mjs) 为准。维护规则时同步核对 [公共 ESLint 接口回归](../../tests/guardrails.test.mjs)，其中覆盖完整合法夹具、缺失或无效加载、受限属性访问及合法保存／包装／委托。这里不另存一份例外清单。
-- `npm run check -- --base <ref>` 依次运行显式基线的 `git diff --check`、typecheck、lint、test。test 已包含 build，因此不再重复 build。任一步失败立即返回其状态。
-- `npm run check -- --base <ref> --whitespace-only` 只运行相同空白检查；`--help` 提供用法。缺失或不可解析基线返回 2。ref 经校验并解析为 tree ID，所有子命令使用参数数组，不使用 shell 拼接。
+- 子进程限制的文件范围与例外以 [ESLint 配置](../../eslint.config.ts) 和各 fixture 的精确行级豁免为准；夹具的必需 preload 组合与加载时序以 [组合规则](../../scripts/eslint-test-boundaries.ts) 为准。维护规则时同步核对 [公共 ESLint 接口回归](../../tests/guardrails.test.ts)，其中覆盖完整合法夹具、缺失或无效加载、受限属性访问及合法保存／包装／委托。这里不另存一份例外清单。
+- `pnpm run check --base <ref>` 依次运行显式基线的 `git diff --check`、pnpm/TypeScript 工程政策检查、typecheck、lint、test。typecheck 覆盖产品与全部工程代码；test 包含产品和工具构建，因此不再重复 build。任一步失败立即返回其状态。
+- `pnpm run check --base <ref> --whitespace-only` 只运行相同空白检查；`--help` 提供用法。缺失或不可解析基线返回 2。ref 经校验并解析为 tree ID，所有子命令使用参数数组，不使用 shell 拼接。
+- 工程管理及打包使用 pnpm；包的离线 npm 安装和真实 npx 启动仍作为消费者兼容性边界。同步 preload 从已编译夹具显式加载，不通过 NODE_OPTIONS 向包管理器传递 TypeScript loader。macOS/Linux PTY 使用系统 script 命令，由 TypeScript helper 驱动，不维护其他语言脚本。
 - CI 与本地使用同一 check 命令。checkout 使用完整历史，PR 使用目标分支 SHA，push 使用事件 before SHA；首次推送新分支使用显式空树，force-push 旧 tip 不在历史时按 SHA fetch。
 
 ## 验证边界
 
 空白检查遵循 `git diff <base>`：覆盖已提交、暂存及工作区的 tracked 差异，不检查尚未 git add 的新文件。lint 限制实用的直接访问路径，不尝试阻止任意字符串计算或恶意规则规避。GitHub Actions 矩阵需由 [现有 CI](../../.github/workflows/ci.yml) 实际执行；本地验证不代表已运行远端工作流。
 
-结构变体的有限覆盖表及独立预期维护在 [公开 deriveCua 回归](../../tests/cua-structure.test.mjs)。规则与结构矩阵的任务契约、回退敏感性及各提交的实际检查范围分别见 [隔离任务](https://github.com/pzehrel/codex-browser-liberation-patch/issues/23) 和 [矩阵任务](https://github.com/pzehrel/codex-browser-liberation-patch/issues/24)。定向检查与最终统一门禁按下述协议分别记录。
+结构变体的有限覆盖表及独立预期维护在 [公开 deriveCua 回归](../../tests/cua-structure.test.ts)。规则与结构矩阵的任务契约、回退敏感性及各提交的实际检查范围分别见 [隔离任务](https://github.com/pzehrel/codex-browser-liberation-patch/issues/23) 和 [矩阵任务](https://github.com/pzehrel/codex-browser-liberation-patch/issues/24)。定向检查与最终统一门禁按下述协议分别记录。
 
 ## 协作协议
 
@@ -39,7 +41,7 @@
 1. **接手。** 从唯一入口读取目标及依赖，再打开所需契约和完成证据。核对自己的身份、任务归属、分支、worktree、干净状态和实际 HEAD；新干净分支先对齐集成基线。完成条件：能指出负责范围、准确基线及当前阻断；证据缺失或冲突时先交由协调者澄清。
 2. **推进。** 围绕已确认的公共验证边界完成稳定任务，按影响选择定向检查。接口变化、阻断、依赖解锁和完成时通知协调者；等待并行结果用后台完成通知。故障、缺失结果或证据冲突时主动核查并报告；无需重复状态轮询，也不设消息或工具次数配额。完成条件：结果与其 SHA、范围、失败或未运行项都可交付；范围变化在继续受影响工作前显式说明，超出授权时取得确认。
 3. **交付与合并。** 实现者将最新集成 tip 合入自己的分支，处理冲突并按影响复验；交付前重新核对实际 HEAD、集成祖先关系、归属和工作区干净状态。协调者在依赖解锁或稳定任务完成时安排合并，其余小切片批量集成。合并者核对来源 SHA／分支／worktree，记录合并 SHA 并更新唯一入口。完成条件：可集成提交可定位，合并后的实际提交与定向检查范围有对应证据；冲突或额外改动明确归属并复验。
-4. **最终验收。** 全部任务集成并处理审查结果后，对最终集成提交运行 `npm run check -- --base <本轮显式基线>`。此前实现提交或中间合并上的结果仅覆盖原 SHA 和范围；历史全量通过不能补作最终结果。完成条件：最终 HEAD、干净状态、统一门禁结果及未运行的远端矩阵分别记录；最终集成内容再变更时，在新的最终提交重跑统一门禁。
+4. **最终验收。** 全部任务集成并处理审查结果后，对最终集成内容运行 `pnpm run check --base <本轮显式基线>`。此前实现提交或中间合并上的结果仅覆盖原 SHA 和范围；历史全量通过不能补作最终结果。完成条件：最终 HEAD、干净状态、统一门禁结果及未运行的远端矩阵分别记录；最终集成内容再变更时，在新的最终提交重跑统一门禁。
 5. **收尾。** 清理前核对当前 worktree／分支／SHA、任务归属、可恢复的集成提交及干净状态，只清理本轮创建且获准处理的资源。发现未提交修改、未集成提交、未知归属或其他会话仍在使用时保留资源并报告。完成条件：完成证据、剩余资源／阻断及下一负责人可定位；实现完成、集成完成、最终验收和清理完成分别说明。
 
 ### 手动交接验收

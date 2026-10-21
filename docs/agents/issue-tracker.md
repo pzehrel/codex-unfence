@@ -1,7 +1,7 @@
 # Issue tracker: GitHub
 
-Issues 和 specs 存放在 `pzehrel/codex-browser-liberation-patch` 的 GitHub Issues。
-使用 gh CLI，并显式传入 --repo pzehrel/codex-browser-liberation-patch。
+Issues 和 specs 存放在 `pzehrel/codex-unfence` 的 GitHub Issues。
+使用 gh CLI，并显式传入 --repo pzehrel/codex-unfence。历史 issue 链接可保留原仓库地址。
 
 ## 操作约定
 

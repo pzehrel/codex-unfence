@@ -1,6 +1,6 @@
 # CUA 请求／响应包装器：本地副本实现切片
 
-此文记录固定配方的历史准备切片；其哈希、区间和输出约束仍适用于旧脚本。2026-10-20 新增独立的托管结构方案，当前入口见 [README](../../README.md)，不会把本切片的真实副本或运行证据自动继承为新方案验收。
+状态：已移除的开发方案记录。固定配方准备脚本已删除，以下保留 2026-10-18 的设计、文件身份与副本验证证据，不再提供操作入口。当前使用见 [README](../../README.md)；本切片证据不能作为当前结构方案或产品运行验收。
 
 2026-10-18。用户澄清需要通过源码补丁在请求／响应通道注入包装器，而不是网络代理、直接修改冻结的宿主 fetch，或把判定结果强制归 false；随后调用 `/implement`，要求落实已讨论的小切片。
 
@@ -10,13 +10,9 @@
 
 目标为应用内 `Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs`，原始文件 1,938,669 bytes、SHA-256 `44594ea0a8238c09dfb46e28acdd610e5053a05011047e1c78fb98f210195a4e`。身份不同、文件已有补丁、定位不唯一或结构不符时拒绝，不跟随升级。配置高置信选择 CUA，但活跃加载路径仍未独立确认。固定源码的 AST 核对发现专用运输函数 `sR` 仅有一处声明和一处调用，唯一消费者为 `Xy.fetchBlocked`，只读取 `ok` 并等待 `json()`；这是有限源码引用核对，不是完整动态非干扰证明。原 await 替换区间为零基 UTF-16 半开区间 `[1084567,1084585)`。
 
-## 准备命令与工件
+## 历史准备工件
 
-在仓库根目录运行；`evidence/` 必须已存在，输出只能是其中尚不存在的直接子目录：
-
-```bash
-node scripts/cua-request-wrapper.mjs --source /absolute/browser-service.mjs --output-dir /absolute/repository/evidence/new-preparation
-```
+当时准备工具要求 `evidence/` 已存在，输出只能是其中尚不存在的直接子目录。该命令随脚本移除，不再可执行。
 
 输出为 `source.original.mjs`、`source.patched.mjs`、`manifest.json` 和 `local-diff.txt`，目录权限 0700、文件 0600。已有路径、符号链接、`.app` 路径及身份不匹配的源文件均拒绝。真实原文、补丁及源码差异只保存在 Git/npm 排除的私有目录。
 

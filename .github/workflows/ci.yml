@@ -18,11 +18,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci --ignore-scripts
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       # Includes the build, source tests and offline installed-bin lifecycle; Codex is never required.
       - name: Shared checks against the event baseline
         env:
@@ -36,4 +39,4 @@ jobs:
             # A force-push can leave the previous tip outside the fetched branch history.
             git fetch --no-tags origin "$base"
           fi
-          npm run check -- --base "$base"
+          pnpm run check --base "$base"
