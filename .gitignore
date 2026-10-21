@@ -7,5 +7,6 @@ __pycache__/
 # Node.js build and local package output.
 node_modules/
 dist/
+.build/
 *.tgz
 coverage/

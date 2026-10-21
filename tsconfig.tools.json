@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".build",
+    "noEmit": true,
+    "noEmitOnError": true,
+    "verbatimModuleSyntax": false
+  },
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts", "tests/**/*.cts", "eslint.config.ts"]
+}

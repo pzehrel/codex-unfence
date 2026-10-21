@@ -22,7 +22,7 @@ export interface ValidatedTransactionPlan {
 }
 export interface TransactionOptions { plan?: string; store: string; targets?: string[] }
 export interface TransactionAdapter {
-  scheme: 'structural' | 'cua-request-wrapper-26.1013.40934-build20770' | 'cua-site-status-transport-v1';
+  scheme: 'structural' | 'cua-site-status-transport-v1';
   loadSelected(options: TransactionOptions): Promise<ValidatedTransactionPlan>;
   loadStored(directory: string): Promise<ValidatedTransactionPlan>;
   copy(plan: ValidatedTransactionPlan, destination: string): Promise<void>;
