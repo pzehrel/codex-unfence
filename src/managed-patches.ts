@@ -44,6 +44,31 @@ function diagnostic(error: unknown): Diagnostic {
 
 /** One public business boundary for discovery, read-only inspection and managed transactions. */
 export function createManagedPatches({ derive, tool }: { derive: DeriveCua; tool: ToolIdentity }) {
+  function operation() {
+    let previousSource: string | undefined;
+    let previousResult: CuaDerivation | undefined;
+    const reuse: DeriveCua = source => {
+      // Reuse only pure analysis of identical bytes within this operation.
+      // State loaders still reread and authenticate every file on every call.
+      if (source !== previousSource || !previousResult) {
+        previousResult = derive(source);
+        previousSource = source;
+      }
+      return structuredClone(previousResult);
+    };
+    return managedOperations({ derive: reuse, tool });
+  }
+  return {
+    discover: discoverInstallations,
+    inspect: (candidate: Candidate) => operation().inspect(candidate),
+    status: (candidate: Candidate) => operation().status(candidate),
+    apply: (selection: ConfirmedSelection) => operation().apply(selection),
+    restore: (selection: ConfirmedSelection) => operation().restore(selection),
+    recover: (selection: ConfirmedSelection) => operation().recover(selection),
+  };
+}
+
+function managedOperations({ derive, tool }: { derive: DeriveCua; tool: ToolIdentity }) {
   const executor = cuaExecutor(derive);
   const inspectedSources = new WeakMap<Inspection, { bytes: Buffer; identity: PreparationExpectation }>();
   const inspectedLocators = new WeakMap<Inspection, string | null>();

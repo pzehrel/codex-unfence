@@ -713,7 +713,18 @@ export function deriveCua(source: string): CuaDerivation {
     const parsed = parseSourceContext(source);
     need(parsed.context, 'PARSE_ERROR', parsed.parseError ?? 'Invalid JavaScript.');
     const context = parsed.context;
-    const candidates = context.nodes.filter((node): node is E.FunctionDeclaration => node.type === 'FunctionDeclaration' && node.async === true && context.nodes.some(child => child.type === 'AwaitExpression' && inside(child, node) && child.argument.type === 'CallExpression' && child.argument.callee.type === 'MemberExpression' && (child.argument.callee.computed ? child.argument.callee.property.type === 'Literal' && child.argument.callee.property.value === 'fetch' : child.argument.callee.property.type === 'Identifier' && child.argument.callee.property.name === 'fetch')));
+    const transports = new Set<E.Node>();
+    for (const node of context.nodes) {
+      if (node.type !== 'AwaitExpression' || node.argument.type !== 'CallExpression' || node.argument.callee.type !== 'MemberExpression') continue;
+      const member = node.argument.callee;
+      if (!(member.computed ? member.property.type === 'Literal' && member.property.value === 'fetch' : member.property.type === 'Identifier' && member.property.name === 'fetch')) continue;
+      // Preserve enclosing candidates too: a nested fetch must not hide a
+      // potentially unsupported outer transport from the ambiguity checks.
+      for (let owner = context.parents.get(node); owner; owner = context.parents.get(owner)) {
+        if (owner.type === 'FunctionDeclaration' && owner.async) transports.add(owner);
+      }
+    }
+    const candidates = context.nodes.filter((node): node is E.FunctionDeclaration => node.type === 'FunctionDeclaration' && transports.has(node));
     need(candidates.length, 'NO_TARGET', 'No dedicated awaited member-fetch transport found.');
     const proofs: ReturnType<typeof prove>[] = [];
     const failures: Unsupported[] = [];

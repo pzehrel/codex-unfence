@@ -10,7 +10,7 @@ const childProcess: typeof import('node:child_process') = require('node:child_pr
 const execFile = childProcess.execFile;
 let snapshots = 0;
 childProcess.execFile = function (this: unknown, file: string, args: unknown, ...rest: unknown[]) {
-  if (file === '/bin/ps' && Array.isArray(args) && args.includes('pid=,command=')) {
+  if (file === '/bin/ps' && Array.isArray(args) && args.some(arg => typeof arg === 'string' && arg.startsWith('pid=PID,lstart=START,comm='))) {
     snapshots++;
     if (snapshots === 2 && ['managed-confirmation-change', 'managed-locator-change'].includes(process.env.CODEX_TEST_FAULT ?? '')) {
       if (process.env.CODEX_TEST_FAULT === 'managed-confirmation-change') fs.writeFileSync(requiredEnvironment('CODEX_TEST_TARGET'), fs.readFileSync(requiredEnvironment('CODEX_TEST_REPLACEMENT')));
