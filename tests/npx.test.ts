@@ -486,8 +486,8 @@ test('npx install and uninstall keep independent private recovery and coordinati
     const state = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
     assert.equal(state.status, 0, state.stdout + state.stderr);
     const recovery = required(required(checkOutput(state.stdout).data).inspection).recovery;
-    assert.deepEqual(required(recovery).tool, { packageName: 'codex-unfence', version: '0.0.1', executable: 'codex-unfence' });
-    assert.equal(required(recovery).command, 'npx --package codex-unfence@0.0.1 codex-unfence');
+    assert.deepEqual(required(recovery).tool, { packageName: 'codex-unfence', version: '0.0.2', executable: 'codex-unfence' });
+    assert.equal(required(recovery).command, 'npx --package codex-unfence@0.0.2 codex-unfence');
     const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
     inside(root, required(recovery).preparation);
     inside(root, required(recovery).store);
@@ -528,7 +528,7 @@ test('npx uninstall cancellation preserves patched bytes and every recovery arti
     });
     assert.equal(child.status, 0, child.stdout + child.stderr);
     assert.match(child.stdout, /Cancelled; installation unchanged/);
-    assert.match(child.stdout, /Recovery tool: codex-unfence@0.0.1; executable: codex-unfence/);
+    assert.match(child.stdout, /Recovery tool: codex-unfence@0.0.2; executable: codex-unfence/);
     for (const notice of ['Support:', 'Assumption:', 'Scope:', 'signature']) {
       assert.ok(child.stdout.indexOf(notice) >= 0 && child.stdout.indexOf(notice) < child.stdout.indexOf('Type yes to uninstall,'), notice);
     }

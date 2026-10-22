@@ -1,6 +1,6 @@
 {
   "name": "codex-unfence",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Install, check and uninstall a recoverable Codex browser site-status patch on macOS",
   "author": {
     "name": "pzehrel",
