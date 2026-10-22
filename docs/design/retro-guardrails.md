@@ -18,7 +18,7 @@
 
 空白检查遵循 `git diff <base>`：覆盖已提交、暂存及工作区的 tracked 差异，不检查尚未 git add 的新文件。lint 限制实用的直接访问路径，不尝试阻止任意字符串计算或恶意规则规避。GitHub Actions 矩阵需由 [现有 CI](../../.github/workflows/ci.yml) 实际执行；本地验证不代表已运行远端工作流。
 
-结构变体的有限覆盖表及独立预期维护在 [公开 deriveCua 回归](../../tests/cua-structure.test.ts)。当前事务与恢复行为由[托管操作回归](../../tests/managed-patches.test.ts)验证，公开参数和结果见[托管 CLI 回归](../../tests/managed-cli.test.ts)，离线消费者入口见 [npx 回归](../../tests/npx.test.ts)。规则与结构矩阵的任务契约、回退敏感性及各提交的实际检查范围分别见 [隔离任务](https://github.com/pzehrel/codex-browser-liberation-patch/issues/23) 和 [矩阵任务](https://github.com/pzehrel/codex-browser-liberation-patch/issues/24)。定向检查与最终统一门禁按下述协议分别记录。
+当前局部结构准入及独立预期维护在 [公开 deriveCua 回归](../../tests/cua-local.test.ts)；[历史有限结构矩阵](../../tests/cua-structure.test.ts) 仅核对旧恢复记录所用的历史分析器，不代表当前新准入范围。当前事务与恢复行为由[托管操作回归](../../tests/managed-patches.test.ts)验证，公开参数和结果见[托管 CLI 回归](../../tests/managed-cli.test.ts)，离线消费者入口见 [npx 回归](../../tests/npx.test.ts)。规则与结构矩阵的任务契约、回退敏感性及各提交的实际检查范围分别见 [隔离任务](https://github.com/pzehrel/codex-browser-liberation-patch/issues/23) 和 [矩阵任务](https://github.com/pzehrel/codex-browser-liberation-patch/issues/24)。定向检查与最终统一门禁按下述协议分别记录。
 
 ## 协作协议
 

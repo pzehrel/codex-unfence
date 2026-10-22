@@ -133,6 +133,31 @@ test('managed operations persist private recovery state and restore original byt
   assert.deepEqual(await readdir(join(candidate.targetPath, '..')), ['browser-service.mjs']);
 });
 
+test('local analyzer restores a preparation created with historical evidence', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  const applied = run(box, 'legacy-apply', candidate);
+  assert.equal(applied.exitCode, 0, JSON.stringify(applied));
+  assert.notDeepEqual(await readFile(candidate.targetPath), original);
+  const inspection = run(box, 'inspect', candidate);
+  assert.equal(inspection.state, 'tool-applied');
+  assert.equal(inspection.recovery?.tool.version, '0.2.0');
+  assert.equal(run(box, 'restore', candidate).exitCode, 0);
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+});
+
+test('new local shapes support managed application and restoration', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  const changed = original.toString('utf8').replace('conversationId: metadata?.session_id', 'backendApiBaseUrl: runtime.env?.backend, conversationId: metadata?.session_id');
+  assert.notEqual(changed, original.toString('utf8'));
+  await writeFile(candidate.targetPath, changed);
+  assert.equal(run(box, 'inspect', candidate).support, 'supported');
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  assert.equal(run(box, 'restore', candidate).exitCode, 0);
+  assert.equal(await readFile(candidate.targetPath, 'utf8'), changed);
+});
+
 test('repeated managed operations derive each source once per operation while preserving identity on no-ops', async (t: TestContext) => {
   const box = await sandbox(t);
   const { candidate } = await supportedInstallation(box);
