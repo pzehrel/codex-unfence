@@ -3,6 +3,7 @@ import { lstat, mkdir, readdir, realpath } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { CUA_SCHEME } from './cua-contract.js';
+import { deriveCua as deriveLegacyCua } from './cua-legacy-analysis.js';
 import type { CuaDerivation, DeriveCua } from './cua-contract.js';
 import { canonical, digest } from './integrity.js';
 import type { Candidate } from './installations.js';
@@ -123,7 +124,11 @@ export async function loadManagedPlan(directory: string, derive: DeriveCua): Pro
   validTool(saved.tool);
   const source = original.toString('utf8');
   check(Buffer.from(source).equals(original), 'INVALID_PREPARATION', 'Prepared original must be lossless UTF-8.');
-  const derivation = derive(source);
+  // Historical preparations bind the complete legacy evidence, not just patched bytes.
+  // Reproduce that evidence only for restoration; new admissions use the local analyzer.
+  const basis = recordObject(saved.basis) ? saved.basis : null;
+  const historical = Array.isArray(basis?.assumptions) && basis.assumptions[0] === 'ES2022 module syntax; finite dedicated site-status transport, request builder, strict agent predicate and cache/blocked consumption family.';
+  const derivation = historical ? deriveLegacyCua(source) : derive(source);
   const manifest = manifestFor(original, derivation, saved.identity, saved.candidate as unknown as Candidate, saved.tool);
   check(canonical(manifest) === canonical(saved) && patched.equals(Buffer.from(derivation.change!.patchedSource)) && diff.equals(Buffer.from(derivation.change!.localDiff)), 'INVALID_PREPARATION', 'Prepared bytes, evidence or transformation differ from fresh structural derivation.');
   return { directory, manifest: { ...manifest, contentHash: digest(canonical(manifest)) }, targets: [{ target: { identity: manifest.identity, original: manifest.original, patched: manifest.patched }, original, patched }], derivation };

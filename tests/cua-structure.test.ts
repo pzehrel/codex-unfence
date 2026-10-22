@@ -7,7 +7,8 @@ import { parse } from 'acorn';
 import { analyze } from 'eslint-scope';
 import { createHash } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
-import { deriveCua } from '../src/cua-analysis.js';
+// Freeze the historical admission matrix used to authenticate existing recovery plans.
+import { deriveCua } from '../src/cua-legacy-analysis.js';
 
 const fixture = await readFile(sourceFixture('deferred-site-status.js.txt'), 'utf8');
 

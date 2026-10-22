@@ -13,7 +13,12 @@ else {
   const { createManagedPatches } = await import('../../src/managed-patches.js');
   let derivations = 0;
   const manager = createManagedPatches({ derive(source) { derivations++; return deriveCua(source); }, tool: { packageName: 'codex-unfence', version: '9.8.7-synthetic', executable: 'codex-unfence' } });
-  if (command === 'repeat-validation') {
+  if (command === 'legacy-apply') {
+    const { deriveCua: historical } = await import('../../src/cua-legacy-analysis.js');
+    const previous = createManagedPatches({ derive: historical, tool: { packageName: 'codex-unfence', version: '0.2.0', executable: 'codex-unfence' } });
+    const inspection = await previous.inspect(selection);
+    result = await previous.apply({ candidate: selection, inspectionToken: inspection.inspectionToken ?? '', confirmed: true });
+  } else if (command === 'repeat-validation') {
     const steps = [];
     for (const action of ['apply', 'apply', 'restore', 'restore', 'apply'] as const) {
       const inspection = await manager.inspect(selection);
