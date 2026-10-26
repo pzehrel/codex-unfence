@@ -403,12 +403,14 @@ test('an interrupted installation still requires recovery after an application u
   const { candidate, original } = await supportedInstallation(box);
   const interrupted = await pauseOperation(t, box, candidate, 'apply', 'after-target-rename');
   await interrupted.kill();
-  await updateInstallation(box, candidate, original);
+  // 即使文件系统复用原 inode，新内容也能明确区分这次更新。
+  const updated = Buffer.concat([Buffer.from('// application updated during an incomplete transaction\n'), original]);
+  await updateInstallation(box, candidate, updated);
   const inspection = run(box, 'inspect', candidate);
   assert.equal(inspection.state, 'conflict');
   assert.deepEqual(inspection.allowedActions, []);
   assert.equal(run(box, 'apply', candidate).exitCode, 4);
-  assert.deepEqual(await readFile(candidate.targetPath), original);
+  assert.deepEqual(await readFile(candidate.targetPath), updated);
 });
 
 test('interrupted managed apply is discoverable and recover rolls back without continuing application', async (t: TestContext) => {
