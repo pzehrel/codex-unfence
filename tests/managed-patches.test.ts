@@ -133,6 +133,90 @@ test('managed operations persist private recovery state and restore original byt
   assert.deepEqual(await readdir(join(candidate.targetPath, '..')), ['browser-service.mjs']);
 });
 
+test('application updates retire the old patch without restoring old bytes over the new installation', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const previous = required(run(box, 'inspect', candidate).recovery);
+  const updated = Buffer.concat([Buffer.from('// updated application\n'), original]);
+  await rename(candidate.targetPath, join(box.directory, 'old-patched.mjs'));
+  await writeFile(candidate.targetPath, updated, { mode: 0o644 });
+  await writeFile(join(candidate.appPath, 'Contents/Info.plist'), '<plist><dict><key>CFBundleShortVersionString</key><string>updated-43</string><key>CFBundleVersion</key><string>1000</string></dict></plist>');
+  const inspection = run(box, 'inspect', candidate);
+  assert.equal(inspection.state, 'original');
+  assert.equal(inspection.support, 'supported');
+  assert.equal(inspection.writeReadiness, 'ready');
+  assert.ok(inspection.allowedActions.includes('apply'));
+  assert.equal(run(box, 'restore', candidate).exitCode, 0);
+  assert.deepEqual(await readFile(candidate.targetPath), updated);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const current = required(run(box, 'inspect', candidate).recovery);
+  assert.notEqual(current.preparation, previous.preparation);
+  assert.deepEqual(await readFile(join(previous.preparation, 'source.original.mjs')), original);
+  assert.equal(run(box, 'restore', candidate).exitCode, 0);
+  assert.deepEqual(await readFile(candidate.targetPath), updated);
+});
+
+async function updateInstallation(box: { directory: string }, candidate: Candidate, bytes: Buffer | string, build = '1000') {
+  await rename(candidate.targetPath, join(box.directory, `replaced-${build}.mjs`));
+  await writeFile(candidate.targetPath, bytes, { mode: 0o644 });
+  await writeFile(join(candidate.appPath, 'Contents/Info.plist'), `<plist><dict><key>CFBundleShortVersionString</key><string>updated</string><key>CFBundleVersion</key><string>${build}</string></dict></plist>`);
+}
+
+test('replacement inspection is read-only and analyzes current unsupported bytes instead of historical support', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  await updateInstallation(box, candidate, '// unsupported new application\n');
+  const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
+  const before = await readdir(join(root, 'targets'));
+  const inspection = run(box, 'inspect', candidate);
+  assert.equal(inspection.state, 'incompatible');
+  assert.equal(inspection.support, 'unsupported');
+  assert.deepEqual(inspection.allowedActions, []);
+  assert.equal(inspection.recovery, null);
+  assert.equal(run(box, 'status', candidate).exitCode, 3);
+  assert.deepEqual(await readdir(join(root, 'targets')), before);
+  assert.equal(await readFile(candidate.targetPath, 'utf8'), '// unsupported new application\n');
+});
+
+test('version changes do not admit in-place edits or copied patched files', async (t: TestContext) => {
+  for (const mutation of ['in-place', 'patched-copy', 'unchanged-version']) {
+    const box = await sandbox(t);
+    const { candidate, original } = await supportedInstallation(box);
+    assert.equal(run(box, 'apply', candidate).exitCode, 0);
+    const patched = await readFile(candidate.targetPath);
+    if (mutation === 'in-place') {
+      await writeFile(candidate.targetPath, original);
+      await writeFile(join(candidate.appPath, 'Contents/Info.plist'), '<plist><dict><key>CFBundleVersion</key><string>1000</string></dict></plist>');
+    } else if (mutation === 'patched-copy') await updateInstallation(box, candidate, patched);
+    else {
+      await rename(candidate.targetPath, join(box.directory, 'replaced.mjs'));
+      await writeFile(candidate.targetPath, original);
+    }
+    const before = await readFile(candidate.targetPath);
+    assert.equal(run(box, 'inspect', candidate).state, 'conflict', mutation);
+    assert.equal(run(box, 'apply', candidate).exitCode, 4, mutation);
+    assert.equal(run(box, 'restore', candidate).exitCode, 4, mutation);
+    assert.deepEqual(await readFile(candidate.targetPath), before);
+  }
+});
+
+test('successive application updates keep independent backups and only restore the current revision', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  for (const build of ['1000', '1001']) {
+    const updated = Buffer.concat([Buffer.from(`// build ${build}\n`), original]);
+    await updateInstallation(box, candidate, updated, build);
+    assert.equal(run(box, 'status', candidate).exitCode, 0);
+    assert.equal(run(box, 'apply', candidate).exitCode, 0);
+    assert.equal(run(box, 'restore', candidate).exitCode, 0);
+    assert.deepEqual(await readFile(candidate.targetPath), updated);
+  }
+  assert.equal((await readdir(join(box.directory, 'home/Library/Application Support/codex-unfence/preparations'))).length, 3);
+});
+
 test('local analyzer restores a preparation created with historical evidence', async (t: TestContext) => {
   const box = await sandbox(t);
   const { candidate, original } = await supportedInstallation(box);
@@ -238,6 +322,94 @@ async function pauseOperation(t: TestContext, box: {directory: string}, candidat
     },
   };
 }
+
+test('selection publication interruptions preserve the updated source and permit a fresh retry', async (t: TestContext) => {
+  for (const boundary of ['before-selection-publication', 'after-selection-publication']) {
+    const box = await sandbox(t);
+    const { candidate, original } = await supportedInstallation(box);
+    assert.equal(run(box, 'apply', candidate).exitCode, 0);
+    const updated = Buffer.concat([Buffer.from('// replacement build\n'), original]);
+    await updateInstallation(box, candidate, updated);
+    const interrupted = await pauseOperation(t, box, candidate, 'apply', boundary);
+    await interrupted.kill();
+    assert.deepEqual(await readFile(candidate.targetPath), updated, boundary);
+    assert.equal(run(box, 'inspect', candidate).state, 'original', boundary);
+    assert.equal(run(box, 'apply', candidate).exitCode, 0, boundary);
+    assert.equal(run(box, 'restore', candidate).exitCode, 0, boundary);
+    assert.deepEqual(await readFile(candidate.targetPath), updated, boundary);
+  }
+});
+
+test('an update after selection publication but before intent cannot reuse an outdated preparation', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  await updateInstallation(box, candidate, original);
+  const interrupted = await pauseOperation(t, box, candidate, 'apply', 'after-selection-publication');
+  await interrupted.kill();
+  const newer = Buffer.concat([Buffer.from('// subsequent update\n'), original]);
+  await updateInstallation(box, candidate, newer, '1001');
+  const inspection = run(box, 'inspect', candidate);
+  assert.equal(inspection.state, 'original');
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  assert.equal(run(box, 'restore', candidate).exitCode, 0);
+  assert.deepEqual(await readFile(candidate.targetPath), newer);
+});
+
+test('a published selection remains discoverable after the publisher reports an error', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  await updateInstallation(box, candidate, original);
+  assert.equal(run(box, 'apply', candidate, { CODEX_TEST_FAULT: 'selection-publication-error' }).exitCode, 1);
+  assert.equal(run(box, 'inspect', candidate).state, 'original');
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  assert.equal(run(box, 'restore', candidate).exitCode, 0);
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+});
+
+test('competing replacement selections cannot supersede a newly confirmed installation', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  await updateInstallation(box, candidate, original);
+  const first = await pauseOperation(t, box, candidate, 'apply', 'before-operation-lock');
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const second = required(run(box, 'inspect', candidate).recovery);
+  const refused = await first.finish();
+  assert.equal(refused.exitCode, 4);
+  assert.ok(refused.diagnostics.some(entry => entry.code === 'INSPECTION_CHANGED'));
+  assert.equal(required(run(box, 'inspect', candidate).recovery).preparation, second.preparation);
+  assert.equal(run(box, 'restore', candidate).exitCode, 0);
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+});
+
+test('recovery after applying to an updated installation rolls back to the updated bytes', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const updated = Buffer.concat([Buffer.from('// replacement before interrupted apply\n'), original]);
+  await updateInstallation(box, candidate, updated);
+  const interrupted = await pauseOperation(t, box, candidate, 'apply', 'after-target-rename');
+  await interrupted.kill();
+  assert.equal(run(box, 'inspect', candidate).state, 'incomplete');
+  assert.equal(run(box, 'recover', candidate).exitCode, 0);
+  assert.deepEqual(await readFile(candidate.targetPath), updated);
+  assert.equal(run(box, 'inspect', candidate).state, 'original');
+});
+
+test('an interrupted installation still requires recovery after an application update', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  const interrupted = await pauseOperation(t, box, candidate, 'apply', 'after-target-rename');
+  await interrupted.kill();
+  await updateInstallation(box, candidate, original);
+  const inspection = run(box, 'inspect', candidate);
+  assert.equal(inspection.state, 'conflict');
+  assert.deepEqual(inspection.allowedActions, []);
+  assert.equal(run(box, 'apply', candidate).exitCode, 4);
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+});
 
 test('interrupted managed apply is discoverable and recover rolls back without continuing application', async (t: TestContext) => {
   const box = await sandbox(t);

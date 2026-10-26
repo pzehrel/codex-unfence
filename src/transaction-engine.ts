@@ -28,6 +28,7 @@ export interface TransactionAdapter {
   copy(plan: ValidatedTransactionPlan, destination: string): Promise<void>;
   unselected(path: string, bytes: Buffer): { state: TargetState; diagnostics: Diagnostic[] };
   blockingProcesses(table: ProcessIdentity[]): ProcessIdentity[];
+  validateSelected?(plan: ValidatedTransactionPlan): Promise<void>;
 }
 
 interface Snapshot {
@@ -366,6 +367,30 @@ function failure(command: TransactionCommand, error: unknown): OperationResult {
   return result(command, known ? error.kind : 'runtime-error', null, [{ code: known ? error.code : 'OPERATION_FAILED', severity: 'error', message: error instanceof Error ? error.message : 'Operation failed.', ...(known && error.path ? { path: error.path } : {}), ...(error instanceof Error && 'code' in error && !known ? { systemCode: String(error.code) } : {}) }]);
 }
 
+async function select<T>(options: Options, prepare: () => Promise<T>): Promise<T> {
+  const store = await storeAt(options.store, true);
+  check(store, 'STORE_NOT_FOUND', 'Cannot initialize the managed selection store.');
+  const paths = options.targets ?? [];
+  check(paths.length > 0, 'SELECTION_REQUIRED', 'Managed selection requires targets.');
+  checkCoordinationPaths([options.store, ...paths]);
+  const leases: { root: string; lease: Awaited<ReturnType<typeof acquireLease>> }[] = [];
+  try {
+    const table = await processes();
+    for (const root of [join(store.path, 'operation.lock'), ...await targetRoots(paths, true)]) {
+      const lease = await acquireLease(root, { store: store.path, transaction: randomUUID(), table }, (previous) => previousTransaction(previous, null, false));
+      leases.push({ root, lease });
+    }
+    check(!(await records(store)).some(entry => !terminal(entry.journal)), 'INCOMPLETE_TRANSACTION', 'An incomplete transaction prevents selecting a replacement installation.');
+    for (const path of paths) {
+      await checkTargetArtifacts(path);
+      check(!await pendingAtTarget(path), 'INCOMPLETE_TRANSACTION', 'An incomplete transaction prevents selecting a replacement installation.');
+    }
+    return await prepare();
+  } finally {
+    for (const { root, lease } of leases.reverse()) await releaseLease(root, lease);
+  }
+}
+
 async function apply(options: Options): Promise<OperationResult> {
   try { return await changeTransaction('apply', options); } catch (error) { return failure('apply', error); }
 }
@@ -402,6 +427,7 @@ async function changeTransaction(operation: Operation, options: Options): Promis
       const lease = await acquireLease(root, { store: store.path, transaction, table }, (previous) => previousTransaction(previous, null, false));
       leases.push({ root, lease });
     }
+    await adapter.validateSelected?.(plan);
     for (const path of paths) await checkTargetArtifacts(path);
     const currentRecords = await records(store);
     check(!currentRecords.some((record) => !terminal(record.journal)), 'INCOMPLETE_TRANSACTION', 'Another transaction requires recovery.');
@@ -513,6 +539,11 @@ async function status(options: Options): Promise<OperationResult> {
           if (!(error instanceof TransactionError)) throw error;
           targets.push({ path, state: 'conflict' });
           diagnostics.push({ code: error.code, severity: 'error', message: error.message, path });
+          if (error.code === 'TARGET_CONFLICT') {
+            const current = await snapshot(path);
+            const previous = trusted?.journal.targets.find(target => target.path === path)?.final ?? item.target.identity;
+            if (previous && (current.device !== previous.device || current.inode !== previous.inode)) diagnostics.push({ code: 'TARGET_REPLACED', severity: 'info', message: 'Target file identity differs from its last trusted state.', path });
+          }
         }
       } else {
         const current = await snapshot(path);
@@ -571,5 +602,5 @@ async function recoverTransaction(options: Options): Promise<OperationResult> {
   }
 }
 
-return { apply, restore, status, recover };
+return { apply, restore, status, recover, select };
 }

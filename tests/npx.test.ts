@@ -435,6 +435,42 @@ test('npx public writes refuse permissions and unknown process state with accura
   await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
 });
 
+test('npx check and confirmed install follow application updates without restoring old files', async (t: TestContext) => {
+  const box = await packageBox(t);
+  const { app, target, source } = await syntheticInstallation(box, 'Updated');
+  const plist = join(app, 'Contents/Info.plist');
+  await writeFile(plist, '<plist><dict><key>CFBundleVersion</key><string>1</string></dict></plist>');
+  const installed = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }] });
+  assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+  await rename(target, join(box.directory, 'old-patched.mjs'));
+  const updated = Buffer.concat([Buffer.from('// updated application\n'), Buffer.from(source)]);
+  await writeFile(target, updated, { mode: 0o640 });
+  await writeFile(plist, '<plist><dict><key>CFBundleVersion</key><string>2</string></dict></plist>');
+  const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
+  const before = await snapshotFiles(root);
+  const checked = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
+  assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+  const inspection = required(checkOutput(checked.stdout).data?.inspection);
+  assert.equal(inspection.state, 'original');
+  assert.equal(inspection.support, 'supported');
+  assert.ok(inspection.allowedActions.includes('apply'));
+  assert.deepEqual(await snapshotFiles(root), before);
+  const uninstalled = await npmPackage.runNpmExecPty(['uninstall', '--app', app], box);
+  assert.equal(uninstalled.status, 0, uninstalled.stdout + uninstalled.stderr);
+  assert.deepEqual(await readFile(target), updated);
+  assert.deepEqual(await snapshotFiles(root), before);
+  const stale = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n', beforeSend: () => writeFile(plist, '<plist><dict><key>CFBundleVersion</key><string>3</string></dict></plist>') }] });
+  assert.equal(stale.status, 4, stale.stdout + stale.stderr);
+  assert.match(stale.stdout, /INSPECTION_CHANGED/);
+  assert.deepEqual(await readFile(target), updated);
+  assert.deepEqual(await snapshotFiles(root), before);
+  const reapplied = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }] });
+  assert.equal(reapplied.status, 0, reapplied.stdout + reapplied.stderr);
+  const restored = await npmPackage.runNpmExecPty(['uninstall', '--app', app], { ...box, steps: [{ waitFor: 'Type yes to uninstall,', send: 'yes\n' }] });
+  assert.equal(restored.status, 0, restored.stdout + restored.stderr);
+  assert.deepEqual(await readFile(target), updated);
+});
+
 test('npx public writes preserve an externally replaced identity even when bytes are unchanged', async (t: TestContext) => {
   const box = await packageBox(t);
   const { app, target, source } = await syntheticInstallation(box, 'Identity');

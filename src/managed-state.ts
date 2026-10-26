@@ -6,10 +6,11 @@ import { CUA_SCHEME } from './cua-contract.js';
 import { deriveCua as deriveLegacyCua } from './cua-legacy-analysis.js';
 import type { CuaDerivation, DeriveCua } from './cua-contract.js';
 import { canonical, digest } from './integrity.js';
+import { installationAt } from './installations.js';
 import type { Candidate } from './installations.js';
 import type { TransactionIdentity, ValidatedTransactionPlan } from './transaction-engine.js';
 import { checkCoordinationPaths } from './transaction-locks.js';
-import { canonicalDirectory, check, exists, privateDirectory, publish, readJSON, regularBytes, sign, syncDirectory, verify, writeExclusive } from './transaction-storage.js';
+import { canonicalDirectory, check, exists, privateDirectory, publish, readJSON, regularBytes, sign, syncDirectory, TransactionError, verify, writeExclusive } from './transaction-storage.js';
 
 export interface ToolIdentity { packageName: string; version: string; executable: string }
 interface Manifest {
@@ -139,28 +140,43 @@ export async function managedRecord(target: string, derive: DeriveCua): Promise<
   if (!paths || !await exists(paths.locator)) return null;
   const key = await stateBytes(join(paths.root, 'key'));
   check(key.length === 32, 'UNTRUSTED_STORE', 'Invalid managed state key.');
-  await stateBytes(paths.locator);
-  const value = verify(await readJSON(paths.locator, true), key);
-  check(recordObject(value) && value.scheme === CUA_SCHEME && value.formatVersion === 1 && value.recipeVersion === 1, 'UNSUPPORTED_MANAGED_RECORD', 'Unknown managed source. Restore with its original tool version and entrypoint; no migration was performed.');
-  check(typeof value.id === 'string' && uuid.test(value.id) && value.target === target && value.preparation === join(paths.root, 'preparations', value.id) && value.store === join(paths.root, 'stores', value.id) && typeof value.contentHash === 'string' && /^[a-f0-9]{64}$/.test(value.contentHash), 'UNTRUSTED_RECORD', 'Managed locator paths or target identity changed. Operation stores cannot be migrated.');
-  validTool(value.tool);
-  check(value.recovery === recoveryCommand(value.tool), 'UNTRUSTED_RECORD', 'Managed recovery entrypoint differs from its exact tool version.');
-  const locator = value as unknown as Locator;
-  check(Object.keys(locator).sort().join(',') === 'contentHash,formatVersion,id,preparation,recipeVersion,recovery,scheme,store,target,tool', 'UNTRUSTED_RECORD', 'Unknown or missing managed locator fields.');
-  const plan = await loadManagedPlan(locator.preparation, derive);
-  check(plan.manifest.contentHash === locator.contentHash && plan.manifest.identity.path === target && canonical(plan.manifest.tool) === canonical(locator.tool), 'UNTRUSTED_RECORD', 'Managed locator does not bind this preparation.');
-  return { locator, plan };
+  let path = paths.locator;
+  let predecessor: string | null = null;
+  const visited = new Set<string>();
+  for (let count = 0; count < 100_000; count++) {
+    let value = verify(await readJSON(path, true), key);
+    check(((await lstat(path)).mode & 0o777) === 0o600, 'UNTRUSTED_STORE', 'Managed files require mode 0600.', path);
+    if (predecessor !== null) {
+      check(recordObject(value) && Object.keys(value).sort().join(',') === 'locator,predecessor' && value.predecessor === predecessor, 'UNTRUSTED_RECORD', 'Managed successor does not bind its predecessor.', path);
+      value = value.locator;
+    }
+    check(recordObject(value) && value.scheme === CUA_SCHEME && value.formatVersion === 1 && value.recipeVersion === 1, 'UNSUPPORTED_MANAGED_RECORD', 'Unknown managed source. Restore with its original tool version and entrypoint; no migration was performed.');
+    check(typeof value.id === 'string' && uuid.test(value.id) && value.target === target && value.preparation === join(paths.root, 'preparations', value.id) && value.store === join(paths.root, 'stores', value.id) && typeof value.contentHash === 'string' && /^[a-f0-9]{64}$/.test(value.contentHash), 'UNTRUSTED_RECORD', 'Managed locator paths or target identity changed. Operation stores cannot be migrated.');
+    validTool(value.tool);
+    check(value.recovery === recoveryCommand(value.tool), 'UNTRUSTED_RECORD', 'Managed recovery entrypoint differs from its exact tool version.');
+    const locator = value as unknown as Locator;
+    check(Object.keys(locator).sort().join(',') === 'contentHash,formatVersion,id,preparation,recipeVersion,recovery,scheme,store,target,tool', 'UNTRUSTED_RECORD', 'Unknown or missing managed locator fields.');
+    const plan = await loadManagedPlan(locator.preparation, derive);
+    check(plan.manifest.contentHash === locator.contentHash && plan.manifest.identity.path === target && canonical(plan.manifest.tool) === canonical(locator.tool), 'UNTRUSTED_RECORD', 'Managed locator does not bind this preparation.');
+    check(!visited.has(locator.id), 'UNTRUSTED_RECORD', 'Managed selection history contains a cycle.');
+    visited.add(locator.id);
+    const next = `${paths.locator}.${locator.id}.next`;
+    if (!await exists(next)) return { locator, plan };
+    predecessor = digest(canonical(locator));
+    path = next;
+  }
+  throw new TransactionError('UNTRUSTED_RECORD', 'Managed selection history exceeds supported length.', 'conflict', target);
 }
 export function recoveryCommand(tool: ToolIdentity): string {
   validTool(tool);
   return `npx --package ${tool.packageName}@${tool.version} ${tool.executable}`;
 }
 
-export interface PreparationExpectation { device: string; inode: string; mode: number; ctime: string; mtime: string }
-export async function prepareManaged(candidate: Candidate, original: Buffer, expected: PreparationExpectation, derive: DeriveCua, tool: ToolIdentity): Promise<{ locator: Locator; plan: ManagedPlan }> {
+export interface PreparationExpectation { device: string; inode: string; mode: number; ctime: string; mtime: string; parentDevice: string; parentInode: string }
+export async function prepareManaged(candidate: Candidate, original: Buffer, expected: PreparationExpectation, derive: DeriveCua, tool: ToolIdentity, previous: Locator | null = null): Promise<{ locator: Locator; plan: ManagedPlan }> {
   const target = candidate.targetPath;
   const existing = await managedRecord(target, derive);
-  check(!existing, 'INSPECTION_CHANGED', 'Another managed selection appeared after confirmation; inspect and confirm again.');
+  check(canonical(existing?.locator ?? null) === canonical(previous), 'INSPECTION_CHANGED', 'Managed selection changed after confirmation; inspect and confirm again.');
   check(await realpath(target) === target, 'PATH_ALIAS', 'Target must be canonical.');
   const metadata = await lstat(target, { bigint: true });
   check(metadata.isFile() && !metadata.isSymbolicLink() && metadata.nlink === 1n, 'PATH_ALIAS', 'Target must be an unaliased regular file.');
@@ -187,7 +203,15 @@ export async function prepareManaged(candidate: Candidate, original: Buffer, exp
   const key = await stateBytes(join(paths.root, 'key'));
   check(key.length === 32, 'UNTRUSTED_STORE', 'Invalid managed state key.');
   // Immutable discovery locator is durable before the engine can publish an intent or write a target.
-  await publish(paths.locator, sign(locator, key));
+  const current = await managedRecord(target, derive);
+  check(canonical(current?.locator ?? null) === canonical(previous), 'INSPECTION_CHANGED', 'Managed selection changed before publication.');
+  check(canonical(await installationAt(candidate.appPath)) === canonical(candidate), 'INSPECTION_CHANGED', 'Installation information changed before publication.');
+  const parent = await lstat(dirname(target), { bigint: true });
+  check(String(parent.dev) === expected.parentDevice && String(parent.ino) === expected.parentInode, 'TARGET_CHANGED', 'Target parent changed before preparation publication.');
+  const latest = await lstat(target, { bigint: true });
+  check(String(latest.dev) === expected.device && String(latest.ino) === expected.inode && Number(latest.mode & 0o7777n) === expected.mode && String(latest.ctimeNs) === expected.ctime && String(latest.mtimeNs) === expected.mtime && (await regularBytes(target)).equals(original), 'TARGET_CHANGED', 'Target changed before preparation publication.');
+  const destination = previous ? `${paths.locator}.${previous.id}.next` : paths.locator;
+  await publish(destination, sign(previous ? { predecessor: digest(canonical(previous)), locator } : locator, key));
   const loaded = await managedRecord(target, derive);
   check(loaded, 'UNTRUSTED_RECORD', 'Managed locator was not durably published.');
   return loaded;
