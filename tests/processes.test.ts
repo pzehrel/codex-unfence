@@ -45,7 +45,7 @@ test('unrelated process churn permits managed apply and repeated apply preserves
 });
 
 test('BSD and GNU column layouts preserve spaced executable paths and browser-service arguments', async (t) => {
-  const blockers = [
+  const active = [
     { pid: 4101, executable: '/Applications/Some Folder/Codex.app/Contents/MacOS/Codex', command: 'Codex' },
     { pid: 4102, executable: '/Applications/Some Folder/ChatGPT.app/Contents/MacOS/ChatGPT', command: 'ChatGPT' },
     { pid: 4103, executable: '/tmp/Some Folder/browser-service', command: 'browser-service' },
@@ -53,12 +53,16 @@ test('BSD and GNU column layouts preserve spaced executable paths and browser-se
   ];
   for (const layout of ['darwin', 'linux']) {
     const box = await sandbox(t);
-    for (const row of blockers) {
-      const output = apply(box, { CODEX_TEST_PROCESS_LAYOUT: layout, CODEX_TEST_PROCESS_CHURN: '1', CODEX_TEST_PROCESS_ROWS: JSON.stringify([row]) }, 4);
-      assert.equal(output.diagnostics[0]?.code, 'PROCESSES_RUNNING');
-      assert.match(output.diagnostics[0]?.message ?? '', new RegExp(String(row.pid)));
+    for (const row of active) {
+      const output = apply(box, { CODEX_TEST_PROCESS_LAYOUT: layout, CODEX_TEST_PROCESS_CHURN: '1', CODEX_TEST_PROCESS_ROWS: JSON.stringify([row]) });
+      const warning = output.diagnostics.find(entry => entry.code === 'PROCESSES_RUNNING');
+      assert.equal(warning?.severity, 'warning');
+      assert.match(warning?.message ?? '', new RegExp(String(row.pid)));
+      assert.ok(warning?.message.includes(row.executable));
+      assert.equal(output.data?.targets[0]?.action, 'applied');
+      assert.notDeepEqual(await readFile(box.target), box.source);
+      run(box, 'restore');
       assert.deepEqual(await readFile(box.target), box.source);
-      await assert.rejects(access(join(box.directory, 'home/Library')));
     }
     const harmless = [{ pid: 4110, executable: '/bin/zsh', command: 'zsh -c echo /Applications/Codex.app/Contents/MacOS/Codex browser-service.mjs' }];
     const output = apply(box, { CODEX_TEST_PROCESS_LAYOUT: layout, CODEX_TEST_PROCESS_CHURN: '1', CODEX_TEST_PROCESS_ROWS: JSON.stringify(harmless) });
@@ -82,18 +86,23 @@ test('malformed or incomplete identities and ps execution failure all fail close
   await assert.rejects(access(join(box.directory, 'home/Library')));
 });
 
-test('managed restore and recover refuse blockers and unknown process state without changing pending data', async (t) => {
+test('managed restore and recover warn about running applications while unknown process state still blocks writes', async (t) => {
   const box = await sandbox(t);
   apply(box);
   const patched = await readFile(box.target);
   const identity = await stat(box.target);
-  const row = { pid: 4201, executable: '/Applications/ChatGPT.app/Contents/MacOS/ChatGPT', command: 'ChatGPT' };
   for (const command of ['restore', 'recover']) {
-    assert.equal(run(box, command, { CODEX_TEST_PROCESS_ROWS: JSON.stringify([row]) }, 4).diagnostics[0]?.code, 'PROCESSES_RUNNING');
     assert.equal(run(box, command, { CODEX_TEST_PROCESS_FAILURE: '1' }, 1).diagnostics[0]?.code, 'PROCESS_ENUMERATION_FAILED');
     assert.deepEqual(await readFile(box.target), patched);
     assert.equal((await stat(box.target)).ino, identity.ino);
   }
-  run(box, 'restore');
+  const env = { CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ pid: 4201, executable: '/Applications/ChatGPT.app/Contents/MacOS/ChatGPT', command: 'ChatGPT' }]) };
+  const recovered = run(box, 'recover', env);
+  assert.ok(recovered.diagnostics.some(entry => entry.code === 'PROCESSES_RUNNING' && entry.severity === 'warning'));
+  assert.deepEqual(await readFile(box.target), patched);
+  assert.equal((await stat(box.target)).ino, identity.ino);
+  const restored = run(box, 'restore', env);
+  assert.ok(restored.diagnostics.some(entry => entry.code === 'PROCESSES_RUNNING' && entry.severity === 'warning'));
+  assert.ok(restored.diagnostics.some(entry => entry.code === 'RESTART_REQUIRED'));
   assert.deepEqual(await readFile(box.target), box.source);
 });

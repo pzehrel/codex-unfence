@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { runCli } from './helpers/cli.js';
+import { deriveCua } from '../src/cua-analysis.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/managed-boundaries.cjs', import.meta.url));
 const service = 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs';
@@ -30,7 +31,7 @@ function run<C extends string>(box: Awaited<ReturnType<typeof sandbox>>, args: [
   return { code: child.status, result: parsed };
 }
 
-test('public check reports structural support independently of write blockers and creates no recovery state', async (t: TestContext) => {
+test('public check warns about active applications without blocking writes or creating recovery state', async (t: TestContext) => {
   const box = await sandbox(t);
   const { code, result } = run(box, ['check', '--app', box.app], {
     CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ pid: 987654, executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' }]),
@@ -39,11 +40,40 @@ test('public check reports structural support independently of write blockers an
   assert.equal(result.command, 'check');
   assert.equal(result.schemaVersion, 1);
   assert.equal(required(required(result.data).inspection).support, 'supported');
-  assert.equal(required(required(result.data).inspection).writeReadiness, 'blocked');
+  assert.equal(required(required(result.data).inspection).writeReadiness, 'ready');
   assert.equal(required(result.data).runtime, 'not-verified');
-  assert.equal(required(required(required(result.data).inspection).blockers[0]).code, 'PROCESSES_RUNNING');
+  assert.deepEqual(required(required(result.data).inspection).blockers, []);
+  assert.ok(required(required(result.data).inspection).allowedActions.includes('apply'));
+  assert.ok(result.diagnostics.some(entry => entry.code === 'PROCESSES_RUNNING' && entry.severity === 'warning'));
   assert.deepEqual(await readFile(box.target), box.source);
   assert.deepEqual(await readdir(join(box.directory, 'home')), ['Applications']);
+  const human = runCli(['check', '--app', box.app], { directory: box.directory, fixture, env: {
+    CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ pid: 987654, executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' }]),
+  } });
+  assert.equal(human.status, 0, human.stdout + human.stderr);
+  assert.match(human.stdout, /警告.*PROCESSES_RUNNING.*仍可写入/);
+  assert.match(human.stdout, /完整退出.*browser-service.*node_repl.*重新启动/);
+  assert.ok(human.stdout.includes('PID 987654 /Applications/Codex.app/Contents/MacOS/Codex'));
+});
+
+test('check identifies the installed patch from source without any local recovery files', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const change = required(deriveCua(box.source.toString('utf8')).change);
+  await writeFile(box.target, change.patchedSource);
+  const checked = run(box, ['check', '--app', box.app]);
+  assert.equal(checked.code, 0, JSON.stringify(checked.result));
+  const inspection = required(required(checked.result.data).inspection);
+  assert.equal(inspection.state, 'tool-applied');
+  assert.equal(inspection.sourcePatch?.status, 'detected');
+  assert.equal(inspection.recovery, null);
+  assert.deepEqual(inspection.allowedActions, []);
+  const human = runCli(['check', '--app', box.app], { directory: box.directory, fixture });
+  assert.equal(human.status, 0, human.stdout + human.stderr);
+  assert.match(human.stdout, /源码补丁：已安装/);
+  assert.match(human.stdout, /自动卸载：不可用/);
+  assert.match(human.stdout, /缺少可信恢复记录/);
+  assert.deepEqual(await readdir(join(box.directory, 'home')), ['Applications']);
+  assert.equal(await readFile(box.target, 'utf8'), change.patchedSource);
 });
 
 test('check reports process enumeration failure as runtime failure without changing structural support or file state', async (t: TestContext) => {
@@ -57,6 +87,9 @@ test('check reports process enumeration failure as runtime failure without chang
   assert.deepEqual(required(required(result.data).inspections[0]).allowedActions, []);
   assert.equal(required(result.data).runtime, 'not-verified');
   assert.ok(result.diagnostics.some(entry => entry.code === 'PROCESS_ENUMERATION_FAILED' && entry.installation === box.app));
+  const human = runCli(['check', '--app', box.app], { directory: box.directory, fixture, env: { CODEX_TEST_PROCESS_FAILURE: '1' } });
+  assert.equal(human.status, 1, human.stdout + human.stderr);
+  assert.match(human.stdout, /PROCESS_ENUMERATION_FAILED.*并发锁.*进程身份/);
   assert.deepEqual(await readdir(join(box.directory, 'home')), ['Applications']);
 });
 

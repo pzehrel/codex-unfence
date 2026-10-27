@@ -1,5 +1,7 @@
 // Synthetic public business-API driver; no production command or test switches.
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { canonical, digest } from '../../src/integrity.js';
+import { sign } from '../../src/transaction-storage.js';
 import { join } from 'node:path';
 import type { Candidate } from '../../src/installations.js';
 import { discoverInstallations } from '../../src/installations.js';
@@ -18,6 +20,45 @@ else {
     const previous = createManagedPatches({ derive: historical, tool: { packageName: 'codex-unfence', version: '0.2.0', executable: 'codex-unfence' } });
     const inspection = await previous.inspect(selection);
     result = await previous.apply({ candidate: selection, inspectionToken: inspection.inspectionToken ?? '', confirmed: true });
+    if (result.exitCode === 0) {
+      const current = await previous.inspect(selection);
+      if (!current.recovery || !inspection.derivation?.change) throw new Error('Expected synthetic recovery.');
+      const directory = current.recovery.preparation;
+      const manifest: Record<string, unknown> = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
+      const { patchedSource, localDiff, ...change } = inspection.derivation.change;
+      const { change: ignored, ...basis } = inspection.derivation;
+      void ignored;
+      manifest.formatVersion = 1;
+      manifest.basis = { ...basis, assumptions: [...basis.assumptions, 'Historical wording retained only in this fixture.'], change };
+      delete manifest.change;
+      await writeFile(join(directory, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
+      await writeFile(join(directory, 'source.patched.mjs'), patchedSource, { mode: 0o600 });
+      await writeFile(join(directory, 'local-diff.txt'), localDiff, { mode: 0o600 });
+      const contentHash = digest(canonical(manifest));
+      const root = join(directory, '../..');
+      const [name] = await readdir(join(root, 'targets'));
+      if (!name) throw new Error('Expected synthetic locator.');
+      const locatorPath = join(root, 'targets', name);
+      const locator: { record: Record<string, unknown> } = JSON.parse(await readFile(locatorPath, 'utf8'));
+      locator.record.contentHash = contentHash;
+      await writeFile(locatorPath, JSON.stringify(sign(locator.record, await readFile(join(root, 'key')))), { mode: 0o600 });
+      const transactions = join(current.recovery.store, 'transactions');
+      for (const id of await readdir(transactions)) {
+        const transaction = join(transactions, id);
+        const journalPath = join(transaction, 'journal.json');
+        const journal: { record: Record<string, unknown> } = JSON.parse(await readFile(journalPath, 'utf8'));
+        journal.record.planHash = contentHash;
+        journal.record.formatVersion = 2;
+        await writeFile(join(transaction, 'before.mjs'), await readFile(join(directory, 'source.original.mjs')), { mode: 0o600 });
+        await rm(join(transaction, 'plan/reference.json'));
+        for (const file of ['manifest.json', 'source.original.mjs', 'source.patched.mjs', 'local-diff.txt']) await writeFile(join(transaction, 'plan', file), await readFile(join(directory, file)), { mode: 0o600 });
+        await writeFile(journalPath, JSON.stringify(sign(journal.record, await readFile(join(current.recovery.store, 'key')))), { mode: 0o600 });
+      }
+    }
+  } else if (command === 'restore-without-support') {
+    const restoreOnly = createManagedPatches({ derive: source => ({ ...deriveCua(source), support: 'unsupported', change: null, diagnostics: [] }), tool: { packageName: 'codex-unfence', version: '9.8.7-synthetic', executable: 'codex-unfence' } });
+    const inspection = await restoreOnly.inspect(selection);
+    result = { inspection, operation: await restoreOnly.restore({ candidate: selection, inspectionToken: inspection.inspectionToken ?? '', confirmed: true }) };
   } else if (command === 'repeat-validation') {
     const steps = [];
     for (const action of ['apply', 'apply', 'restore', 'restore', 'apply'] as const) {

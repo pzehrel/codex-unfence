@@ -8,7 +8,8 @@ function execute(args: string[]): Promise<string> {
     });
   });
 }
-export const PROCESS_LIMITATION = 'Process checks use ps snapshots and executable/argument identities; processes may start after inspection. No process is terminated. Runtime loading and website operation remain not-verified.';
+export const PROCESS_LIMITATION = 'Process checks use ps snapshots and executable/argument identities; processes may start after inspection. No process is terminated. Runtime loading and website operation remain not-verified. Running applications and related services only trigger warnings; process identity enumeration is required for concurrency locks.';
+export const RESTART_REQUIRED = 'Fully exit the application and related browser services (browser-service and node_repl), then restart the application to load the changed files.';
 
 export interface ProcessIdentity {
   pid: number;

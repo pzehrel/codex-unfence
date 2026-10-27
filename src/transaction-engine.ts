@@ -1,9 +1,10 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readdir, realpath, rename, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { EXIT_CODES } from './result.js';
 import type { Diagnostic, OperationResult, OperationTarget, PendingTransaction, TargetState, TransactionCommand } from './result.js';
-import { PROCESS_LIMITATION, processTable } from './processes.js';
+import { PROCESS_LIMITATION, RESTART_REQUIRED, processTable } from './processes.js';
 import type { ProcessIdentity } from './processes.js';
 import { acquireLease, checkCoordinationPaths, externalTargetLock, inspectLease, releaseLease } from './transaction-locks.js';
 import type { LeaseRecord } from './transaction-locks.js';
@@ -51,7 +52,7 @@ interface JournalTarget {
   previous: string | null;
 }
 interface Journal {
-  formatVersion: 2;
+  formatVersion: 2 | 3;
   scheme: TransactionAdapter['scheme'];
   id: string;
   store: string;
@@ -108,13 +109,14 @@ function matchesPlan(current: Snapshot, identity: TransactionIdentity): boolean 
   return current.device === identity.device && current.inode === identity.inode && current.mode === identity.mode;
 }
 
+const operationProcesses = new AsyncLocalStorage<Map<string, ProcessIdentity>>();
 async function processes(): Promise<ProcessIdentity[]> {
   let table: ProcessIdentity[];
   try { table = await processTable(); } catch (error) {
-    throw new TransactionError('PROCESS_ENUMERATION_FAILED', `Cannot safely enumerate processes: ${error instanceof Error ? error.message : 'unknown error'}`, 'runtime-error');
+    throw new TransactionError('PROCESS_ENUMERATION_FAILED', `Cannot safely enumerate processes; process identities are required for concurrency locks: ${error instanceof Error ? error.message : 'unknown error'}`, 'runtime-error');
   }
-  const blockers = adapter.blockingProcesses(table);
-  if (blockers.length) throw new TransactionError('PROCESSES_RUNNING', `Exit related processes before writing: ${blockers.map((entry) => `PID ${entry.pid} ${entry.executable} ${entry.command}`).join('; ')}`);
+  const running = operationProcesses.getStore();
+  for (const entry of adapter.blockingProcesses(table)) running?.set(`${entry.pid}/${entry.start}`, entry);
   return table;
 }
 
@@ -128,8 +130,8 @@ function validSnapshot(value: unknown): value is Snapshot {
 function validateJournal(value: unknown, id: string, store: string): Journal {
   check(value !== null && typeof value === 'object', 'INVALID_JOURNAL', 'Missing transaction intent.');
   const item = value as Journal;
-  check(item.scheme === adapter.scheme && item.formatVersion === 2, 'SCHEME_MISMATCH', 'Transaction belongs to a different admission scheme.');
-  check(item.formatVersion === 2 && item.id === id && uuid.test(id) && item.store === store && (item.operation === 'apply' || item.operation === 'restore') && Number.isSafeInteger(item.sequence) && item.sequence >= 0 && /^[a-f0-9]{64}$/.test(item.planHash) && ['prepared', 'writing', 'verifying', 'committed', 'rolling-back', 'rolled-back'].includes(item.phase), 'INVALID_JOURNAL', 'Invalid transaction intent.');
+  check(item.scheme === adapter.scheme && (item.formatVersion === 2 || item.formatVersion === 3), 'SCHEME_MISMATCH', 'Transaction belongs to a different admission scheme.');
+  check((item.formatVersion === 2 || item.formatVersion === 3) && item.id === id && uuid.test(id) && item.store === store && (item.operation === 'apply' || item.operation === 'restore') && Number.isSafeInteger(item.sequence) && item.sequence >= 0 && /^[a-f0-9]{64}$/.test(item.planHash) && ['prepared', 'writing', 'verifying', 'committed', 'rolling-back', 'rolled-back'].includes(item.phase), 'INVALID_JOURNAL', 'Invalid transaction intent.');
   const targets = item.targets;
   check(Array.isArray(targets) && targets.length > 0, 'INVALID_JOURNAL', 'Missing target transaction intents.');
   const paths = new Set<string>();
@@ -146,9 +148,14 @@ function backupName(count: number, index: number): string {
   return count === 1 ? 'before.mjs' : `before.${String(index).padStart(4, '0')}.mjs`;
 }
 
-async function backupBytes(entry: Pick<RecordEntry, 'directory' | 'journal'>, index: number): Promise<Buffer> {
+async function backupBytes(entry: RecordEntry, index: number): Promise<Buffer> {
   const before = entry.journal.targets[index]!.before;
-  const bytes = await regularBytes(join(entry.directory, backupName(entry.journal.targets.length, index)), true);
+  const plan = entry.journal.formatVersion === 3 ? await adapter.loadStored(join(entry.directory, 'plan')) : entry.plan;
+  check(plan.manifest.contentHash === entry.journal.planHash, 'BACKUP_CHANGED', 'Operation backup does not match authenticated preoperation state.');
+  const item = plan.targets[index]!;
+  const bytes = entry.journal.formatVersion === 3
+    ? before.sha256 === item.target.original.sha256 && before.size === item.original.length ? item.original : item.patched
+    : await regularBytes(join(entry.directory, backupName(entry.journal.targets.length, index)), true);
   check(digest(bytes) === before.sha256 && bytes.length === before.size, 'BACKUP_CHANGED', 'Operation backup does not match authenticated preoperation state.');
   return bytes;
 }
@@ -223,11 +230,10 @@ async function createIntent(store: Store, id: string, operation: Operation, plan
       const { snapshot: before, previous } = states[index]!;
       const bytes = await regularBytes(item.target.identity.path);
       check(digest(bytes) === before.sha256 && bytes.length === before.size && same(await snapshot(item.target.identity.path), before), 'TARGET_CHANGED', 'Target changed before intent publication.');
-      await writeExclusive(join(staging, backupName(plan.targets.length, index)), bytes);
       const desired = operation === 'apply' ? item.target.patched : item.target.original;
       targets.push({ path: item.target.identity.path, before, afterHash: desired.sha256, afterSize: desired.size, final: null, replacement: null, previous });
     }
-    const journal: Journal = { formatVersion: 2, scheme: adapter.scheme, id, store: store.path, operation, sequence, planHash: plan.manifest.contentHash, phase: 'prepared', targets };
+    const journal: Journal = { formatVersion: 3, scheme: adapter.scheme, id, store: store.path, operation, sequence, planHash: plan.manifest.contentHash, phase: 'prepared', targets };
     await writeExclusive(join(staging, 'journal.json'), JSON.stringify(sign(journal, store.key)) + '\n');
     await syncDirectory(staging);
     await rename(staging, destination);
@@ -359,7 +365,11 @@ async function rollback(store: Store, entry: RecordEntry): Promise<void> {
 }
 
 function result(command: TransactionCommand, outcome: OperationResult['outcome'], data: OperationResult['data'], diagnostics: Diagnostic[] = []): OperationResult {
-  return { schemaVersion: 1, command, outcome, exitCode: outcome === 'success' ? EXIT_CODES.success : outcome === 'conflict' ? EXIT_CODES.conflict : outcome === 'usage-error' ? EXIT_CODES.usageError : outcome === 'incompatible' ? EXIT_CODES.incompatible : EXIT_CODES.runtimeError, data, diagnostics: [...diagnostics, { code: 'PROCESS_CHECK_LIMITATION', severity: 'info', message: PROCESS_LIMITATION }] };
+  const running = [...operationProcesses.getStore()?.values() ?? []];
+  const notices: Diagnostic[] = [];
+  if (running.length) notices.push({ code: 'PROCESSES_RUNNING', severity: 'warning', message: `Related processes are running: ${running.map((entry) => `PID ${entry.pid} ${entry.executable} ${entry.command}`).join('; ')}` });
+  if (outcome === 'success' && command !== 'status' && data?.targets.some(target => ['applied', 'restored', 'rolled-back'].includes(target.action ?? ''))) notices.push({ code: 'RESTART_REQUIRED', severity: 'info', message: RESTART_REQUIRED });
+  return { schemaVersion: 1, command, outcome, exitCode: outcome === 'success' ? EXIT_CODES.success : outcome === 'conflict' ? EXIT_CODES.conflict : outcome === 'usage-error' ? EXIT_CODES.usageError : outcome === 'incompatible' ? EXIT_CODES.incompatible : EXIT_CODES.runtimeError, data, diagnostics: [...diagnostics, ...notices, { code: 'PROCESS_CHECK_LIMITATION', severity: 'info', message: PROCESS_LIMITATION }] };
 }
 
 function failure(command: TransactionCommand, error: unknown): OperationResult {
@@ -392,11 +402,15 @@ async function select<T>(options: Options, prepare: () => Promise<T>): Promise<T
 }
 
 async function apply(options: Options): Promise<OperationResult> {
-  try { return await changeTransaction('apply', options); } catch (error) { return failure('apply', error); }
+  return operationProcesses.run(new Map(), async () => {
+    try { return await changeTransaction('apply', options); } catch (error) { return failure('apply', error); }
+  });
 }
 
 async function restore(options: Options): Promise<OperationResult> {
-  try { return await changeTransaction('restore', options); } catch (error) { return failure('restore', error); }
+  return operationProcesses.run(new Map(), async () => {
+    try { return await changeTransaction('restore', options); } catch (error) { return failure('restore', error); }
+  });
 }
 
 async function changeTransaction(operation: Operation, options: Options): Promise<OperationResult> {
@@ -438,6 +452,9 @@ async function changeTransaction(operation: Operation, options: Options): Promis
       current.push(state);
     }
     const desiredState = operation === 'apply' ? 'tool-applied' : 'original';
+    if (current.every(state => state.state === desiredState)) {
+      return result(operation, 'success', { store: store.path, transaction: null, operation, targets: paths.map(path => ({ path, state: desiredState, action: operation === 'apply' ? 'already-applied' : 'already-original' })), runtime: 'not-verified' });
+    }
     entry = await createIntent(store, transaction, operation, plan, current, Math.max(0, ...currentRecords.map((record) => record.journal.sequence)) + 1);
     await processes();
     // Intent publication and process enumeration can take time: recheck every target before the first write.
@@ -563,7 +580,9 @@ async function status(options: Options): Promise<OperationResult> {
 }
 
 async function recover(options: Options): Promise<OperationResult> {
-  try { return await recoverTransaction(options); } catch (error) { return failure('recover', error); }
+  return operationProcesses.run(new Map(), async () => {
+    try { return await recoverTransaction(options); } catch (error) { return failure('recover', error); }
+  });
 }
 
 async function recoverTransaction(options: Options): Promise<OperationResult> {

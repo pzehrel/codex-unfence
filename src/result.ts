@@ -84,6 +84,7 @@ export function renderInspection(inspection: Inspection): string[] {
     `  目标文件：${inspection.candidate.targetPath}`,
     `  结构兼容：${inspection.support === 'supported' ? '支持' : '不支持'}`,
     `  文件状态：${stateLabels[inspection.state]}`,
+    ...(inspection.sourcePatch?.status === 'detected' ? [`  源码补丁：已安装`, `  自动卸载：${inspection.recovery && inspection.allowedActions.includes('restore') ? '可用' : '不可用'}`] : []),
     `  写入条件：${{ ready: '满足', blocked: '不满足', unknown: '未知' }[inspection.writeReadiness]}`,
     `  可以安装：${inspection.allowedActions.includes('apply') ? '是' : '否'}`,
     `  可用操作：${inspection.allowedActions.map(publicActionName).join('、') || '无'}`,

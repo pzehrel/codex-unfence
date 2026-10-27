@@ -3,6 +3,7 @@ import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { readFile } from 'node:fs/promises';
 import { deriveCua } from '../src/cua-analysis.js';
+import { detectCuaPatch } from '../src/cua-patch-detection.js';
 import { deriveCua as legacy } from '../src/cua-legacy-analysis.js';
 import { sourceFixture } from './helpers/paths.js';
 
@@ -24,7 +25,7 @@ function supported(source: string) {
   assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
   assert.ok(result.change);
   const { before, after, range, patchedSource } = result.change;
-  assert.equal(before, 'await runtime.fetch(endpoint, options)');
+  assert.equal(before, 'await response.json()');
   assert.equal(source.slice(range.start, range.end), before);
   assert.equal(patchedSource.slice(0, range.start), source.slice(0, range.start));
   assert.equal(patchedSource.slice(range.start + after.length), source.slice(range.end));
@@ -52,24 +53,16 @@ for (const [name, source] of [
   ['wrong endpoint', minimal.replace('/aura/site_status', '/other')],
   ['unrelated endpoint literal', minimal.replace("const endpoint = new URL('https://example.test/aura/site_status');", "const unused = '/aura/site_status'; const endpoint = new URL('https://example.test/other');")],
   ['wrong response binding', minimal.replace('await response.json()', 'await other.json()')],
-  ['status interface', minimal.replace('if (!response.ok)', 'if (response.status !== 200 || !response.ok)')],
-  ['headers interface', minimal.replace('if (!response.ok)', 'if (!response.headers || !response.ok)')],
   ['text interface', minimal.replace('await response.json()', 'await response.text()')],
-  ['json arguments', minimal.replace('response.json()', 'response.json(1)')],
-  ['response escape', minimal.replace('const body =', 'consume(response); const body =')],
-  ['response property assignment', minimal.replace('const body =', 'response.ok = true; const body =')],
-  ['shared transport', minimal + "async function other(runtime) { return await transport(runtime, 'https://example.test/other', {}); }"],
-  ['escaped transport', minimal + '\nconst alias = transport;'],
   ['missing feature status consumption', minimal.replace('body.feature_status.agent', 'body.other.agent')],
   ['Object capture', 'const Object = {};\n' + minimal],
   ['Reflect capture', 'const Reflect = {};\n' + minimal],
-  ['block Object capture', minimal.replace('return await runtime.fetch', 'const Object = {}; return await runtime.fetch')],
+  ['block Object capture', minimal.replace('const body =', 'const Object = {}; const body =')],
   ['transport ignores endpoint', minimal.replace('runtime.fetch(endpoint, options)', "runtime.fetch('https://example.test/other', options)")],
   ['transport overwrites endpoint parameter', minimal.replace('return await runtime.fetch', "endpoint = 'https://example.test/other'; return await runtime.fetch")],
   ['endpoint reassignment', minimal.replace("const endpoint = new URL('https://example.test/aura/site_status');", "let endpoint = new URL('https://example.test/aura/site_status'); endpoint = new URL('https://example.test/other');")],
   ['duplicate endpoint property', minimal.replace('endpoint.toString()', "({endpoint: '/aura/site_status', endpoint: '/other'}).endpoint")],
   ['unrelated logical endpoint branch', minimal.replace('endpoint.toString()', "('/other' || '/aura/site_status')")],
-  ['arrow transport escape', minimal.replace('async function transport(runtime, endpoint, options)', 'const transport = async (runtime, endpoint, options) =>') + '\nconst alias = transport;'],
   ['response reinitialization', minimal.replace('const response =', 'var response =').replace('const body =', 'var response = other; const body =')],
 ] as const) {
   test(`local admission rejects ${name}`, () => {
@@ -94,11 +87,27 @@ test('local admission rejects already wrapped source', () => {
   assert.equal(deriveCua(change.patchedSource).support, 'unsupported');
 });
 
+test('source detection verifies the complete installed wrapper at the selected JSON result', () => {
+  const change = supported(minimal);
+  const detected = detectCuaPatch(change.patchedSource);
+  assert.equal(detected?.recipeVersion, 2);
+  assert.equal(detected?.derivation.support, 'supported');
+  assert.equal(detectCuaPatch(minimal), null);
+  assert.ok(detectCuaPatch(change.patchedSource.replace('status.agent !== true', 'status.agent\n !== true')));
+  assert.equal(detectCuaPatch(change.patchedSource.replace('agent: false', 'agent: true')), null);
+  assert.equal(detectCuaPatch(change.patchedSource.replace('/aura/site_status', '/other')), null);
+  assert.equal(detectCuaPatch(minimal + '\n// ' + JSON.stringify(change.after)), null);
+  assert.equal(detectCuaPatch(minimal + '\nconst sample = ' + JSON.stringify(change.after) + ';'), null);
+  const nested = change.patchedSource.replace(change.after, change.after.replace(change.before, change.after));
+  assert.equal(detectCuaPatch(nested), null);
+  assert.equal(detectCuaPatch(change.patchedSource + '\nconst unused = ' + change.after.replace(change.before, 'null') + ';'), null);
+});
+
 test('local admission supports direct fetch without a dedicated transport helper', () => {
   const source = minimal.slice(minimal.indexOf('async function check')).replace('transport(runtime, endpoint.toString(),', 'runtime.fetch(endpoint.toString(),');
   const result = deriveCua(source);
   assert.equal(result.support, 'supported', JSON.stringify(result.diagnostics));
-  assert.equal(result.change?.before, "await runtime.fetch(endpoint.toString(), { method: 'GET' })");
+  assert.equal(result.change?.before, 'await response.json()');
 });
 
 test('local admission preserves receiver, arguments, errors and response rewrite behavior', async () => {
@@ -125,6 +134,74 @@ test('local admission preserves receiver, arguments, errors and response rewrite
   assert.equal(original.feature_status.agent, true);
   const failure = new Error('network');
   await assert.rejects(run({ fetch() { throw failure; } }, 'https://site.test'), error => error === failure);
+});
+
+test('shared and aliased transports leave unrelated responses and matching JSON fields untouched', async () => {
+  const source = minimal.replace('return body.feature_status.agent === true;', 'void body?.feature_status; return body;') + `
+const alias = transport;
+async function other(runtime) { return await alias(runtime, 'https://example.test/other', {}); }
+`;
+  const change = supported(source);
+  const context = { URL, Object, Reflect };
+  const selected: unknown = runInNewContext(change.patchedSource + ';check', context);
+  const other: unknown = runInNewContext(change.patchedSource + ';other', { URL, Object, Reflect });
+  if (typeof selected !== 'function' || typeof other !== 'function') throw new Error('Expected test functions');
+  const body = Object.freeze({ feature_status: Object.freeze({ agent: true, other: 2 }), other: Object.freeze({ keep: 7 }) });
+  const response = new Response(JSON.stringify(body), { status: 201, headers: { 'x-test': 'preserved' } });
+  const runtime = { async fetch() { return response; } };
+  const unrelated: unknown = await other(runtime);
+  assert.equal(unrelated, response);
+  assert.deepEqual(await response.clone().json(), body);
+  const result: unknown = await selected(runtime, 'https://site.test');
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { feature_status: { agent: false, other: 2 }, other: { keep: 7 } });
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get('x-test'), 'preserved');
+  assert.equal(response.bodyUsed, true);
+});
+
+test('response interfaces, methods, identity and JSON arguments pass through unchanged', async () => {
+  const source = minimal
+    .replace('const body = await response.json();', "inspect(response); response.custom = 9; const body = await response.json('argument');")
+    .replace('return body.feature_status.agent === true;', 'void body?.feature_status; return body;');
+  const change = deriveCua(source).change;
+  assert.ok(change);
+  const body = Object.freeze({ feature_status: Object.freeze({ agent: true, other: 3 }), keep: Object.freeze({ value: 4 }) });
+  const headers = new Headers({ 'x-test': 'preserved' });
+  const response = {
+    ok: true, status: 202, headers, custom: 0,
+    text() { assert.equal(this, response); return 'text'; },
+    arrayBuffer() { assert.equal(this, response); return new ArrayBuffer(3); },
+    clone() { assert.equal(this, response); return response; },
+    async json(argument: unknown) { assert.equal(this, response); assert.equal(argument, 'argument'); return body; },
+  };
+  let inspected = 0;
+  const run: unknown = runInNewContext(change.patchedSource + ';check', { URL, Object, Reflect, inspect(value: unknown) {
+    assert.equal(value, response);
+    assert.equal(response.status, 202);
+    assert.equal(response.headers, headers);
+    assert.equal(response.text(), 'text');
+    assert.equal(response.arrayBuffer().byteLength, 3);
+    assert.equal(response.clone(), response);
+    inspected++;
+  } });
+  if (typeof run !== 'function') throw new Error('Expected check function');
+  const result = await run({ async fetch() { return response; } }, 'https://site.test');
+  assert.equal(inspected, 1);
+  assert.equal(response.custom, 9);
+  assert.equal(result.keep, body.keep);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { feature_status: { agent: false, other: 3 }, keep: { value: 4 } });
+  assert.equal(body.feature_status.agent, true);
+});
+
+test('JSON errors and data without a true agent flag pass through unchanged', async () => {
+  const change = supported(minimal.replace('return body.feature_status.agent === true;', 'void body?.feature_status; return body;'));
+  const run: unknown = runInNewContext(change.patchedSource + ';check', { URL, Object, Reflect });
+  if (typeof run !== 'function') throw new Error('Expected check function');
+  const values = [null, undefined, 7, [], {}, { feature_status: {} }, { feature_status: { agent: false } }, { feature_status: { agent: 'true' } }];
+  for (const body of values) assert.equal(await run({ async fetch() { return { ok: true, async json() { return body; } }; } }, 'https://site.test'), body);
+  const failure = new Error('JSON failure');
+  await assert.rejects(run({ async fetch() { return { ok: true, json() { throw failure; } }; } }, 'https://site.test'), error => error === failure);
+  await assert.rejects(run({ async fetch() { return { ok: true, json() { return Promise.reject(failure); } }; } }, 'https://site.test'), error => error === failure);
 });
 
 test('local admission keeps UTF-16 ranges and deterministic results', () => {

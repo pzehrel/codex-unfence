@@ -190,7 +190,7 @@ test('npx refuses a target changed after inspection instead of applying to new b
   assert.deepEqual(await readFile(target), changed);
 });
 
-test('npx check reports process failures and a blocked guide can recheck after the host exits', async (t: TestContext) => {
+test('npx check reports process failures while the guide permits installation with the host running', async (t: TestContext) => {
   const box = await packageBox(t);
   const app = join(box.directory, 'home/Applications/Blocked.app');
   const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
@@ -205,16 +205,18 @@ test('npx check reports process failures and a blocked guide can recheck after t
   const blocked = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
   const inspected = required(checkOutput(blocked.stdout).data).inspection;
   assert.equal(required(inspected).support, 'supported');
-  assert.equal(required(inspected).writeReadiness, 'blocked');
-  assert.deepEqual(required(inspected).allowedActions, []);
+  assert.equal(required(inspected).writeReadiness, 'ready');
+  assert.deepEqual(required(inspected).allowedActions, ['apply']);
+  assert.ok(required(inspected).diagnostics.some(entry => entry.code === 'PROCESSES_RUNNING' && entry.severity === 'warning'));
   const guided = await npmPackage.runNpmExecPty([], { ...box, steps: [
-    { waitFor: '选择操作（recheck', beforeSend: () => writeFile(scenario, '{}'), send: 'recheck\n' },
     { waitFor: '选择操作（install', send: 'apply\n' },
     { waitFor: '输入 yes 确认', send: 'yes\n' },
   ] });
   assert.equal(guided.status, 0, guided.stdout + guided.stderr);
-  assert.match(guided.stdout, /PROCESSES_RUNNING/);
+  assert.match(guided.stdout, /警告.*PROCESSES_RUNNING.*仍可写入/);
+  assert.match(guided.stdout, /RESTART_REQUIRED.*完整退出.*browser-service.*node_repl.*重新启动/);
   assert.match(guided.stdout, /已安装补丁（安装完成）/);
+  assert.notDeepEqual(await readFile(target), source);
 });
 
 test('multiple installations require selection and confirmation EOF leaves the selected bytes unchanged', async (t: TestContext) => {
@@ -301,7 +303,7 @@ test('npx install and uninstall are repeatable and original uninstall needs no b
   assert.match((await change('uninstall')).stdout, /原始文件（已是原始文件）/);
 });
 
-test('npx uninstall of an original refuses running processes instead of reporting success', async (t: TestContext) => {
+test('npx uninstall of an original warns about running processes and reports unchanged-file success', async (t: TestContext) => {
   const box = await packageBox(t);
   const app = join(box.directory, 'home/Applications/BlockedOriginal.app');
   const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
@@ -311,12 +313,11 @@ test('npx uninstall of an original refuses running processes instead of reportin
   await writeFile(join(box.directory, 'boundary.json'), JSON.stringify({
     processRows: [{ pid: 998877, executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' }],
   }));
-  const child = await npmPackage.runNpmExecPty(['uninstall', '--app', app], {
-    ...box, steps: [{ waitFor: '选择操作（recheck, cancel）', send: 'cancel\n' }],
-  });
-  assert.equal(child.status, 4, child.stdout + child.stderr);
-  assert.match(child.stdout, /PROCESSES_RUNNING/);
-  assert.doesNotMatch(child.stdout, /uninstall：成功/);
+  const child = await npmPackage.runNpmExecPty(['uninstall', '--app', app], box);
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  assert.match(child.stdout, /警告.*PROCESSES_RUNNING.*仍可写入/);
+  assert.match(child.stdout, /uninstall：成功/);
+  assert.match(child.stdout, /补丁已卸载，原始文件未修改/);
   assert.deepEqual(await readFile(target), source);
   await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
 });
@@ -690,7 +691,8 @@ test('npx recovery restores each transaction before state and cancellation or EO
       ]);
       assert.equal(cancelled.status, 0, cancelled.stdout + cancelled.stderr);
       assert.match(cancelled.stdout, /恢复已完成，后续操作已取消/);
-      assert.match(cancelled.stdout, new RegExp(`文件状态：${command === 'install' ? '原始文件' : '已安装补丁'}\\r?\\n  写入条件：满足`));
+      const sourceStatus = command === 'install' ? '' : '\\r?\\n  源码补丁：已安装\\r?\\n  自动卸载：可用';
+      assert.match(cancelled.stdout, new RegExp(`文件状态：${command === 'install' ? '原始文件' : '已安装补丁'}${sourceStatus}\\r?\\n  写入条件：满足`));
       assert.doesNotMatch(cancelled.stdout, /应用文件未修改/);
       assert.deepEqual(await readFile(target), before);
       assert.ok(observed.identity);
@@ -770,7 +772,7 @@ test('npx install and uninstall recover again after an interrupted rollback and 
   }
 });
 
-test('npx recovery rechecks a process blocker before rollback and before the separately confirmed continuation', async (t: TestContext) => {
+test('npx recovery permits a running host while process enumeration failure blocks the separately confirmed continuation', async (t: TestContext) => {
   const box = await packageBox(t);
   const { app, target, source } = await syntheticInstallation(box, 'RecoveryRecheck');
   const scenario = join(box.directory, 'boundary.json');
@@ -782,7 +784,6 @@ test('npx recovery rechecks a process blocker before rollback and before the sep
   const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
   let recoveredFiles: FileSnapshot | undefined;
   const recovered = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [
-    { waitFor: '选择操作（recheck, cancel）', send: 'recheck\n', beforeSend: () => writeFile(scenario, '{}') },
     { waitFor: '输入 yes 确认恢复', send: 'yes\n' },
     { waitFor: '输入 yes 确认 install，', send: 'yes\n', beforeSend: async () => {
       assert.deepEqual(await readFile(target), source);
@@ -791,9 +792,10 @@ test('npx recovery rechecks a process blocker before rollback and before the sep
     } },
   ] });
   assert.equal(recovered.status, 1, recovered.stdout + recovered.stderr);
-  assert.match(recovered.stdout, /PROCESSES_RUNNING/);
+  assert.match(recovered.stdout, /警告.*PROCESSES_RUNNING.*仍可写入/);
+  assert.match(recovered.stdout, /RESTART_REQUIRED.*完整退出.*browser-service.*node_repl.*重新启动/);
   assert.match(recovered.stdout, /已回滚/);
-  assert.match(recovered.stdout, /PROCESS_ENUMERATION_FAILED/);
+  assert.match(recovered.stdout, /PROCESS_ENUMERATION_FAILED.*并发锁.*进程身份/);
   assert.deepEqual(await readFile(target), source);
   assert.deepEqual(await snapshotFiles(root), recoveredFiles);
 });

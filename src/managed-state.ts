@@ -3,7 +3,6 @@ import { lstat, mkdir, readdir, realpath } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { CUA_SCHEME } from './cua-contract.js';
-import { deriveCua as deriveLegacyCua } from './cua-legacy-analysis.js';
 import type { CuaDerivation, DeriveCua } from './cua-contract.js';
 import { canonical, digest } from './integrity.js';
 import { installationAt } from './installations.js';
@@ -14,21 +13,22 @@ import { canonicalDirectory, check, exists, privateDirectory, publish, readJSON,
 
 export interface ToolIdentity { packageName: string; version: string; executable: string }
 interface Manifest {
-  formatVersion: 1;
+  formatVersion: 1 | 2;
   scheme: typeof CUA_SCHEME;
-  recipeVersion: 1;
+  recipeVersion: 1 | 2;
   tool: ToolIdentity;
   candidate: Candidate;
   identity: TransactionIdentity;
   original: { sha256: string; size: number };
   patched: { sha256: string; size: number };
-  basis: Omit<CuaDerivation, 'change'> & { change: Omit<NonNullable<CuaDerivation['change']>, 'patchedSource' | 'localDiff'> };
+  change?: Pick<NonNullable<CuaDerivation['change']>, 'range' | 'before' | 'after'>;
+  basis?: Omit<CuaDerivation, 'change'> & { change: Omit<NonNullable<CuaDerivation['change']>, 'patchedSource' | 'localDiff'> };
 }
 export interface ManagedPlan extends ValidatedTransactionPlan { manifest: Manifest & { contentHash: string }; derivation: CuaDerivation }
 export interface Locator {
   formatVersion: 1;
   scheme: typeof CUA_SCHEME;
-  recipeVersion: 1;
+  recipeVersion: 1 | 2;
   id: string;
   target: string;
   preparation: string;
@@ -98,10 +98,9 @@ async function stateRoot(target: string, create: boolean): Promise<ReturnType<ty
 }
 function manifestFor(original: Buffer, derivation: CuaDerivation, identity: TransactionIdentity, candidate: Candidate, tool: ToolIdentity): Manifest {
   validTool(tool);
-  check(derivation.scheme === CUA_SCHEME && derivation.recipeVersion === 1 && derivation.support === 'supported' && derivation.change, 'UNSUPPORTED_SOURCE', 'Source is not supported by the CUA structural recipe.');
+  check(derivation.scheme === CUA_SCHEME && (derivation.recipeVersion === 1 || derivation.recipeVersion === 2) && derivation.support === 'supported' && derivation.change, 'UNSUPPORTED_SOURCE', 'Source is not supported by the CUA structural recipe.');
   const { patchedSource, range, before, after } = derivation.change;
-  const basis = { scheme: derivation.scheme, recipeVersion: derivation.recipeVersion, support: derivation.support, runtime: derivation.runtime, assumptions: derivation.assumptions, evidence: derivation.evidence, diagnostics: derivation.diagnostics, change: { range, before, after } };
-  return { formatVersion: 1, scheme: CUA_SCHEME, recipeVersion: 1, tool, candidate, identity, original: { sha256: digest(original), size: original.length }, patched: { sha256: digest(patchedSource), size: Buffer.byteLength(patchedSource) }, basis };
+  return { formatVersion: 2, scheme: CUA_SCHEME, recipeVersion: derivation.recipeVersion, tool, candidate, identity, original: { sha256: digest(original), size: original.length }, patched: { sha256: digest(patchedSource), size: Buffer.byteLength(patchedSource) }, change: { range, before, after } };
 }
 function identityAt(value: unknown): asserts value is TransactionIdentity {
   check(recordObject(value) && Object.keys(value).sort().join(',') === 'device,inode,mode,path,realPath', 'INVALID_PREPARATION', 'Invalid managed target identity.');
@@ -111,14 +110,30 @@ function identityAt(value: unknown): asserts value is TransactionIdentity {
 
 /** Reload original bytes and rederive all writable content; saved hashes alone never grant admission. */
 export async function loadManagedPlan(directory: string, derive: DeriveCua): Promise<ManagedPlan> {
+  check(await exists(directory), 'RECOVERY_MATERIAL_MISSING', 'Recovery files are missing. Preserve the current application; automatic restoration is unavailable.', directory);
   await stateDirectory(directory);
-  check(canonical((await readdir(directory)).sort()) === canonical([...files].sort()), 'INVALID_PREPARATION', 'Unexpected or missing managed preparation files.', directory);
-  const original = await stateBytes(join(directory, 'source.original.mjs'));
-  const patched = await stateBytes(join(directory, 'source.patched.mjs'));
-  const diff = await stateBytes(join(directory, 'local-diff.txt'));
-  await stateBytes(join(directory, 'manifest.json'));
+  const names = (await readdir(directory)).sort();
+  if (canonical(names) === canonical(['reference.json'])) {
+    const reference = await readJSON(join(directory, 'reference.json'));
+    check(recordObject(reference) && typeof reference.preparation === 'string' && typeof reference.contentHash === 'string', 'INVALID_PREPARATION', 'Invalid recovery reference.');
+    absolute(reference.preparation);
+    const root = join(userInfo().homedir, 'Library/Application Support/codex-unfence/preparations');
+    check(dirname(reference.preparation) === root && uuid.test(reference.preparation.slice(root.length + 1)), 'INVALID_PREPARATION', 'Recovery reference must select a local preparation.');
+    const plan = await loadPreparation(reference.preparation, derive);
+    check(plan.manifest.contentHash === reference.contentHash, 'INVALID_PREPARATION', 'Recovery reference does not match its preparation.');
+    return plan;
+  }
+  return loadPreparation(directory, derive);
+}
+
+async function loadPreparation(directory: string, derive: DeriveCua): Promise<ManagedPlan> {
+  await stateDirectory(directory);
+  for (const name of ['manifest.json', 'source.original.mjs']) check(await exists(join(directory, name)), 'RECOVERY_MATERIAL_MISSING', 'Recovery files are missing. Preserve the current application; automatic restoration is unavailable.', join(directory, name));
   const saved = await readJSON(join(directory, 'manifest.json'));
-  check(recordObject(saved) && saved.scheme === CUA_SCHEME, 'SCHEME_MISMATCH', 'Preparation uses an unsupported admission scheme. Use the original tool version and entrypoint to restore.');
+  check(recordObject(saved) && saved.scheme === CUA_SCHEME && (saved.recipeVersion === 1 || saved.recipeVersion === 2) && (saved.formatVersion === 1 || saved.formatVersion === 2), 'SCHEME_MISMATCH', 'Preparation uses an unsupported format or patch recipe.');
+  const expected = saved.formatVersion === 1 ? files : ['manifest.json', 'source.original.mjs'];
+  check(canonical((await readdir(directory)).sort()) === canonical([...expected].sort()), 'INVALID_PREPARATION', 'Unexpected or missing managed preparation files.', directory);
+  const original = await stateBytes(join(directory, 'source.original.mjs'));
   identityAt(saved.identity);
   check(recordObject(saved.candidate) && saved.candidate.targetPath === saved.identity.path && typeof saved.candidate.appPath === 'string' && join(saved.candidate.appPath, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs') === saved.identity.path, 'INVALID_PREPARATION', 'Preparation target and installation differ.');
   absolute(saved.candidate.appPath);
@@ -126,13 +141,22 @@ export async function loadManagedPlan(directory: string, derive: DeriveCua): Pro
   const source = original.toString('utf8');
   check(Buffer.from(source).equals(original), 'INVALID_PREPARATION', 'Prepared original must be lossless UTF-8.');
   // Historical preparations bind the complete legacy evidence, not just patched bytes.
-  // Reproduce that evidence only for restoration; new admissions use the local analyzer.
+  // Keep that evidence authenticated for restoration; new admissions use the local analyzer.
+  // Restoration validates the saved replacement without reproducing analyzer wording.
   const basis = recordObject(saved.basis) ? saved.basis : null;
-  const historical = Array.isArray(basis?.assumptions) && basis.assumptions[0] === 'ES2022 module syntax; finite dedicated site-status transport, request builder, strict agent predicate and cache/blocked consumption family.';
-  const derivation = historical ? deriveLegacyCua(source) : derive(source);
-  const manifest = manifestFor(original, derivation, saved.identity, saved.candidate as unknown as Candidate, saved.tool);
-  check(canonical(manifest) === canonical(saved) && patched.equals(Buffer.from(derivation.change!.patchedSource)) && diff.equals(Buffer.from(derivation.change!.localDiff)), 'INVALID_PREPARATION', 'Prepared bytes, evidence or transformation differ from fresh structural derivation.');
-  return { directory, manifest: { ...manifest, contentHash: digest(canonical(manifest)) }, targets: [{ target: { identity: manifest.identity, original: manifest.original, patched: manifest.patched }, original, patched }], derivation };
+  const change = saved.formatVersion === 1 ? basis?.change : saved.change;
+  check(recordObject(change) && recordObject(change.range) && change.range.unit === 'utf16' && Number.isSafeInteger(change.range.start) && Number.isSafeInteger(change.range.end) && typeof change.before === 'string' && typeof change.after === 'string', 'INVALID_PREPARATION', 'Missing or invalid saved replacement.');
+  const start = Number(change.range.start), end = Number(change.range.end);
+  check(start >= 0 && end > start && end <= source.length && source.slice(start, end) === change.before, 'INVALID_PREPARATION', 'Saved replacement does not match the supported patch recipe.');
+  const patched = Buffer.from(source.slice(0, start) + change.after + source.slice(end));
+  check(recordObject(saved.original) && saved.original.sha256 === digest(original) && saved.original.size === original.length && recordObject(saved.patched) && saved.patched.sha256 === digest(patched) && saved.patched.size === patched.length, 'INVALID_PREPARATION', 'Recovery bytes do not match their recorded hashes.');
+  if (saved.formatVersion === 1) {
+    check(patched.equals(await stateBytes(join(directory, 'source.patched.mjs'))), 'INVALID_PREPARATION', 'Saved patched file differs from its replacement.');
+    await stateBytes(join(directory, 'local-diff.txt'));
+  }
+  const manifest = saved as unknown as Manifest;
+  const derivation = derive(source);
+  return { directory, manifest: { ...manifest, contentHash: digest(canonical(saved)) }, targets: [{ target: { identity: manifest.identity, original: manifest.original, patched: manifest.patched }, original, patched }], derivation };
 }
 
 export async function managedRecord(target: string, derive: DeriveCua): Promise<{ locator: Locator; plan: ManagedPlan } | null> {
@@ -150,7 +174,7 @@ export async function managedRecord(target: string, derive: DeriveCua): Promise<
       check(recordObject(value) && Object.keys(value).sort().join(',') === 'locator,predecessor' && value.predecessor === predecessor, 'UNTRUSTED_RECORD', 'Managed successor does not bind its predecessor.', path);
       value = value.locator;
     }
-    check(recordObject(value) && value.scheme === CUA_SCHEME && value.formatVersion === 1 && value.recipeVersion === 1, 'UNSUPPORTED_MANAGED_RECORD', 'Unknown managed source. Restore with its original tool version and entrypoint; no migration was performed.');
+    check(recordObject(value) && value.scheme === CUA_SCHEME && value.formatVersion === 1 && (value.recipeVersion === 1 || value.recipeVersion === 2), 'UNSUPPORTED_MANAGED_RECORD', 'Unknown managed source. Restore with its original tool version and entrypoint; no migration was performed.');
     check(typeof value.id === 'string' && uuid.test(value.id) && value.target === target && value.preparation === join(paths.root, 'preparations', value.id) && value.store === join(paths.root, 'stores', value.id) && typeof value.contentHash === 'string' && /^[a-f0-9]{64}$/.test(value.contentHash), 'UNTRUSTED_RECORD', 'Managed locator paths or target identity changed. Operation stores cannot be migrated.');
     validTool(value.tool);
     check(value.recovery === recoveryCommand(value.tool), 'UNTRUSTED_RECORD', 'Managed recovery entrypoint differs from its exact tool version.');
@@ -193,13 +217,11 @@ export async function prepareManaged(candidate: Candidate, original: Buffer, exp
   const directory = join(paths.root, 'preparations', id);
   await mkdir(directory, { mode: 0o700 });
   await writeExclusive(join(directory, 'source.original.mjs'), original);
-  await writeExclusive(join(directory, 'source.patched.mjs'), derivation.change!.patchedSource);
-  await writeExclusive(join(directory, 'local-diff.txt'), derivation.change!.localDiff);
   await writeExclusive(join(directory, 'manifest.json'), JSON.stringify(manifest) + '\n');
   await syncDirectory(directory);
   await syncDirectory(dirname(directory));
   const plan = await loadManagedPlan(directory, derive);
-  const locator: Locator = { formatVersion: 1, scheme: CUA_SCHEME, recipeVersion: 1, id, target, preparation: directory, store: join(paths.root, 'stores', id), contentHash: plan.manifest.contentHash, tool, recovery: recoveryCommand(tool) };
+  const locator: Locator = { formatVersion: 1, scheme: CUA_SCHEME, recipeVersion: manifest.recipeVersion, id, target, preparation: directory, store: join(paths.root, 'stores', id), contentHash: plan.manifest.contentHash, tool, recovery: recoveryCommand(tool) };
   const key = await stateBytes(join(paths.root, 'key'));
   check(key.length === 32, 'UNTRUSTED_STORE', 'Invalid managed state key.');
   // Immutable discovery locator is durable before the engine can publish an intent or write a target.
@@ -221,7 +243,11 @@ export async function copyManagedPlan(plan: ValidatedTransactionPlan, destinatio
   const before = await loadManagedPlan(plan.directory, derive);
   check(before.manifest.contentHash === plan.manifest.contentHash, 'PLAN_CHANGED', 'Preparation changed before copying.');
   await mkdir(destination, { mode: 0o700 });
-  for (const name of files) await writeExclusive(join(destination, name), await stateBytes(join(plan.directory, name)));
+  if (before.manifest.formatVersion === 2) {
+    await writeExclusive(join(destination, 'reference.json'), JSON.stringify({ preparation: before.directory, contentHash: before.manifest.contentHash }) + '\n');
+  } else {
+    for (const name of files) await writeExclusive(join(destination, name), await stateBytes(join(before.directory, name)));
+  }
   await syncDirectory(destination);
   check((await loadManagedPlan(destination, derive)).manifest.contentHash === plan.manifest.contentHash, 'PLAN_CHANGED', 'Preparation changed while copying.');
 }

@@ -5,10 +5,10 @@ import { parseSourceContext } from './source-context.js';
 import type { SourceContext } from './source-context.js';
 import { CUA_SCHEME } from './cua-contract.js';
 import type { CuaDerivation, Evidence, Range } from './cua-contract.js';
-import { wrapCuaResponse } from './cua-recipe.js';
+import { wrapCuaBody } from './cua-recipe.js';
 
 const assumptions = [
-  'Local site-status endpoint provenance and response ok/json usage are checked; request construction, policy classes, cache and blocking consumers are not matched to a whole-chain template.',
+  'Local site-status endpoint provenance and its awaited JSON result reaching feature_status are checked; request construction and all Response interfaces remain unchanged.',
   'Standard Object and Reflect interfaces retain their standard semantics; fetch/json honor their host contracts. Unrelated code and dependencies are assumed not to mutate these capabilities or the selected channel.',
   'Static local call and property relationships identify the channel; runtime loading, endpoint configuration and website behavior remain not-verified.',
 ];
@@ -154,21 +154,15 @@ class LocalChannel {
     const binding = this.binding(declaration.id);
     need(binding, 'RESPONSE_CONSUMER', 'Response binding is unresolved.', declaration);
     const json: E.CallExpression[] = [];
-    let ok = false;
     for (const ref of binding.references) {
       if (ref.init && ref.isWrite() && ref.identifier === declaration.id) continue;
       need(ref.isRead() && !ref.isWrite(), 'RESPONSE_ESCAPE', 'Response cannot be reassigned.', ref.identifier);
       const member = this.context.parents.get(ref.identifier), use = member && this.context.parents.get(member);
-      need(member?.type === 'MemberExpression' && member.object === ref.identifier && !member.optional, 'RESPONSE_ESCAPE', 'Response cannot escape its local ok/json consumers.', ref.identifier);
-      if (key(member) === 'ok') {
-        need(use?.type === 'UnaryExpression' && use.operator === '!' || use?.type === 'IfStatement' && use.test === member, 'RESPONSE_ESCAPE', 'Response ok must be read as a local condition.', member);
-        ok = true;
-      } else {
-        need(key(member) === 'json' && use?.type === 'CallExpression' && use.callee === member && !use.optional && !use.arguments.length && this.context.parents.get(use)?.type === 'AwaitExpression', 'RESPONSE_INTERFACE', 'Wrapper supports only ok and awaited no-argument json().', member);
-        json.push(use);
-      }
+      if (member?.type !== 'MemberExpression' || member.object !== ref.identifier || member.optional || key(member) !== 'json') continue;
+      need(use?.type === 'CallExpression' && use.callee === member && !use.optional && this.context.parents.get(use)?.type === 'AwaitExpression', 'RESPONSE_INTERFACE', 'JSON parsing must be directly awaited.', member);
+      if (this.bodyUsesSiteStatus(use)) json.push(use);
     }
-    need(ok && json.length === 1, 'RESPONSE_INTERFACE', 'Expected an ok check and one awaited json() consumer.', call);
+    need(json.length === 1, 'RESPONSE_BODY', 'Expected one awaited JSON result reaching feature_status.', call);
     return { binding, json };
   }
   bodyUsesSiteStatus(json: E.CallExpression): boolean {
@@ -212,7 +206,7 @@ class LocalChannel {
 
 /** Pure local admission. Never executes the plugin or matches its policy/cache implementation. */
 export function deriveCua(source: string): CuaDerivation {
-  const base = { scheme: CUA_SCHEME, recipeVersion: 1 as const, runtime: 'not-verified' as const, assumptions };
+  const base = { scheme: CUA_SCHEME, recipeVersion: 2 as const, runtime: 'not-verified' as const, assumptions };
   try {
     const parsed = parseSourceContext(source);
     need(parsed.context, 'PARSE_ERROR', parsed.parseError ?? 'Invalid JavaScript.');
@@ -242,33 +236,18 @@ export function deriveCua(source: string): CuaDerivation {
     const unique = new Set(external.map(candidate => candidate.target));
     need(unique.size, 'NO_TARGET', 'No local site-status fetch channel found.');
     need(unique.size === 1, 'AMBIGUOUS_TARGET', 'Multiple site-status fetch injection points found.');
-    const target = external[0]!.target, transport = local.owner(target);
-    if (transport && local.transport(transport) === target) {
-      const selectedCalls = new Set(external.map(candidate => candidate.call));
-      need(local.usages(transport).every(call => selectedCalls.has(call)), 'TRANSPORT_CONSUMER', 'Transport has consumers outside the identified site-status channel.', target);
-      const declaration = context.parents.get(transport);
-      const identifier = transport.type === 'FunctionDeclaration' ? transport.id : declaration?.type === 'VariableDeclarator' && declaration.id.type === 'Identifier' ? declaration.id : null;
-      if (identifier) {
-        const binding = local.binding(identifier);
-        need(binding?.references.every(ref => {
-          if (ref.isWrite() && ref.init) return true;
-          const call = context.parents.get(ref.identifier);
-          return ref.isRead() && call?.type === 'CallExpression' && call.callee === ref.identifier && selectedCalls.has(call);
-        }), 'TRANSPORT_CONSUMER', 'Transport cannot escape its dedicated calls.', transport);
-      } else need(declaration?.type !== 'MethodDefinition', 'TRANSPORT_CONSUMER', 'Shared method transports require an explicit local binding.', transport);
-    }
-    for (const candidate of external) {
-      const response = local.response(candidate.call);
-      need(local.bodyUsesSiteStatus(response.json[0]!), 'RESPONSE_BODY', 'Parsed response must reach a feature_status consumer.', candidate.call);
-    }
+    const parsedBodies = external.map(candidate => local.response(candidate.call).json[0]!);
+    const points = new Set(parsedBodies.map(json => context.parents.get(json)!));
+    need(points.size === 1, 'AMBIGUOUS_TARGET', 'Multiple site-status JSON replacement points found.');
+    const target = [...points][0]!;
     local.wrapperScope(target);
-    const selected = range(target), before = source.slice(selected.start, selected.end), after = wrapCuaResponse(before);
+    const selected = range(target), before = source.slice(selected.start, selected.end), after = wrapCuaBody(before);
     const patchedSource = source.slice(0, selected.start) + after + source.slice(selected.end);
     parse(patchedSource, { ecmaVersion: 2022, sourceType: 'module' });
     const evidence: Evidence[] = [
       { kind: 'source', range: range(external[0]!.call), description: 'Local argument provenance reaches the site-status endpoint; surrounding request construction is retained.' },
-      { kind: 'transport', range: selected, description: 'One awaited member fetch is wrapped without changing its receiver, arguments or evaluation count.' },
-      { kind: 'response', range: range(external[0]!.call), description: 'Response stays local and uses only ok and one awaited no-argument json(); parsed data reaches feature_status.' },
+      { kind: 'transport', range: selected, description: 'Only the selected awaited JSON result is adapted; fetch, Response identity, interfaces, receivers and arguments remain unchanged.' },
+      { kind: 'response', range: selected, description: 'Only feature_status.agent strictly equal to true is rewritten to false; other JSON data passes through unchanged.' },
     ];
     return { ...base, support: 'supported', diagnostics: [], evidence, change: { range: selected, before, after, patchedSource, localDiff: `Expression UTF-16 [${selected.start}, ${selected.end})\n- ${before}\n+ ${after}\n` } };
   } catch (error) {
