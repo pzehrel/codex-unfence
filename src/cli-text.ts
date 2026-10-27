@@ -1,5 +1,7 @@
 // 仅在面向人的展示中转换文案；原始诊断、证据和假设仍用于 JSON 与恢复核验。
 const evidenceDescriptions: ReadonlyMap<string, string> = new Map([
+  ['Only the selected awaited JSON result is adapted; fetch, Response identity, interfaces, receivers and arguments remain unchanged.', '仅调整选定的 JSON 解析结果；fetch、Response 对象、接口、接收者和参数保持不变。'],
+  ['Only feature_status.agent strictly equal to true is rewritten to false; other JSON data passes through unchanged.', '仅将严格等于 true 的 feature_status.agent 改为 false，其他 JSON 数据保持不变。'],
   ['Local argument provenance reaches the site-status endpoint; surrounding request construction is retained.', '局部参数来源可追溯至站点状态端点；保留外围请求构造。'],
   ['One awaited member fetch is wrapped without changing its receiver, arguments or evaluation count.', '包装一个经过 await 的成员 fetch 调用，保留接收者、参数和求值次数。'],
   ['Response stays local and uses only ok and one awaited no-argument json(); parsed data reaches feature_status.', '响应保留在局部范围内，仅使用 ok 和一次经过 await 的无参数 json()；解析结果传入 feature_status。'],
@@ -13,6 +15,7 @@ const evidenceDescriptions: ReadonlyMap<string, string> = new Map([
 ]);
 
 const assumptionDescriptions: ReadonlyMap<string, string> = new Map([
+  ['Local site-status endpoint provenance and its awaited JSON result reaching feature_status are checked; request construction and all Response interfaces remain unchanged.', '已确认局部站点状态端点与传入 feature_status 的 JSON 解析结果；请求构造及所有 Response 接口保持不变。'],
   ['Local site-status endpoint provenance and response ok/json usage are checked; request construction, policy classes, cache and blocking consumers are not matched to a whole-chain template.', '已检查局部站点状态端点的来源和响应的 ok/json 用法；请求构造、策略类、缓存和阻止结果的使用方未按整条链路的模板匹配。'],
   ['Standard Object and Reflect interfaces retain their standard semantics; fetch/json honor their host contracts. Unrelated code and dependencies are assumed not to mutate these capabilities or the selected channel.', '假设标准 Object 和 Reflect 接口保持标准语义，fetch/json 遵守宿主契约；无关代码和依赖不会修改这些能力或选定通道。'],
   ['Static local call and property relationships identify the channel; runtime loading, endpoint configuration and website behavior remain not-verified.', '通道通过静态局部调用与属性关系识别；运行时加载、端点配置和网站行为仍未验证。'],
@@ -26,6 +29,8 @@ const assumptionDescriptions: ReadonlyMap<string, string> = new Map([
 
 // 同一代码可能包含不同原因，先精确匹配消息，避免把具体原因合并掉。
 const diagnosticMessages: ReadonlyMap<string, string> = new Map([
+  ['The complete known patch is present at the site-status JSON result. Recovery records are verified separately.', '已从目标源码确认安装了完整的本补丁；恢复材料另行检查。'],
+  ['Patch detected from source, but no trusted recovery record is available. Automatic uninstall is unavailable.', '源码已安装本补丁，但缺少可信恢复记录，无法自动卸载。'],
   ['Response must be awaited into a local binding.', '响应必须经过 await，并保存到局部变量。'],
   ['Response binding is unresolved.', '无法解析响应的局部绑定。'],
   ['Response cannot be reassigned.', '响应不能被重新赋值。'],
@@ -160,7 +165,8 @@ const diagnosticMessages: ReadonlyMap<string, string> = new Map([
   ['Cannot establish this process identity.', '无法确认当前进程的身份。'],
   ['Cannot prove this process identity.', '无法确认当前进程的身份。'],
   ['Cannot safely enumerate processes.', '无法可靠地读取进程列表。'],
-  ['Process checks use ps snapshots and executable/argument identities; processes may start after inspection. No process is terminated. Runtime loading and website operation remain not-verified.', '进程检查依据 ps 快照、可执行文件和参数信息；检查后仍可能有进程启动。不会终止任何进程。运行时加载和网站操作仍未验证。'],
+  ['Process checks use ps snapshots and executable/argument identities; processes may start after inspection. No process is terminated. Runtime loading and website operation remain not-verified. Running applications and related services only trigger warnings; process identity enumeration is required for concurrency locks.', '进程检查依据 ps 快照、可执行文件和参数信息；检查后仍可能有进程启动。不会终止任何进程。运行时加载和网站操作仍未验证。应用及相关服务正在运行时只提示警告；并发锁仍需要进程身份，无法枚举时不能写入。'],
+  ['Fully exit the application and related browser services (browser-service and node_repl), then restart the application to load the changed files.', '请完整退出应用及相关浏览器服务（browser-service、node_repl），再重新启动应用，使修改后的文件被加载。'],
   ['Packaged executable metadata is missing.', '工具包缺少可执行文件所需的名称或版本信息。'],
   ['Interactive stdin and stdout terminals are required for managed changes.', '修改应用文件需要交互式输入和输出终端。'],
   ['Select one listed installation number.', '请输入列表中的应用编号。'],
@@ -209,7 +215,7 @@ const diagnosticFallbacks: ReadonlyMap<string, string> = new Map([
   ['INVALID_ARGUMENTS', '参数无效，请使用 --help 查看用法。'],
   ['INVALID_JOURNAL', '操作日志缺失、格式无效或与可信记录不符。'],
   ['INVALID_LOCK', '操作锁记录无效，无法确认其归属。'],
-  ['INVALID_PREPARATION', '补丁准备数据无效或与当前分析结果不符。'],
+  ['INVALID_PREPARATION', '恢复文件缺失、损坏或与记录不符。请保留现有文件，不能自动恢复。'],
   ['INVALID_RECORD', '恢复记录格式无效。'],
   ['INVALID_SOURCE', '目标文件必须能以 UTF-8 无损解码并还原。'],
   ['INVALID_TOOL_IDENTITY', '工具包的名称、版本或可执行文件信息无效。'],
@@ -230,9 +236,10 @@ const diagnosticFallbacks: ReadonlyMap<string, string> = new Map([
   ['PLAN_CHANGED', '复制补丁准备数据前后，其内容发生变化。'],
   ['POLICY_RECEIVER', '策略类或实例不符合支持的结构。'],
   ['POSTVERIFY_FAILED', '替换文件或提交操作前的校验失败。'],
-  ['PROCESSES_RUNNING', '请先退出相关进程，再修改文件。'],
-  ['PROCESS_CHECK_LIMITATION', '进程检查使用瞬时快照，检查后仍可能有进程启动；不会终止进程，运行时加载和网站操作仍未验证。'],
-  ['PROCESS_ENUMERATION_FAILED', '无法可靠地读取进程列表或确认进程身份。'],
+  ['PROCESSES_RUNNING', '检测到应用或相关服务正在运行，仍可写入；写入成功后，请完整退出应用及相关浏览器服务（browser-service、node_repl），再重新启动应用。'],
+  ['RESTART_REQUIRED', '请完整退出应用及相关浏览器服务（browser-service、node_repl），再重新启动应用，使修改后的文件被加载。'],
+  ['PROCESS_CHECK_LIMITATION', '进程检查使用瞬时快照，检查后仍可能有进程启动；不会终止进程，运行时加载和网站操作仍未验证。活跃进程只触发警告；并发锁需要进程身份，无法枚举时不能写入。'],
+  ['PROCESS_ENUMERATION_FAILED', '无法可靠地读取进程列表或确认进程身份，不能写入；并发锁需要进程身份来确认锁的归属。'],
   ['RECOVERY_CONFLICT', '当前文件内容或身份不符合可信状态；已保留目标文件和操作日志。'],
   ['RECOVERY_MATERIAL_MISSING', '目标文件已有恢复记录，但恢复数据缺失。'],
   ['RELATED_ESCAPE', '相关值传出了可验证范围或存在额外使用。'],
@@ -242,7 +249,7 @@ const diagnosticFallbacks: ReadonlyMap<string, string> = new Map([
   ['RESPONSE_CONSUMER', '响应的使用方不符合支持的结构。'],
   ['RESPONSE_ESCAPE', '响应被重新赋值或传出了局部使用范围。'],
   ['RESPONSE_INTERFACE', '响应仅支持 ok 和一次经过 await 的无参数 json()。'],
-  ['RESTORE_SOURCE_REQUIRED', '缺少可信且兼容的原始文件或恢复记录，无法卸载补丁。'],
+  ['RESTORE_SOURCE_REQUIRED', '缺少可信的原始文件或恢复记录，无法卸载补丁。'],
   ['ROLLBACK_FAILED', '回滚失败，请保留恢复数据并运行 recover 恢复。'],
   ['SCHEME_MISMATCH', '恢复数据使用的兼容性判定方案不匹配，请使用原工具版本和入口恢复。'],
   ['SELECTION_REQUIRED', '需要选择目标应用，并具备所需的补丁准备数据。'],
@@ -317,8 +324,8 @@ export function diagnosticMessage(diagnostic: { code: string; message: string; s
 
   if (translated === undefined) {
     if (code === 'PROCESSES_RUNNING') {
-      const prefix = 'Exit related processes before writing: ';
-      if (message.startsWith(prefix)) translated = `请先退出相关进程，再修改文件：${message.slice(prefix.length)}`;
+      const prefix = 'Related processes are running: ';
+      if (message.startsWith(prefix)) translated = `检测到应用或相关服务正在运行，仍可写入；写入成功后，请完整退出应用及相关浏览器服务（browser-service、node_repl），再重新启动应用：${message.slice(prefix.length)}`;
     } else if (code === 'LOCK_HELD') {
       const match = /^Operation lock held by PID (\d+) \(([\s\S]*)\)\.$/.exec(message);
       if (match) translated = `操作锁由 PID ${match[1]}（${match[2]}）持有。`;

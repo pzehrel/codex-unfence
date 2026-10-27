@@ -16,7 +16,7 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
   }
   let recoveredOperation = false;
   function cancelled() {
-    process.stdout.write(recoveredOperation ? '恢复已完成，后续操作已取消。重新打开应用前，请核对报告的文件状态。\n' : '已取消，应用文件未修改。\n');
+    process.stdout.write(recoveredOperation ? '恢复已完成，后续操作已取消。请核对报告的文件状态，完整退出应用及相关浏览器服务（browser-service、node_repl），再重新启动应用。\n' : '已取消，应用文件未修改。\n');
   }
   try {
     const discovery = await managed.discover(selection);
@@ -50,7 +50,7 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
       const command = requested === 'install' ? 'apply' : requested === 'uninstall' ? 'restore' : requested;
       if (command !== 'apply' && command !== 'restore' && command !== 'recover') throw new Error('请选择列表中的操作。');
       if ((requested === 'install' || requested === 'uninstall') && inspection.state === 'incomplete' && inspection.allowedActions.includes('recover')) {
-        process.stdout.write('需要先回滚中断的操作。恢复会返回操作前的状态，不会继续完成该操作。\n写入前，请自行退出应用及相关浏览器服务。\n');
+        process.stdout.write('需要先回滚中断的操作。恢复会返回操作前的状态，不会继续完成该操作。\n应用及相关服务正在运行时仍可写入；写入成功后，必须完整退出应用及相关浏览器服务（browser-service、node_repl），再重新启动应用。\n');
         const confirmed = await ask('输入 yes 确认恢复，其他输入取消：', true);
         if (confirmed !== 'yes') { cancelled(); return null; }
         if (!inspection.inspectionToken) throw new Error('检查结果未通过验证，请重新检查。');
@@ -85,14 +85,14 @@ export async function guide(managed: Managed, selection: { appPath?: string }, a
       process.stdout.write('\n兼容性详情：\n');
       for (const evidence of inspection.derivation?.evidence ?? []) process.stdout.write(`  依据：${evidenceDescription(evidence)}\n`);
       for (const assumption of inspection.derivation?.assumptions ?? []) process.stdout.write(`  前提：${assumptionDescription(assumption)}\n`);
-      process.stdout.write(`\n确认前请核对：\n目标文件：${inspection.candidate.targetPath}\n作用范围：仅修改站点状态响应，保留原始请求和判定逻辑。\n备份和恢复数据私密保存在 npm 缓存之外。\n修改应用资源会使签名校验失败，本工具不会重新签名。\n写入前，请自行退出应用及相关浏览器服务。\n${command === 'recover' ? '恢复会回滚到中断操作之前的状态，不会继续安装或卸载。\n' : ''}`);
+      process.stdout.write(`\n确认前请核对：\n目标文件：${inspection.candidate.targetPath}\n作用范围：仅修改站点状态响应，保留原始请求和判定逻辑。\n备份和恢复数据私密保存在 npm 缓存之外。\n修改应用资源会使签名校验失败，本工具不会重新签名。\n应用及相关服务正在运行时仍可写入；写入成功后，必须完整退出应用及相关浏览器服务（browser-service、node_repl），再重新启动应用。\n${command === 'recover' ? '恢复会回滚到中断操作之前的状态，不会继续安装或卸载。\n' : ''}`);
       const confirmed = await ask(`输入 yes 确认 ${publicActionName(command)}，其他输入取消：`, true);
       if (confirmed !== 'yes') { cancelled(); return null; }
       if (!inspection.inspectionToken) throw new Error('检查结果未通过验证，请重新检查。');
       const result = await managed[command]({ candidate: inspection.candidate, inspectionToken: inspection.inspectionToken, confirmed: true });
       process.stdout.write(renderHuman({ ...result, command: requested === 'install' || requested === 'uninstall' ? requested : result.command }));
       if (result.exitCode === 0) {
-        process.stdout.write('运行效果：未验证。核对文件状态后，请手动重新打开应用。\n');
+        process.stdout.write('运行效果：未验证。核对文件状态后，请完整退出应用及相关浏览器服务（browser-service、node_repl），再重新启动应用。\n');
         if (result.data?.targets.some(target => target.state === 'tool-applied')) process.stdout.write('补丁会保留至卸载。\n');
       } else process.stdout.write('操作未成功完成。请保留恢复数据，运行 check 后再重新打开应用；操作中断时，可重新运行 install 或 uninstall 按提示恢复。\n');
       process.stdout.write('请保留对应版本的工具和恢复数据；清理 npm 缓存不会删除恢复数据。\n');

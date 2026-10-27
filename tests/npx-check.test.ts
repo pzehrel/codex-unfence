@@ -116,7 +116,7 @@ test('npx check keeps every installation visible and runtime read failure outran
   assert.deepEqual(await snapshot(root), recoveryBefore);
 });
 
-test('npx check aggregates incompatibility and reports write blockers separately without creating any managed state', async (t: TestContext) => {
+test('npx check aggregates incompatibility and separates active-process warnings from write blockers without creating managed state', async (t: TestContext) => {
   const box = await packageBox(t);
   const supported = await installation(box, 'Supported');
   const unsupported = await installation(box, 'Unsupported', 'const unsupported = true;');
@@ -133,15 +133,17 @@ test('npx check aggregates incompatibility and reports write blockers separately
   assert.equal(blocked.code, 0);
   assert.equal(required(required(blocked.result.data).inspection).support, 'supported');
   assert.equal(required(required(blocked.result.data).inspection).state, 'original');
-  assert.equal(required(required(blocked.result.data).inspection).writeReadiness, 'blocked');
-  assert.deepEqual(required(required(blocked.result.data).inspection).allowedActions, []);
-  assert.equal(required(required(required(blocked.result.data).inspection).blockers[0]).code, 'PROCESSES_RUNNING');
+  assert.equal(required(required(blocked.result.data).inspection).writeReadiness, 'ready');
+  assert.deepEqual(required(required(blocked.result.data).inspection).allowedActions, ['apply']);
+  assert.deepEqual(required(required(blocked.result.data).inspection).blockers, []);
+  assert.ok(blocked.result.diagnostics.some(entry => entry.code === 'PROCESSES_RUNNING' && entry.severity === 'warning'));
   assert.equal(required(blocked.result.data).runtime, 'not-verified');
   const human = runNpmExec(['check', '--app', supported.app], box);
   assert.equal(human.status, 0, human.stdout + human.stderr);
-  assert.match(human.stdout, /写入条件：不满足/);
-  assert.match(human.stdout, /可以安装：否/);
-  assert.match(human.stdout, /PROCESSES_RUNNING/);
+  assert.match(human.stdout, /写入条件：满足/);
+  assert.match(human.stdout, /可以安装：是/);
+  assert.match(human.stdout, /警告.*PROCESSES_RUNNING.*仍可写入/);
+  assert.match(human.stdout, /完整退出.*browser-service.*node_repl.*重新启动/);
   assert.match(human.stdout, /运行效果：未验证/);
   await writeFile(scenario, JSON.stringify({ processFailure: true }));
   const failed = check(box);

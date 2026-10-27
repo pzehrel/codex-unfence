@@ -132,7 +132,7 @@ test('damaged managed backups, authenticated journals and store keys cannot auth
     const inspection = run(box, 'inspect');
     const store = required(inspection.recovery).store;
     const directory = join(store, 'transactions', required(required(applied.data).transaction));
-    if (mutation === 'backup') await writeFile(join(directory, 'before.mjs'), 'forged original');
+    if (mutation === 'backup') await writeFile(join(required(inspection.recovery).preparation, 'source.original.mjs'), 'forged original');
     else if (mutation === 'key') await writeFile(join(store, 'key'), Buffer.alloc(32));
     else {
       const path = join(directory, 'journal.json');
@@ -147,6 +147,20 @@ test('damaged managed backups, authenticated journals and store keys cannot auth
     assert.deepEqual(await readFile(box.target), patched, mutation);
     assert.equal((await stat(box.target)).ino, identity.ino, mutation);
   }
+});
+
+test('recovery revalidates the shared backup after publishing rollback intent', async (t) => {
+  const box = await sandbox(t);
+  operation(box, 'apply', { CODEX_TEST_FAULT: 'commit-journal-failure' }, 1);
+  const inspection = run(box, 'inspect');
+  const backup = join(required(inspection.recovery).preparation, 'source.original.mjs');
+  const patched = await readFile(box.target);
+  const failed = operation(box, 'recover', { CODEX_TEST_FAULT: 'recovery-backup-change', CODEX_TEST_BACKUP: backup }, 4);
+  assert.equal(failed.outcome, 'conflict');
+  assert.deepEqual(await readFile(box.target), patched);
+  await writeFile(backup, box.source, { mode: 0o600 });
+  operation(box, 'recover');
+  assert.deepEqual(await readFile(box.target), box.source);
 });
 
 test('managed coordination never treats a live owner missing from ps as dead and permits retry after proven death', async (t) => {

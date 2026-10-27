@@ -10,6 +10,8 @@ import type { Diagnostic, OperationResult, TargetState, TransactionCommand } fro
 import { EXIT_CODES } from './result.js';
 import { check, exists, regularBytes, TransactionError } from './transaction-storage.js';
 import { cuaBlockingProcesses, cuaExecutor } from './cua-admission.js';
+import { detectCuaPatch } from './cua-patch-detection.js';
+import type { DetectedCuaPatch } from './cua-patch-detection.js';
 import { managedPaths, managedRecord, prepareManaged } from './managed-state.js';
 import { externalTargetLock } from './transaction-locks.js';
 import type { PreparationExpectation, ToolIdentity } from './managed-state.js';
@@ -29,6 +31,7 @@ export interface Inspection {
   runtime: 'not-verified';
   operation: OperationResult | null;
   recovery: { tool: ToolIdentity; command: string; store: string; preparation: string } | null;
+  sourcePatch?: { status: 'detected' | 'not-detected'; recipeVersion: 2 | null; range: DetectedCuaPatch['range'] | null };
 }
 export interface ConfirmedSelection { candidate: Candidate; inspectionToken: string; confirmed: true }
 
@@ -114,6 +117,7 @@ function managedOperations({ derive, tool }: { derive: DeriveCua; tool: ToolIden
     let snapshot: { bytes: Buffer; identity: PreparationExpectation } | null = null;
     let locatorContent: string | null = null;
     let replaced = false;
+    let sourcePatch: Inspection['sourcePatch'];
     if (process.platform !== 'darwin') blockers.push({ code: 'UNSUPPORTED_PLATFORM', severity: 'error', message: `Only macOS is supported; received ${process.platform}.` });
     if (Number(process.versions.node.split('.')[0]) < 22 || Number(process.versions.node.split('.')[0]) === 22 && Number(process.versions.node.split('.')[1]) < 13) blockers.push({ code: 'UNSUPPORTED_RUNTIME', severity: 'error', message: 'Node.js >=22.13.0 is required.' });
     try {
@@ -127,11 +131,20 @@ function managedOperations({ derive, tool }: { derive: DeriveCua; tool: ToolIden
       const text = bytes.toString('utf8');
       check(Buffer.from(text).equals(bytes), 'INVALID_SOURCE', 'Target must be lossless UTF-8.');
       source = { sha256: digest(bytes), size: bytes.length };
+      const detected = detectCuaPatch(text);
+      sourcePatch = { status: detected ? 'detected' : 'not-detected', recipeVersion: detected?.recipeVersion ?? null, range: detected?.range ?? null };
+      if (detected) diagnostics.push({ code: 'PATCH_DETECTED', severity: 'info', message: 'The complete known patch is present at the site-status JSON result. Recovery records are verified separately.', range: detected.range });
       snapshot = { bytes, identity: { device: String(before.dev), inode: String(before.ino), mode: Number(before.mode & 0o7777n), ctime: String(before.ctimeNs), mtime: String(before.mtimeNs), parentDevice: String(parent.dev), parentInode: String(parent.ino) } };
-      const record = await managedRecord(actual.targetPath, derive);
+      let record: Awaited<ReturnType<typeof managedRecord>>;
+      try { record = await managedRecord(actual.targetPath, derive); }
+      catch (error) {
+        derivation = detected?.derivation ?? derive(text);
+        diagnostics.push(...derivation.diagnostics);
+        throw error;
+      }
       locatorContent = record ? canonical(record.locator) : null;
       // An authenticated stored plan supplies the original when the actual target is patched.
-      derivation = record?.plan.derivation ?? derive(text);
+      derivation = record?.plan.derivation ?? detected?.derivation ?? derive(text);
       diagnostics.push(...derivation.diagnostics);
       if (!record && derivation.support === 'unsupported') diagnostics.push({ code: 'UNVERIFIED_SOURCE', severity: 'warning', message: 'No trusted managed origin exists. Unsupported or modified contents cannot be adopted or restored. Similar wrapper bytes never prove tool provenance.' });
       operation = await executor.status({ ...(record ? { plan: record.locator.preparation } : {}), store: record?.locator.store ?? managedPaths(actual.targetPath).absentStore, targets: [actual.targetPath] });
@@ -142,7 +155,7 @@ function managedOperations({ derive, tool }: { derive: DeriveCua; tool: ToolIden
         diagnostics.push(...derivation.diagnostics);
         operation = updatedStatus(operation, actual, derivation);
       }
-      diagnostics.push(...operation.diagnostics.filter((entry) => entry.code !== 'PROCESS_CHECK_LIMITATION'));
+      diagnostics.push(...operation.diagnostics.filter(entry => entry.code !== 'PROCESS_CHECK_LIMITATION' && !diagnostics.some(existing => existing.code === entry.code && existing.message === entry.message && canonical(existing.range ?? null) === canonical(entry.range ?? null))));
       state = operation.data?.targets[0]?.state ?? 'conflict';
       if (record && !replacement) recovery = { tool: record.locator.tool, command: record.locator.recovery, store: record.locator.store, preparation: record.locator.preparation };
       inspectionToken = digest(canonical({ candidate: actual, replacement: replacement !== null, parentDevice: String(parent.dev), parentInode: String(parent.ino), target: actual.targetPath, device: String(before.dev), inode: String(before.ino), mode: String(before.mode), ctime: String(before.ctimeNs), mtime: String(before.mtimeNs), source, derivation, tool, locator: record?.locator ?? null, state, pending: operation.data?.pendingTransactions ?? [] }));
@@ -190,15 +203,15 @@ function managedOperations({ derive, tool }: { derive: DeriveCua; tool: ToolIden
     if (state === 'conflict' || state === 'incomplete') blockers.push({ code: state === 'incomplete' ? 'INCOMPLETE_TRANSACTION' : 'TARGET_CONFLICT', severity: 'error', message: state === 'incomplete' ? 'Recover the incomplete transaction before ordinary writes.' : 'Target or recovery state is not trusted for writing.' });
     try {
       const running = cuaBlockingProcesses(await processTable());
-      if (running.length) blockers.push({ code: 'PROCESSES_RUNNING', severity: 'error', message: `Exit related processes before writing: ${running.map((entry) => `PID ${entry.pid} ${entry.executable}`).join('; ')}` });
+      if (running.length) diagnostics.push({ code: 'PROCESSES_RUNNING', severity: 'warning', message: `Related processes are running: ${running.map((entry) => `PID ${entry.pid} ${entry.executable}`).join('; ')}` });
     } catch (error) {
-      const entry: Diagnostic = { code: 'PROCESS_ENUMERATION_FAILED', severity: 'error', outcome: 'runtime-error', message: error instanceof Error ? error.message : 'Cannot safely enumerate processes.' };
+      const entry: Diagnostic = { code: 'PROCESS_ENUMERATION_FAILED', severity: 'error', outcome: 'runtime-error', message: `Cannot safely enumerate processes; process identities are required for concurrency locks: ${error instanceof Error ? error.message : 'unknown error'}` };
       blockers.push(entry);
       diagnostics.push(entry);
     }
     const actionBlocked = blockers.some((entry) => entry.code !== 'INCOMPLETE_TRANSACTION');
-    const allowedActions: Inspection['allowedActions'] = actionBlocked || !inspectionToken ? [] : state === 'incomplete' && recovery ? ['recover'] : derivation?.support === 'supported' && state === 'original' ? ['apply', ...(recovery ? ['restore' as const] : [])] : state === 'tool-applied' && recovery ? ['apply', 'restore'] : [];
-    const inspection: Inspection = { candidate, support: derivation?.support ?? 'unsupported', state, derivation, source, writeReadiness: blockers.some((entry) => entry.code === 'PROCESS_ENUMERATION_FAILED') ? 'unknown' : blockers.length ? 'blocked' : 'ready', blockers, allowedActions, diagnostics, inspectionToken, operation, recovery, runtime: 'not-verified' };
+    const allowedActions: Inspection['allowedActions'] = actionBlocked || !inspectionToken ? [] : state === 'incomplete' && recovery ? ['recover'] : state === 'original' || state === 'tool-applied' && recovery ? [...(derivation?.support === 'supported' ? ['apply' as const] : []), ...(recovery ? ['restore' as const] : [])] : [];
+    const inspection: Inspection = { candidate, support: derivation?.support ?? 'unsupported', state, derivation, source, writeReadiness: blockers.some((entry) => entry.code === 'PROCESS_ENUMERATION_FAILED') ? 'unknown' : blockers.length ? 'blocked' : 'ready', blockers, allowedActions, diagnostics, inspectionToken, operation, recovery, ...(sourcePatch ? { sourcePatch } : {}), runtime: 'not-verified' };
     if (snapshot) inspectedSources.set(inspection, snapshot);
     inspectedLocators.set(inspection, locatorContent);
     if (replaced) updatedInstallations.add(inspection);
@@ -209,7 +222,7 @@ function managedOperations({ derive, tool }: { derive: DeriveCua; tool: ToolIden
       if (selection.confirmed !== true) throw new TransactionError('CONFIRMATION_REQUIRED', 'Explicit confirmation of the inspected target is required.', 'usage-error');
       const current = await inspect(selection.candidate);
       check(typeof selection.inspectionToken === 'string' && current.inspectionToken === selection.inspectionToken, 'INSPECTION_CHANGED', 'Target, preparation or trusted state changed after inspection; inspect and confirm again.');
-      const blocking = current.blockers.filter((entry) => !(command === 'recover' && current.allowedActions.includes('recover') && entry.code === 'INCOMPLETE_TRANSACTION'));
+      const blocking = current.blockers.filter((entry) => !(command === 'recover' && entry.code === 'INCOMPLETE_TRANSACTION'));
       if (blocking.length) {
         const blocker = blocking[0];
         throw new TransactionError(blocker?.code ?? 'WRITE_BLOCKED', blocker?.message ?? 'Writing is blocked.', current.writeReadiness === 'unknown' ? 'runtime-error' : 'conflict');
@@ -218,9 +231,11 @@ function managedOperations({ derive, tool }: { derive: DeriveCua; tool: ToolIden
       check(inspectedLocators.get(current) === (record ? canonical(record.locator) : null), 'INSPECTION_CHANGED', 'Managed selection changed after confirmation; inspect and confirm again.');
       if (command === 'recover') {
         check(record, 'RESTORE_SOURCE_REQUIRED', 'No trusted managed recovery record exists for this installation.');
-        return executor.recover({ store: record.locator.store });
+        const result = await executor.recover({ store: record.locator.store });
+        return { ...result, diagnostics: [...result.diagnostics, ...current.diagnostics.filter(entry => entry.code === 'PROCESSES_RUNNING' && !result.diagnostics.some(existing => existing.code === entry.code))] };
       }
       check(current.state !== 'conflict' && current.state !== 'incomplete', current.state === 'incomplete' ? 'INCOMPLETE_TRANSACTION' : 'TARGET_CONFLICT', current.state === 'incomplete' ? 'An incomplete transaction requires recover; recovery rolls back rather than continuing.' : 'Current target is not a trusted original or tool-applied state.');
+      if (command === 'apply') check(current.support === 'supported', 'UNSUPPORTED_SOURCE', 'Source is not supported by the CUA structural recipe.');
       if (record && updatedInstallations.has(current)) {
         const previous = record;
         const replacement = await executor.select({ store: previous.locator.store, targets: [current.candidate.targetPath] }, async () => {

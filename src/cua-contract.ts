@@ -17,7 +17,7 @@ export type Diagnostic = Readonly<{
 
 export type CuaDerivation = Readonly<{
   scheme: typeof CUA_SCHEME;
-  recipeVersion: 1;
+  recipeVersion: 1 | 2;
   support: 'supported' | 'unsupported';
   runtime: 'not-verified';
   assumptions: readonly string[];

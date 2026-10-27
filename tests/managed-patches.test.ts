@@ -78,15 +78,17 @@ test('default discovery ignores ordinary app aliases that have no CUA service', 
   assert.deepEqual(report.diagnostics, []);
 });
 
-test('inspection reports unsupported code separately from process blockers and creates no recovery state', async (t: TestContext) => {
+test('inspection reports unsupported code separately from active-process warnings and creates no recovery state', async (t: TestContext) => {
   const box = await sandbox(t);
   const candidate = { ...await installation(box, 'Inspect', 'anything'), version: null, build: null };
   const original = await readFile(candidate.targetPath);
   const inspection = run(box, 'inspect', candidate, { CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ pid: 987654, executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' }]) });
   assert.equal(inspection.support, 'unsupported');
-  assert.equal(inspection.writeReadiness, 'blocked');
+  assert.equal(inspection.writeReadiness, 'ready');
   assert.equal(inspection.state, 'incompatible');
-  assert.equal(required(inspection.blockers[0]).code, 'PROCESSES_RUNNING');
+  assert.deepEqual(inspection.blockers, []);
+  assert.deepEqual(inspection.allowedActions, []);
+  assert.ok(inspection.diagnostics.some(entry => entry.code === 'PROCESSES_RUNNING' && entry.severity === 'warning'));
   assert.ok(inspection.diagnostics.length > 0);
   assert.equal(inspection.runtime, 'not-verified');
   assert.equal(typeof inspection.inspectionToken, 'string');
@@ -116,6 +118,7 @@ test('managed operations persist private recovery state and restore original byt
   assert.notDeepEqual(patched, original);
   const after = run(box, 'inspect', candidate);
   assert.equal(after.state, 'tool-applied');
+  assert.equal(after.sourcePatch?.status, 'detected');
   assert.equal(after.support, 'supported');
   assert.equal(required(after.recovery).tool.version, '9.8.7-synthetic');
   assert.equal(required(after.recovery).command, 'npx --package codex-unfence@9.8.7-synthetic codex-unfence');
@@ -130,6 +133,16 @@ test('managed operations persist private recovery state and restore original byt
   assert.equal((await stat(required(after.recovery).preparation)).mode & 0o777, 0o700);
   assert.equal((await stat(join(required(after.recovery).preparation, 'source.original.mjs'))).mode & 0o777, 0o600);
   assert.equal((await stat(required(after.recovery).store)).mode & 0o777, 0o700);
+  assert.deepEqual((await readdir(required(after.recovery).preparation)).sort(), ['manifest.json', 'source.original.mjs']);
+  const manifest: { formatVersion: number; basis?: unknown; original: { sha256: string }; patched: { sha256: string } } = JSON.parse(await readFile(join(required(after.recovery).preparation, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.formatVersion, 2);
+  assert.equal(manifest.basis, undefined);
+  const transactions = join(required(after.recovery).store, 'transactions');
+  assert.equal((await readdir(transactions)).length, 2, 'no-op application and restoration must not append transactions');
+  for (const id of await readdir(transactions)) {
+    assert.deepEqual((await readdir(join(transactions, id))).sort(), ['journal.json', 'plan']);
+    assert.deepEqual(await readdir(join(transactions, id, 'plan')), ['reference.json']);
+  }
   assert.deepEqual(await readdir(join(candidate.targetPath, '..')), ['browser-service.mjs']);
 });
 
@@ -227,6 +240,35 @@ test('local analyzer restores a preparation created with historical evidence', a
   assert.equal(inspection.state, 'tool-applied');
   assert.equal(inspection.recovery?.tool.version, '0.2.0');
   assert.equal(run(box, 'restore', candidate).exitCode, 0);
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+});
+
+test('restoration uses authenticated bytes even when the current analyzer no longer supports the original', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  const child = runCli(['restore-without-support', JSON.stringify(candidate)], { binary, fixture, directory: box.directory });
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  const result: { inspection: Inspection; operation: OperationResult } = JSON.parse(child.stdout);
+  assert.equal(result.inspection.support, 'unsupported');
+  assert.deepEqual(result.inspection.allowedActions, ['restore']);
+  assert.equal(result.operation.exitCode, 0, JSON.stringify(result.operation));
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+});
+
+test('missing recovery bytes preserve current structural compatibility and never authorize restoration', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  assert.equal(run(box, 'apply', candidate).exitCode, 0);
+  assert.equal(run(box, 'restore', candidate).exitCode, 0);
+  const preparation = required(run(box, 'inspect', candidate).recovery).preparation;
+  await rm(join(preparation, 'source.original.mjs'));
+  const inspection = run(box, 'inspect', candidate);
+  assert.equal(inspection.support, 'supported');
+  assert.equal(inspection.state, 'conflict');
+  assert.deepEqual(inspection.allowedActions, []);
+  assert.ok(inspection.diagnostics.some(entry => entry.code === 'RECOVERY_MATERIAL_MISSING'));
+  assert.notEqual(run(box, 'restore', candidate).exitCode, 0);
   assert.deepEqual(await readFile(candidate.targetPath), original);
 });
 
@@ -509,18 +551,72 @@ test('managed coordination ignores HOME/XDG overrides and refuses aliases, permi
   }
 });
 
-test('managed writes refuse standalone node_repl helpers without treating unrelated shell text as a helper', async (t: TestContext) => {
+test('managed writes warn about active applications and services, allow apply and restore, and require restart', async (t: TestContext) => {
   const box = await sandbox(t);
   const { candidate, original } = await supportedInstallation(box);
-  for (const executable of ['/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl', '/tmp/helpers/node_repl']) {
-    const rejected = run(box, 'apply', candidate, { CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ pid: 12345, executable, command: executable }]) });
-    assert.equal(rejected.exitCode, 4);
-    assert.equal(required(rejected.diagnostics[0]).code, 'PROCESSES_RUNNING');
+  const rows = [
+    { executable: '/Applications/ChatGPT.app/Contents/MacOS/ChatGPT', command: 'ChatGPT' },
+    { executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' },
+    { executable: '/tmp/helpers/browser-service', command: 'browser-service' },
+    { executable: '/usr/local/bin/node', command: 'node /tmp/scripts/browser-service.mjs' },
+    { executable: '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl', command: 'node_repl' },
+    { executable: '/tmp/helpers/node_repl', command: '/tmp/helpers/node_repl' },
+  ];
+  for (const row of rows) {
+    const env = { CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ pid: 12345, ...row }]) };
+    const applied = run(box, 'apply', candidate, env);
+    assert.equal(applied.exitCode, 0, JSON.stringify(applied));
+    assert.equal(required(required(applied.data).targets[0]).action, 'applied');
+    assert.ok(applied.diagnostics.some(entry => entry.code === 'PROCESSES_RUNNING' && entry.severity === 'warning' && entry.message.includes(row.executable)));
+    assert.ok(applied.diagnostics.some(entry => entry.code === 'RESTART_REQUIRED' && /exit.*browser-service.*node_repl.*restart/.test(entry.message)));
+    assert.notDeepEqual(await readFile(candidate.targetPath), original);
+    const restored = run(box, 'restore', candidate, env);
+    assert.equal(restored.exitCode, 0, JSON.stringify(restored));
+    assert.equal(required(required(restored.data).targets[0]).action, 'restored');
+    assert.ok(restored.diagnostics.some(entry => entry.code === 'PROCESSES_RUNNING' && entry.severity === 'warning'));
+    assert.ok(restored.diagnostics.some(entry => entry.code === 'RESTART_REQUIRED'));
     assert.deepEqual(await readFile(candidate.targetPath), original);
-    await assert.rejects(access(join(box.directory, 'home/Library')), { code: 'ENOENT' });
   }
-  assert.equal(run(box, 'apply', candidate, { CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ pid: 12345, executable: '/bin/zsh', command: 'zsh -c echo node_repl browser-service.mjs' }]) }).exitCode, 0);
+  const unrelated = run(box, 'apply', candidate, { CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ pid: 12345, executable: '/bin/zsh', command: 'zsh -c echo node_repl browser-service.mjs' }]) });
+  assert.equal(unrelated.exitCode, 0, JSON.stringify(unrelated));
+  assert.ok(!unrelated.diagnostics.some(entry => entry.code === 'PROCESSES_RUNNING'));
   assert.notDeepEqual(await readFile(candidate.targetPath), original);
+});
+
+test('managed recovery warns about active services while restoring the interrupted operation', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  const interrupted = await pauseOperation(t, box, candidate, 'apply', 'after-target-rename');
+  await interrupted.kill();
+  const recovered = run(box, 'recover', candidate, {
+    CODEX_TEST_PROCESS_ROWS: JSON.stringify([{ pid: 12345, executable: '/tmp/helpers/node_repl', command: 'node_repl' }]),
+  });
+  assert.equal(recovered.exitCode, 0, JSON.stringify(recovered));
+  assert.equal(required(required(recovered.data).targets[0]).action, 'rolled-back');
+  assert.ok(recovered.diagnostics.some(entry => entry.code === 'PROCESSES_RUNNING' && entry.severity === 'warning'));
+  assert.ok(recovered.diagnostics.some(entry => entry.code === 'RESTART_REQUIRED'));
+  assert.deepEqual(await readFile(candidate.targetPath), original);
+  assert.ok(!run(box, 'status', candidate).diagnostics.some(entry => ['PROCESSES_RUNNING', 'RESTART_REQUIRED'].includes(entry.code)));
+});
+
+test('managed writes still refuse failed process enumeration because concurrency locks require identities', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const { candidate, original } = await supportedInstallation(box);
+  for (const command of ['apply', 'restore']) {
+    const rejected = run(box, command, candidate, { CODEX_TEST_PROCESS_FAILURE: '1' });
+    assert.equal(rejected.exitCode, 1, JSON.stringify(rejected));
+    assert.ok(rejected.diagnostics.some(entry => entry.code === 'PROCESS_ENUMERATION_FAILED' && entry.severity === 'error'));
+    assert.deepEqual(await readFile(candidate.targetPath), original);
+  }
+  await assert.rejects(access(join(box.directory, 'home/Library')), { code: 'ENOENT' });
+  const interrupted = await pauseOperation(t, box, candidate, 'apply', 'after-target-rename');
+  await interrupted.kill();
+  const beforeRecovery = await readFile(candidate.targetPath);
+  const rejected = run(box, 'recover', candidate, { CODEX_TEST_PROCESS_FAILURE: '1' });
+  assert.equal(rejected.exitCode, 1, JSON.stringify(rejected));
+  assert.ok(rejected.diagnostics.some(entry => entry.code === 'PROCESS_ENUMERATION_FAILED' && entry.severity === 'error'));
+  assert.deepEqual(await readFile(candidate.targetPath), beforeRecovery);
+  assert.equal(run(box, 'inspect', candidate).state, 'incomplete');
 });
 
 test('read-only inspection reports unwritable target parents without creating state', async (t: TestContext) => {
@@ -620,7 +716,7 @@ test('apply refuses a locator published after confirmation instead of adopting a
   assert.deepEqual(await readFile(candidate.targetPath), original);
 });
 
-test('similar patch bytes without trusted provenance never authorize restore and retain unknown-source guidance', async (t: TestContext) => {
+test('source alone confirms the complete installed patch without authorizing restore or duplicate installation', async (t: TestContext) => {
   const box = await sandbox(t);
   const { candidate } = await supportedInstallation(box);
   assert.equal(run(box, 'apply', candidate).exitCode, 0);
@@ -628,10 +724,16 @@ test('similar patch bytes without trusted provenance never authorize restore and
   const patched = await readFile(candidate.targetPath);
   await writeFile(untracked.targetPath, patched);
   const inspection = run(box, 'inspect', untracked);
-  assert.equal(inspection.support, 'unsupported');
+  assert.equal(inspection.support, 'supported');
+  assert.equal(inspection.state, 'tool-applied');
+  assert.equal(inspection.sourcePatch?.status, 'detected');
   assert.equal(inspection.recovery, null);
   assert.deepEqual(inspection.allowedActions, []);
-  assert.ok(inspection.diagnostics.some(entry => entry.code === 'UNVERIFIED_SOURCE' && /No trusted managed origin/.test(entry.message)));
+  assert.ok(inspection.diagnostics.some(entry => entry.code === 'RECOVERY_UNAVAILABLE'));
+  const status = run(box, 'status', untracked);
+  assert.equal(status.exitCode, 0);
+  assert.equal(status.data?.targets[0]?.state, 'tool-applied');
+  assert.notEqual(run(box, 'apply', untracked).exitCode, 0);
   assert.notEqual(run(box, 'restore', untracked).exitCode, 0);
   assert.deepEqual(await readFile(untracked.targetPath), patched);
 });
@@ -665,6 +767,7 @@ test('a locator with a missing preparation directory is a blocked conflict rathe
   await rm(join(required(inspection.recovery).preparation, '..'), { recursive: true });
   const missing = run(box, 'inspect', candidate);
   assert.equal(missing.state, 'conflict');
+  assert.equal(missing.sourcePatch?.status, 'detected');
   assert.equal(missing.writeReadiness, 'blocked');
   assert.deepEqual(missing.allowedActions, []);
   assert.deepEqual(await readFile(candidate.targetPath), patched);

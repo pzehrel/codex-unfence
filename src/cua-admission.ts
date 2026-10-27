@@ -1,4 +1,5 @@
 import { CUA_SCHEME } from './cua-contract.js';
+import { detectCuaPatch } from './cua-patch-detection.js';
 import type { DeriveCua } from './cua-contract.js';
 import { copyManagedPlan, loadManagedPlan, managedRecord } from './managed-state.js';
 import { blockingProcesses } from './processes.js';
@@ -25,6 +26,8 @@ export function cuaExecutor(derive: DeriveCua) {
     unselected(_path, bytes) {
       const source = bytes.toString('utf8');
       if (!Buffer.from(source).equals(bytes)) return { state: 'incompatible', diagnostics: [{ code: 'INVALID_SOURCE', severity: 'error', message: 'Target must be lossless UTF-8.' }] };
+      const detected = detectCuaPatch(source);
+      if (detected) return { state: 'tool-applied', diagnostics: [{ code: 'PATCH_DETECTED', severity: 'info', message: 'The complete known patch is present at the site-status JSON result. Recovery records are verified separately.' }, { code: 'RECOVERY_UNAVAILABLE', severity: 'warning', message: 'Patch detected from source, but no trusted recovery record is available. Automatic uninstall is unavailable.' }] };
       const derived = derive(source);
       return { state: derived.support === 'supported' ? 'original' : 'incompatible', diagnostics: [...derived.diagnostics] };
     },
