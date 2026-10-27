@@ -140,10 +140,16 @@ promises.open = async function (path, ...args) {
   return open(path, ...args);
 };
 promises.link = async function (from, to) {
+  const selectionSuccessor = String(to).includes('/codex-unfence/targets/') && String(to).endsWith('.next');
+  if (selectionSuccessor) await boundary('before-selection-publication');
   if (String(to).includes('target-leases') && !JSON.parse(fs.readFileSync(from, 'utf8')).released) await boundary('before-coordination-link');
   if (String(to).includes('operation.lock') && !JSON.parse(fs.readFileSync(from, 'utf8')).released) await boundary('before-operation-lock');
   if (fault === 'release-failure' && String(to).endsWith('.next') && JSON.parse(fs.readFileSync(from, 'utf8')).released) throw ioError();
   const result = await link(from, to);
+  if (selectionSuccessor) {
+    await boundary('after-selection-publication');
+    if (fault === 'selection-publication-error') throw ioError();
+  }
   const record = JSON.parse(fs.readFileSync(from, 'utf8'));
   const scope = String(to).includes('operation.lock') ? 'operation' : String(to).includes('target-leases') ? 'coordination' : 'target';
   if (record.released) await boundary(`after-${scope}-release-link`);

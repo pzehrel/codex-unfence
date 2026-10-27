@@ -18,6 +18,42 @@ npx codex-unfence install
 
 **补丁会修改应用签名资源，使严格签名校验失败，系统可能拒绝加载修改后的应用。** 工具不会重新签名、提权或关闭系统验证。
 
+## 命令
+
+```bash
+npx codex-unfence --help
+```
+
+```bash
+npx codex-unfence --version
+```
+
+`-h` 与 `--help` 等价，`-v` 与 `--version` 等价。查看某个命令的用法，例如：
+
+```bash
+npx codex-unfence check --help
+```
+
+检查所有发现的应用，不修改文件：
+
+```bash
+npx codex-unfence check
+```
+
+指定应用并输出 JSON：
+
+```bash
+npx codex-unfence check --app /Applications/Codex.app --json
+```
+
+卸载补丁：
+
+```bash
+npx codex-unfence uninstall
+```
+
+不带命令运行会进入交互引导。参数错误显示在 stderr；`--json` 模式下，结果与错误均输出到 stdout。
+
 ## 本地安装
 
 在仓库目录使用 `package.json` 中固定版本的 pnpm 安装依赖：
@@ -39,3 +75,7 @@ npx --offline --package "$PWD/codex-unfence-0.0.2.tgz" codex-unfence install
 ```
 
 按上述安装步骤确认并重启应用。请保留本地包，以便后续使用相同工具版本。
+
+## 开源协议
+
+本项目采用 [MIT License](LICENSE)。

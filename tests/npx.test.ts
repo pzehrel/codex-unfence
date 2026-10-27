@@ -8,7 +8,7 @@ function commandOutput(text: string): CommandResult { return JSON.parse(text); }
 import type { PtyStep } from './helpers/npm-package.js';
 interface FileSnapshot { [name: string]: FileSnapshot | {bytes: Buffer; mode: number} }
 import type { TestContext } from 'node:test';
-import { sourceFixture } from './helpers/paths.js';
+import { repositoryRoot, sourceFixture } from './helpers/paths.js';
 import assert from 'node:assert/strict';
 import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -63,6 +63,13 @@ test('offline npx runs the packed public bin from an unrelated cwd with isolated
   assert.equal(observed.home, join(box.directory, 'home'));
   assert.equal(observed.stdinTTY, false);
   assert.equal(observed.stdoutTTY, false);
+  const metadata: { version: string } = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8'));
+  for (const flag of ['-v', '--version']) {
+    const version = npmPackage.runNpmExec([flag], box);
+    assert.equal(version.status, 0, version.stdout + version.stderr);
+    assert.equal(version.stdout, `${metadata.version}\n`);
+    assert.equal(version.stderr, '');
+  }
   for (const args of [[], ['--json'], ['apply'], ['restore'], ['recover']] as const) {
     const rejected = npmPackage.runNpmExec(args, box);
     assert.equal(rejected.status, 2, rejected.stdout + rejected.stderr);
@@ -89,10 +96,10 @@ test('offline npx exposes help through a real PTY and propagates the public bin 
   const box = await packageBox(t);
   const documented = await npmPackage.runNpmExecPty(['--help'], box);
   help(documented);
-  assert.match(documented.stdout, /check aggregates runtime failure, conflict, incompatibility, then success/);
-  assert.match(documented.stdout, /check exits 1 when no installations are found/);
+  assert.match(documented.stdout, /check 汇总所有应用，按运行失败、冲突、不兼容、成功的顺序确定结果/);
+  assert.match(documented.stdout, /未找到应用时，check 返回退出码 1/);
   assert.doesNotMatch(documented.stdout, /codex-unfence (?:detect|prepare)|--plan|--store/);
-  assert.match(documented.stdout, /Write blockers are reported separately; check success does not authorize writes/);
+  assert.match(documented.stdout, /写入条件单独报告；检查成功不代表可以写入/);
   const observed = finalBin(await readFile(join(box.directory, 'final-bin.json'), 'utf8'));
   inside(join(box.directory, 'npm-cache'), observed.entry);
   assert.equal(observed.stdinTTY, true);
@@ -109,23 +116,23 @@ test('confirmed npx install and uninstall survive code-cache removal and repeate
   const source = await readFile(sourceFixture('deferred-site-status.js.txt'));
   await writeFile(target, source);
   const change = (command: string) => npmPackage.runNpmExecPty([command, '--app', app], {
-    ...box, steps: [{ waitFor: 'Type yes', send: 'yes\n' }],
+    ...box, steps: [{ waitFor: '输入 yes 确认', send: 'yes\n' }],
   });
   const applied = await change('install');
   assert.equal(applied.status, 0, applied.stdout + applied.stderr);
-  assert.match(applied.stdout, /tool-applied \(applied\)/);
+  assert.match(applied.stdout, /已安装补丁（安装完成）/);
   const patched = await readFile(target);
   assert.notDeepEqual(patched, source);
-  assert.match((await change('install')).stdout, /already-applied/);
+  assert.match((await change('install')).stdout, /已安装补丁（补丁已安装）/);
   const previous = finalBin(await readFile(join(box.directory, 'final-bin.json'), 'utf8')).entry;
   await rm(join(box.directory, 'npm-cache'), { recursive: true });
   await assert.rejects(readFile(previous), { code: 'ENOENT' });
   const status = npmPackage.runNpmExec(['status', '--app', app, '--json'], box);
   assert.equal(status.status, 0, status.stdout + status.stderr);
   assert.equal(required(required(operationOutput(status.stdout).data).targets[0]).state, 'tool-applied');
-  assert.match((await change('uninstall')).stdout, /original \(restored\)/);
+  assert.match((await change('uninstall')).stdout, /原始文件（卸载完成）/);
   assert.deepEqual(await readFile(target), source);
-  assert.match((await change('uninstall')).stdout, /already-original/);
+  assert.match((await change('uninstall')).stdout, /原始文件（已是原始文件）/);
 });
 
 test('npx discovers interrupted apply after reacquisition and can recover after recovery is interrupted again', async (t: TestContext) => {
@@ -136,7 +143,7 @@ test('npx discovers interrupted apply after reacquisition and can recover after 
   const source = await readFile(sourceFixture('deferred-site-status.js.txt'));
   await writeFile(target, source);
   const change = (command: string) => npmPackage.runNpmExecPty([command, '--app', app], {
-    ...box, steps: [{ waitFor: 'Type yes', send: 'yes\n' }],
+    ...box, steps: [{ waitFor: `输入 yes 确认 ${command === 'apply' ? 'install' : command === 'restore' ? 'uninstall' : command}，`, send: 'yes\n' }],
   });
   const scenario = join(box.directory, 'boundary.json');
   await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
@@ -154,7 +161,7 @@ test('npx discovers interrupted apply after reacquisition and can recover after 
   await rm(scenario);
   const recovered = await change('recover');
   assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr);
-  assert.match(recovered.stdout, /rolled-back/);
+  assert.match(recovered.stdout, /已回滚/);
   assert.deepEqual(await readFile(target), source);
   assert.equal((await change('apply')).status, 0);
   await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
@@ -175,11 +182,11 @@ test('npx refuses a target changed after inspection instead of applying to new b
   await writeFile(target, source);
   const changed = Buffer.concat([Buffer.from(source), Buffer.from('\n// external change\n')]);
   const child = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [
-    { waitFor: 'Type yes', beforeSend: () => writeFile(target, changed), send: 'yes\n' },
+    { waitFor: '输入 yes 确认', beforeSend: () => writeFile(target, changed), send: 'yes\n' },
   ] });
   assert.equal(child.status, 4, child.stdout + child.stderr);
   assert.match(child.stdout, /INSPECTION_CHANGED/);
-  assert.doesNotMatch(child.stdout, /Reopen the host manually/);
+  assert.doesNotMatch(child.stdout, /请手动重新打开应用/);
   assert.deepEqual(await readFile(target), changed);
 });
 
@@ -201,13 +208,13 @@ test('npx check reports process failures and a blocked guide can recheck after t
   assert.equal(required(inspected).writeReadiness, 'blocked');
   assert.deepEqual(required(inspected).allowedActions, []);
   const guided = await npmPackage.runNpmExecPty([], { ...box, steps: [
-    { waitFor: 'Action (recheck', beforeSend: () => writeFile(scenario, '{}'), send: 'recheck\n' },
-    { waitFor: 'Action (install', send: 'apply\n' },
-    { waitFor: 'Type yes', send: 'yes\n' },
+    { waitFor: '选择操作（recheck', beforeSend: () => writeFile(scenario, '{}'), send: 'recheck\n' },
+    { waitFor: '选择操作（install', send: 'apply\n' },
+    { waitFor: '输入 yes 确认', send: 'yes\n' },
   ] });
   assert.equal(guided.status, 0, guided.stdout + guided.stderr);
   assert.match(guided.stdout, /PROCESSES_RUNNING/);
-  assert.match(guided.stdout, /tool-applied \(applied\)/);
+  assert.match(guided.stdout, /已安装补丁（安装完成）/);
 });
 
 test('multiple installations require selection and confirmation EOF leaves the selected bytes unchanged', async (t: TestContext) => {
@@ -224,13 +231,13 @@ test('multiple installations require selection and confirmation EOF leaves the s
   assert.equal(ambiguous.status, 0, ambiguous.stdout + ambiguous.stderr);
   assert.equal(required(checkOutput(ambiguous.stdout).data).inspections.length, 2);
   const guided = await npmPackage.runNpmExecPty([], { ...box, steps: [
-    { waitFor: 'Select installation', send: '2\n' },
-    { waitFor: 'Action', send: 'apply\n' },
-    { waitFor: 'Type yes', send: '\u0004' },
+    { waitFor: '请输入应用编号', send: '2\n' },
+    { waitFor: '选择操作（', send: 'apply\n' },
+    { waitFor: '输入 yes 确认', send: '\u0004' },
   ] });
   assert.equal(guided.status, 0, guided.stdout + guided.stderr);
-  assert.ok(guided.stdout.includes(`Target: ${targets[1]}`));
-  assert.match(guided.stdout, /Cancelled/);
+  assert.ok(guided.stdout.includes(`目标文件：${targets[1]}`));
+  assert.match(guided.stdout, /已取消/);
   for (const target of targets) assert.deepEqual(await readFile(target), source);
 });
 
@@ -240,9 +247,9 @@ test('guide offers only admitted actions and EOF never confirms a write', async 
   const target = join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/browser-desktop/scripts/browser-service.mjs');
   await mkdir(join(target, '..'), { recursive: true });
   await writeFile(target, 'const unknown = true;');
-  const guided = await npmPackage.runNpmExecPty([], { ...box, steps: [{ waitFor: 'Action', send: '\u0004' }] });
+  const guided = await npmPackage.runNpmExecPty([], { ...box, steps: [{ waitFor: '选择操作（', send: '\u0004' }] });
   assert.equal(guided.status, 0, guided.stdout + guided.stderr);
-  assert.match(guided.stdout, /Action \(recheck, cancel\)/);
+  assert.match(guided.stdout, /选择操作（recheck, cancel）/);
   assert.equal(await readFile(target, 'utf8'), 'const unknown = true;');
 });
 
@@ -254,14 +261,14 @@ test('default npx guide displays the selected target and cancels without changin
   const source = await readFile(sourceFixture('deferred-site-status.js.txt'));
   await writeFile(target, source);
   const child = await npmPackage.runNpmExecPty([], { ...box, steps: [
-    { waitFor: 'Action', send: 'apply\n' }, { waitFor: 'Type yes', send: 'no\n' },
+    { waitFor: '选择操作（', send: 'apply\n' }, { waitFor: '输入 yes 确认', send: 'no\n' },
   ] });
   assert.equal(child.status, 0, child.stdout + child.stderr);
   assert.ok(child.stdout.includes(target));
-  assert.doesNotMatch(child.stdout, /Select installation number/);
-  assert.match(child.stdout, /signature/);
-  assert.match(child.stdout, /Assumption:.*host contracts/);
-  assert.match(child.stdout, /Cancelled/);
+  assert.doesNotMatch(child.stdout, /请输入应用编号/);
+  assert.match(child.stdout, /签名校验失败/);
+  assert.match(child.stdout, /前提：.*(?:宿主|应用).*(?:约定|契约|接口)/);
+  assert.match(child.stdout, /已取消/);
   assert.deepEqual(await readFile(target), source);
 });
 
@@ -274,24 +281,24 @@ test('npx install and uninstall are repeatable and original uninstall needs no b
   const source = await readFile(sourceFixture('deferred-site-status.js.txt'));
   await writeFile(target, source);
   const change = (command: string) => npmPackage.runNpmExecPty([command, '--app', app], {
-    ...box, steps: [{ waitFor: 'Type yes', send: 'yes\n' }],
+    ...box, steps: [{ waitFor: '输入 yes 确认', send: 'yes\n' }],
   });
   const original = await change('uninstall');
   assert.equal(original.status, 0, original.stdout + original.stderr);
-  assert.match(original.stdout, /Already uninstalled/);
+  assert.match(original.stdout, /补丁已卸载，原始文件未修改/);
   await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
   const installed = await change('install');
   assert.equal(installed.status, 0, installed.stdout + installed.stderr);
-  assert.match(installed.stdout, /install: success/);
+  assert.match(installed.stdout, /install：成功/);
   assert.notDeepEqual(await readFile(target), source);
-  assert.match((await change('install')).stdout, /already-applied/);
+  assert.match((await change('install')).stdout, /已安装补丁（补丁已安装）/);
   const state = npmPackage.runNpmExec(['check', '--json'], box);
   assert.equal(required(required(checkOutput(state.stdout).data).inspections[0]).state, 'tool-applied');
   const removed = await change('uninstall');
   assert.equal(removed.status, 0, removed.stdout + removed.stderr);
-  assert.match(removed.stdout, /uninstall: success/);
+  assert.match(removed.stdout, /uninstall：成功/);
   assert.deepEqual(await readFile(target), source);
-  assert.match((await change('uninstall')).stdout, /already-original/);
+  assert.match((await change('uninstall')).stdout, /原始文件（已是原始文件）/);
 });
 
 test('npx uninstall of an original refuses running processes instead of reporting success', async (t: TestContext) => {
@@ -305,11 +312,11 @@ test('npx uninstall of an original refuses running processes instead of reportin
     processRows: [{ pid: 998877, executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' }],
   }));
   const child = await npmPackage.runNpmExecPty(['uninstall', '--app', app], {
-    ...box, steps: [{ waitFor: 'Action (recheck, cancel)', send: 'cancel\n' }],
+    ...box, steps: [{ waitFor: '选择操作（recheck, cancel）', send: 'cancel\n' }],
   });
   assert.equal(child.status, 4, child.stdout + child.stderr);
   assert.match(child.stdout, /PROCESSES_RUNNING/);
-  assert.doesNotMatch(child.stdout, /uninstall: success/);
+  assert.doesNotMatch(child.stdout, /uninstall：成功/);
   assert.deepEqual(await readFile(target), source);
   await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
 });
@@ -320,7 +327,7 @@ test('npx install and uninstall report a missing explicit installation as runtim
   for (const command of ['install', 'uninstall']) {
     const child = await npmPackage.runNpmExecPty([command, '--app', app], box);
     assert.equal(child.status, 1, child.stdout + child.stderr);
-    assert.match(child.stdout, new RegExp(`${command}: runtime-error`));
+    assert.match(child.stdout, new RegExp(`${command}：运行失败`));
     assert.match(child.stdout, /ENOENT/);
   }
 });
@@ -334,14 +341,14 @@ test('npx install requires the exact yes confirmation and preserves bytes for ot
   await writeFile(target, source);
   for (const send of [' yes \n', 'YES\n', 'yes please\n', '\n', 'no\n', '\u0004']) {
     const child = await npmPackage.runNpmExecPty(['install', '--app', app], {
-      ...box, steps: [{ waitFor: 'Type yes to install,', send }],
+      ...box, steps: [{ waitFor: '输入 yes 确认 install，', send }],
     });
     assert.equal(child.status, 0, child.stdout + child.stderr);
-    assert.match(child.stdout, /Cancelled; installation unchanged/);
-    assert.match(child.stdout, /Support:/);
-    assert.match(child.stdout, /Assumption:.*host contracts/);
-    assert.match(child.stdout, /signature/);
-    assert.ok(child.stdout.includes(`Target: ${target}`));
+    assert.match(child.stdout, /已取消，应用文件未修改/);
+    assert.match(child.stdout, /依据：/);
+    assert.match(child.stdout, /前提：.*(?:宿主|应用).*(?:约定|契约|接口)/);
+    assert.match(child.stdout, /签名校验失败/);
+    assert.ok(child.stdout.includes(`目标文件：${target}`));
     assert.deepEqual(await readFile(target), source);
     await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
   }
@@ -360,7 +367,7 @@ test('npx install and uninstall reject an aliased explicit installation as a con
     const child = await npmPackage.runNpmExecPty([command, '--app', alias], box);
     assert.equal(child.status, 4, child.stdout + child.stderr);
     assert.match(child.stdout, /PATH_ALIAS/);
-    assert.doesNotMatch(child.stdout, /Type yes/);
+    assert.doesNotMatch(child.stdout, /输入 yes 确认/);
     assert.deepEqual(await readFile(target), source);
   }
 });
@@ -370,12 +377,12 @@ test('npx install and uninstall select among multiple installations and auto-sel
   const first = await syntheticInstallation(box, 'First');
   const second = await syntheticInstallation(box, 'Second');
   const change = (command: string) => npmPackage.runNpmExecPty([command], { ...box, steps: [
-    { waitFor: 'Select installation number', send: '2\n' },
-    { waitFor: `Type yes to ${command},`, send: 'yes\n' },
+    { waitFor: '请输入应用编号', send: '2\n' },
+    { waitFor: `输入 yes 确认 ${command}，`, send: 'yes\n' },
   ] });
   const installed = await change('install');
   assert.equal(installed.status, 0, installed.stdout + installed.stderr);
-  assert.ok(installed.stdout.includes(`Target: ${second.target}`));
+  assert.ok(installed.stdout.includes(`目标文件：${second.target}`));
   assert.deepEqual(await readFile(first.target), first.source);
   assert.notDeepEqual(await readFile(second.target), second.source);
   const removed = await change('uninstall');
@@ -383,11 +390,11 @@ test('npx install and uninstall select among multiple installations and auto-sel
   assert.deepEqual(await readFile(second.target), second.source);
   await rm(second.app, { recursive: true });
   const single = await npmPackage.runNpmExecPty(['install'], { ...box, steps: [
-    { waitFor: 'Type yes to install,', send: 'yes\n' },
+    { waitFor: '输入 yes 确认 install，', send: 'yes\n' },
   ] });
   assert.equal(single.status, 0, single.stdout + single.stderr);
-  assert.doesNotMatch(single.stdout, /Select installation number/);
-  assert.ok(single.stdout.includes(`Target: ${first.target}`));
+  assert.doesNotMatch(single.stdout, /请输入应用编号/);
+  assert.ok(single.stdout.includes(`目标文件：${first.target}`));
   assert.notDeepEqual(await readFile(first.target), first.source);
 });
 
@@ -397,13 +404,13 @@ test('npx public writes reject pipes, JSON and relative app paths without creati
   for (const command of ['install', 'uninstall']) {
     const piped = npmPackage.runNpmExec([command, '--app', app], box);
     assert.equal(piped.status, 2, piped.stdout + piped.stderr);
-    assert.match(piped.stdout, /interactive stdin\/stdout/);
+    assert.match(piped.stderr, /需要交互终端/);
     const json = await npmPackage.runNpmExecPty([command, '--app', app, '--json'], box);
     assert.equal(json.status, 2, json.stdout + json.stderr);
     assert.equal(commandOutput(json.stdout).outcome, 'usage-error');
     const relative = await npmPackage.runNpmExecPty([command, '--app', 'Relative.app'], box);
     assert.equal(relative.status, 2, relative.stdout + relative.stderr);
-    assert.match(relative.stdout, /absolute installation path/);
+    assert.match(relative.stdout, /--app 需要应用的绝对路径/);
   }
   assert.deepEqual(await readFile(target), source);
   await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
@@ -415,7 +422,7 @@ test('npx public writes refuse permissions and unknown process state with accura
   const scenario = join(box.directory, 'boundary.json');
   const parent = join(target, '..');
   const blocked = (command: string) => npmPackage.runNpmExecPty([command, '--app', app], {
-    ...box, steps: [{ waitFor: 'Action (recheck, cancel)', send: 'cancel\n' }],
+    ...box, steps: [{ waitFor: '选择操作（recheck, cancel）', send: 'cancel\n' }],
   });
   await chmod(parent, 0o500);
   try {
@@ -435,12 +442,48 @@ test('npx public writes refuse permissions and unknown process state with accura
   await assert.rejects(readFile(join(box.directory, 'home/Library/Application Support/codex-unfence/key')), { code: 'ENOENT' });
 });
 
+test('npx check and confirmed install follow application updates without restoring old files', async (t: TestContext) => {
+  const box = await packageBox(t);
+  const { app, target, source } = await syntheticInstallation(box, 'Updated');
+  const plist = join(app, 'Contents/Info.plist');
+  await writeFile(plist, '<plist><dict><key>CFBundleVersion</key><string>1</string></dict></plist>');
+  const installed = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [{ waitFor: '输入 yes 确认 install，', send: 'yes\n' }] });
+  assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+  await rename(target, join(box.directory, 'old-patched.mjs'));
+  const updated = Buffer.concat([Buffer.from('// updated application\n'), Buffer.from(source)]);
+  await writeFile(target, updated, { mode: 0o640 });
+  await writeFile(plist, '<plist><dict><key>CFBundleVersion</key><string>2</string></dict></plist>');
+  const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
+  const before = await snapshotFiles(root);
+  const checked = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
+  assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+  const inspection = required(checkOutput(checked.stdout).data?.inspection);
+  assert.equal(inspection.state, 'original');
+  assert.equal(inspection.support, 'supported');
+  assert.ok(inspection.allowedActions.includes('apply'));
+  assert.deepEqual(await snapshotFiles(root), before);
+  const uninstalled = await npmPackage.runNpmExecPty(['uninstall', '--app', app], box);
+  assert.equal(uninstalled.status, 0, uninstalled.stdout + uninstalled.stderr);
+  assert.deepEqual(await readFile(target), updated);
+  assert.deepEqual(await snapshotFiles(root), before);
+  const stale = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [{ waitFor: '输入 yes 确认 install，', send: 'yes\n', beforeSend: () => writeFile(plist, '<plist><dict><key>CFBundleVersion</key><string>3</string></dict></plist>') }] });
+  assert.equal(stale.status, 4, stale.stdout + stale.stderr);
+  assert.match(stale.stdout, /INSPECTION_CHANGED/);
+  assert.deepEqual(await readFile(target), updated);
+  assert.deepEqual(await snapshotFiles(root), before);
+  const reapplied = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [{ waitFor: '输入 yes 确认 install，', send: 'yes\n' }] });
+  assert.equal(reapplied.status, 0, reapplied.stdout + reapplied.stderr);
+  const restored = await npmPackage.runNpmExecPty(['uninstall', '--app', app], { ...box, steps: [{ waitFor: '输入 yes 确认 uninstall，', send: 'yes\n' }] });
+  assert.equal(restored.status, 0, restored.stdout + restored.stderr);
+  assert.deepEqual(await readFile(target), updated);
+});
+
 test('npx public writes preserve an externally replaced identity even when bytes are unchanged', async (t: TestContext) => {
   const box = await packageBox(t);
   const { app, target, source } = await syntheticInstallation(box, 'Identity');
   const before = await stat(target);
   const installed = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [{
-    waitFor: 'Type yes to install,', send: 'yes\n', beforeSend: async () => {
+    waitFor: '输入 yes 确认 install，', send: 'yes\n', beforeSend: async () => {
       await rename(target, join(box.directory, 'retained-original.mjs'));
       await writeFile(target, source, { mode: 0o640 });
     },
@@ -450,7 +493,7 @@ test('npx public writes preserve an externally replaced identity even when bytes
   assert.notEqual((await stat(target)).ino, before.ino);
   assert.deepEqual(await readFile(target), source);
   const confirmed = await npmPackage.runNpmExecPty(['install', '--app', app], {
-    ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }],
+    ...box, steps: [{ waitFor: '输入 yes 确认 install，', send: 'yes\n' }],
   });
   assert.equal(confirmed.status, 0, confirmed.stdout + confirmed.stderr);
   const patched = await readFile(target);
@@ -459,7 +502,7 @@ test('npx public writes preserve an externally replaced identity even when bytes
   await writeFile(target, patched, { mode: 0o640 });
   assert.notEqual((await stat(target)).ino, appliedIdentity.ino);
   const refused = await npmPackage.runNpmExecPty(['uninstall', '--app', app], {
-    ...box, steps: [{ waitFor: 'Action (recheck, cancel)', send: 'cancel\n' }],
+    ...box, steps: [{ waitFor: '选择操作（recheck, cancel）', send: 'cancel\n' }],
   });
   assert.equal(refused.status, 4, refused.stdout + refused.stderr);
   assert.match(refused.stdout, /TARGET_CONFLICT/);
@@ -478,7 +521,7 @@ test('npx install and uninstall keep independent private recovery and coordinati
   }
   try {
     const change = (command: string) => npmPackage.runNpmExecPty([command, '--app', app], {
-      ...box, steps: [{ waitFor: `Type yes to ${command},`, send: 'yes\n' }],
+      ...box, steps: [{ waitFor: `输入 yes 确认 ${command}，`, send: 'yes\n' }],
     });
     const installed = await change('install');
     assert.equal(installed.status, 0, installed.stdout + installed.stderr);
@@ -515,7 +558,7 @@ test('npx uninstall cancellation preserves patched bytes and every recovery arti
   const box = await packageBox(t);
   const { app, target } = await syntheticInstallation(box, 'CancelUninstall');
   const installed = await npmPackage.runNpmExecPty(['install', '--app', app], {
-    ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }],
+    ...box, steps: [{ waitFor: '输入 yes 确认 install，', send: 'yes\n' }],
   });
   assert.equal(installed.status, 0, installed.stdout + installed.stderr);
   const patched = await readFile(target);
@@ -524,13 +567,13 @@ test('npx uninstall cancellation preserves patched bytes and every recovery arti
   const before = await snapshotFiles(root);
   for (const send of [' yes \n', 'YES\n', 'no\n', '\u0004']) {
     const child = await npmPackage.runNpmExecPty(['uninstall', '--app', app], {
-      ...box, steps: [{ waitFor: 'Type yes to uninstall,', send }],
+      ...box, steps: [{ waitFor: '输入 yes 确认 uninstall，', send }],
     });
     assert.equal(child.status, 0, child.stdout + child.stderr);
-    assert.match(child.stdout, /Cancelled; installation unchanged/);
-    assert.match(child.stdout, /Recovery tool: codex-unfence@0.0.2; executable: codex-unfence/);
-    for (const notice of ['Support:', 'Assumption:', 'Scope:', 'signature']) {
-      assert.ok(child.stdout.indexOf(notice) >= 0 && child.stdout.indexOf(notice) < child.stdout.indexOf('Type yes to uninstall,'), notice);
+    assert.match(child.stdout, /已取消，应用文件未修改/);
+    assert.match(child.stdout, /恢复工具：codex-unfence@0.0.2[\r\n]+命令：codex-unfence/);
+    for (const notice of ['依据：', '前提：', '作用范围：', '签名校验失败']) {
+      assert.ok(child.stdout.indexOf(notice) >= 0 && child.stdout.indexOf(notice) < child.stdout.indexOf('输入 yes 确认 uninstall，'), notice);
     }
     assert.deepEqual(await readFile(target), patched);
     assert.equal((await stat(target)).ino, identity.ino);
@@ -542,7 +585,7 @@ test('npx interrupted install and uninstall require exact recovery confirmation 
   const box = await packageBox(t);
   const { app, target } = await syntheticInstallation(box, 'ExactRecovery');
   const scenario = join(box.directory, 'boundary.json');
-  const change = (command: string, steps = [{ waitFor: `Type yes to ${command},`, send: 'yes\n' }]) =>
+  const change = (command: string, steps = [{ waitFor: `输入 yes 确认 ${command}，`, send: 'yes\n' }]) =>
     npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps });
   for (const command of ['install', 'uninstall']) {
     if (command === 'uninstall') assert.equal((await change('install')).status, 0);
@@ -555,17 +598,17 @@ test('npx interrupted install and uninstall require exact recovery confirmation 
     const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
     const before = await snapshotFiles(root);
     for (const send of [' yes \n', 'YES\n', 'yes please\n', '\n', 'no\n', '\u0004']) {
-      const refused = await change(command, [{ waitFor: 'Type yes to recover', send }]);
+      const refused = await change(command, [{ waitFor: '输入 yes 确认恢复', send }]);
       assert.equal(refused.status, 0, refused.stdout + refused.stderr);
-      assert.match(refused.stdout, /Cancelled; installation unchanged/);
-      assert.doesNotMatch(refused.stdout, /rolled-back|Recovery completed|Type yes to (?:install|uninstall),/);
+      assert.match(refused.stdout, /已取消，应用文件未修改/);
+      assert.doesNotMatch(refused.stdout, /已回滚|恢复已完成|输入 yes 确认 (?:install|uninstall)，/);
       assert.deepEqual(await readFile(target), bytes);
       assert.equal((await stat(target)).ino, identity.ino);
       assert.deepEqual(await snapshotFiles(root), before);
     }
     const recovered = await change(command, [
-      { waitFor: 'Type yes to recover', send: 'yes\n' },
-      { waitFor: `Type yes to ${command},`, send: 'no\n' },
+      { waitFor: '输入 yes 确认恢复', send: 'yes\n' },
+      { waitFor: `输入 yes 确认 ${command}，`, send: 'no\n' },
     ]);
     assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr);
   }
@@ -579,18 +622,18 @@ test('npx install and uninstall guide rollback then continue after interruptions
   const source = await readFile(sourceFixture('deferred-site-status.js.txt'));
   await writeFile(target, source);
   const scenario = join(box.directory, 'boundary.json');
-  const change = (command: string, steps = [{ waitFor: 'Type yes', send: 'yes\n' }]) =>
+  const change = (command: string, steps = [{ waitFor: '输入 yes 确认', send: 'yes\n' }]) =>
     npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps });
   await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
   assert.notEqual((await change('install')).status, 0);
   await rm(scenario);
   const patched = await readFile(target);
-  const cancelled = await change('install', [{ waitFor: 'Type yes to recover', send: 'no\n' }]);
+  const cancelled = await change('install', [{ waitFor: '输入 yes 确认恢复', send: 'no\n' }]);
   assert.equal(cancelled.status, 0, cancelled.stdout + cancelled.stderr);
   assert.deepEqual(await readFile(target), patched);
   const steps = (command: string) => [
-    { waitFor: 'Type yes to recover', send: 'yes\n' },
-    { waitFor: `Type yes to ${command},`, send: 'yes\n', beforeSend: async () => {
+    { waitFor: '输入 yes 确认恢复', send: 'yes\n' },
+    { waitFor: `输入 yes 确认 ${command}，`, send: 'yes\n', beforeSend: async () => {
       assert.deepEqual(await readFile(target), command === 'install' ? source : patched);
       const checked = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
       assert.equal(checked.status, 0, checked.stdout + checked.stderr);
@@ -602,16 +645,16 @@ test('npx install and uninstall guide rollback then continue after interruptions
   ];
   const installed = await change('install', steps('install'));
   assert.equal(installed.status, 0, installed.stdout + installed.stderr);
-  assert.match(installed.stdout, /rolled-back/);
-  assert.match(installed.stdout, /install: success/);
+  assert.match(installed.stdout, /已回滚/);
+  assert.match(installed.stdout, /install：成功/);
   assert.deepEqual(await readFile(target), patched);
   await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
   assert.notEqual((await change('uninstall')).status, 0);
   await rm(scenario);
   const removed = await change('uninstall', steps('uninstall'));
   assert.equal(removed.status, 0, removed.stdout + removed.stderr);
-  assert.match(removed.stdout, /rolled-back/);
-  assert.match(removed.stdout, /uninstall: success/);
+  assert.match(removed.stdout, /已回滚/);
+  assert.match(removed.stdout, /uninstall：成功/);
   assert.deepEqual(await readFile(target), source);
 });
 
@@ -624,31 +667,31 @@ test('npx recovery restores each transaction before state and cancellation or EO
       const change = (steps: PtyStep[]) => npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps });
       if (command === 'uninstall') {
         const installed = await npmPackage.runNpmExecPty(['install', '--app', app], {
-          ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }],
+          ...box, steps: [{ waitFor: '输入 yes 确认 install，', send: 'yes\n' }],
         });
         assert.equal(installed.status, 0, installed.stdout + installed.stderr);
       }
       const before = await readFile(target);
       const scenario = join(box.directory, 'boundary.json');
       await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
-      assert.notEqual((await change([{ waitFor: `Type yes to ${command},`, send: 'yes\n' }])).status, 0);
+      assert.notEqual((await change([{ waitFor: `输入 yes 确认 ${command}，`, send: 'yes\n' }])).status, 0);
       await rm(scenario);
       assert.notDeepEqual(await readFile(target), before);
       let recoveredFiles: FileSnapshot | undefined;
       const observed: {identity?: Awaited<ReturnType<typeof stat>>} = {};
       const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
       const cancelled = await change([
-        { waitFor: 'Type yes to recover', send: 'yes\n' },
-        { waitFor: `Type yes to ${command},`, send, beforeSend: async () => {
+        { waitFor: '输入 yes 确认恢复', send: 'yes\n' },
+        { waitFor: `输入 yes 确认 ${command}，`, send, beforeSend: async () => {
           assert.deepEqual(await readFile(target), before);
           recoveredFiles = await snapshotFiles(root);
           observed.identity = await stat(target);
         } },
       ]);
       assert.equal(cancelled.status, 0, cancelled.stdout + cancelled.stderr);
-      assert.match(cancelled.stdout, /Recovery completed; subsequent action cancelled/);
-      assert.match(cancelled.stdout, new RegExp(`file state: ${command === 'install' ? 'original' : 'tool-applied'}; write readiness: ready`));
-      assert.doesNotMatch(cancelled.stdout, /installation unchanged/);
+      assert.match(cancelled.stdout, /恢复已完成，后续操作已取消/);
+      assert.match(cancelled.stdout, new RegExp(`文件状态：${command === 'install' ? '原始文件' : '已安装补丁'}\\r?\\n  写入条件：满足`));
+      assert.doesNotMatch(cancelled.stdout, /应用文件未修改/);
       assert.deepEqual(await readFile(target), before);
       assert.ok(observed.identity);
       assert.equal((await stat(target)).ino, observed.identity.ino);
@@ -670,7 +713,7 @@ test('npx install and uninstall recover again after an interrupted rollback and 
   for (const command of ['install', 'uninstall']) {
     const { app, target, source } = await syntheticInstallation(box, `${command}-retry`);
     const change = (action: string, steps: PtyStep[]) => npmPackage.runNpmExecPty([action, '--app', app], { ...box, steps });
-    const confirm = (action: string) => [{ waitFor: `Type yes to ${action},`, send: 'yes\n' }];
+    const confirm = (action: string) => [{ waitFor: `输入 yes 确认 ${action}，`, send: 'yes\n' }];
     if (command === 'uninstall') assert.equal((await change('install', confirm('install'))).status, 0);
     const before = await readFile(target);
     const scenario = join(box.directory, 'boundary.json');
@@ -697,9 +740,9 @@ test('npx install and uninstall recover again after an interrupted rollback and 
     inside(root, required(required(inspection).recovery).store);
     inside(root, required(required(inspection).recovery).preparation);
     await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
-    const killedRecovery = await change(command, [{ waitFor: 'Type yes to recover', send: 'yes\n' }]);
+    const killedRecovery = await change(command, [{ waitFor: '输入 yes 确认恢复', send: 'yes\n' }]);
     assert.notEqual(killedRecovery.status, 0, killedRecovery.stdout + killedRecovery.stderr);
-    assert.doesNotMatch(killedRecovery.stdout, /Type yes to (?:install|uninstall),/);
+    assert.doesNotMatch(killedRecovery.stdout, /输入 yes 确认 (?:install|uninstall)，/);
     await rm(scenario);
     assert.deepEqual(await readFile(target), before);
     const stillPending = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
@@ -708,13 +751,13 @@ test('npx install and uninstall recover again after an interrupted rollback and 
     assert.equal(required(retry).state, 'incomplete');
     assert.equal(required(required(required(required(required(retry).operation).data).pendingTransactions)[0]).transaction, required(pending).transaction);
     const recovered = await change(command, [
-      { waitFor: 'Type yes to recover', send: 'yes\n' },
-      { waitFor: `Type yes to ${command},`, send: 'yes\n', beforeSend: async () => {
+      { waitFor: '输入 yes 确认恢复', send: 'yes\n' },
+      { waitFor: `输入 yes 确认 ${command}，`, send: 'yes\n', beforeSend: async () => {
         assert.deepEqual(await readFile(target), before);
       } },
     ]);
     assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr);
-    assert.match(recovered.stdout, /rolled-back/);
+    assert.match(recovered.stdout, /已回滚/);
     assert.deepEqual(await readFile(target), interrupted);
     const final = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
     assert.equal(final.status, 0, final.stdout + final.stderr);
@@ -733,15 +776,15 @@ test('npx recovery rechecks a process blocker before rollback and before the sep
   const scenario = join(box.directory, 'boundary.json');
   await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
   assert.notEqual((await npmPackage.runNpmExecPty(['install', '--app', app], {
-    ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }],
+    ...box, steps: [{ waitFor: '输入 yes 确认 install，', send: 'yes\n' }],
   })).status, 0);
   await writeFile(scenario, JSON.stringify({ processRows: [{ pid: 998877, executable: '/Applications/Codex.app/Contents/MacOS/Codex', command: 'Codex' }] }));
   const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
   let recoveredFiles: FileSnapshot | undefined;
   const recovered = await npmPackage.runNpmExecPty(['install', '--app', app], { ...box, steps: [
-    { waitFor: 'Action (recheck, cancel)', send: 'recheck\n', beforeSend: () => writeFile(scenario, '{}') },
-    { waitFor: 'Type yes to recover', send: 'yes\n' },
-    { waitFor: 'Type yes to install,', send: 'yes\n', beforeSend: async () => {
+    { waitFor: '选择操作（recheck, cancel）', send: 'recheck\n', beforeSend: () => writeFile(scenario, '{}') },
+    { waitFor: '输入 yes 确认恢复', send: 'yes\n' },
+    { waitFor: '输入 yes 确认 install，', send: 'yes\n', beforeSend: async () => {
       assert.deepEqual(await readFile(target), source);
       recoveredFiles = await snapshotFiles(root);
       await writeFile(scenario, JSON.stringify({ processFailure: true }));
@@ -749,7 +792,7 @@ test('npx recovery rechecks a process blocker before rollback and before the sep
   ] });
   assert.equal(recovered.status, 1, recovered.stdout + recovered.stderr);
   assert.match(recovered.stdout, /PROCESSES_RUNNING/);
-  assert.match(recovered.stdout, /rolled-back/);
+  assert.match(recovered.stdout, /已回滚/);
   assert.match(recovered.stdout, /PROCESS_ENUMERATION_FAILED/);
   assert.deepEqual(await readFile(target), source);
   assert.deepEqual(await snapshotFiles(root), recoveredFiles);
@@ -760,7 +803,7 @@ test('npx recovery preserves a same-byte replacement made before restart after i
   for (const [command, interruptedPhase] of [['install', 'operation'], ['uninstall', 'operation'], ['install', 'rollback'], ['uninstall', 'rollback']] as const) {
     const { app, target } = await syntheticInstallation(box, `${command}-${interruptedPhase}-replaced-before-restart`);
     const confirm = (action: string) => npmPackage.runNpmExecPty([action, '--app', app], {
-      ...box, steps: [{ waitFor: `Type yes to ${action},`, send: 'yes\n' }],
+      ...box, steps: [{ waitFor: `输入 yes 确认 ${action}，`, send: 'yes\n' }],
     });
     if (command === 'uninstall') assert.equal((await confirm('install')).status, 0);
     const scenario = join(box.directory, 'boundary.json');
@@ -769,7 +812,7 @@ test('npx recovery preserves a same-byte replacement made before restart after i
     assert.notEqual(interrupted.status, 0, interrupted.stdout + interrupted.stderr);
     if (interruptedPhase === 'rollback') {
       const killedRecovery = await npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps: [
-        { waitFor: 'Type yes to recover', send: 'yes\n' },
+        { waitFor: '输入 yes 确认恢复', send: 'yes\n' },
       ] });
       assert.notEqual(killedRecovery.status, 0, killedRecovery.stdout + killedRecovery.stderr);
     }
@@ -786,11 +829,11 @@ test('npx recovery preserves a same-byte replacement made before restart after i
     const checked = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
     const conflicted = required(required(checkOutput(checked.stdout).data).inspection).state === 'conflict';
     const refused = await npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps: conflicted
-      ? [{ waitFor: 'Action (recheck, cancel)', send: 'cancel\n' }]
-      : [{ waitFor: 'Type yes to recover', send: 'yes\n' }, { waitFor: `Type yes to ${command},`, send: 'no\n' }],
+      ? [{ waitFor: '选择操作（recheck, cancel）', send: 'cancel\n' }]
+      : [{ waitFor: '输入 yes 确认恢复', send: 'yes\n' }, { waitFor: `输入 yes 确认 ${command}，`, send: 'no\n' }],
     });
     assert.equal(refused.status, 4, refused.stdout + refused.stderr);
-    assert.doesNotMatch(refused.stdout, /Type yes to recover|rolled-back|Type yes to (?:install|uninstall),/);
+    assert.doesNotMatch(refused.stdout, /输入 yes 确认恢复|已回滚|输入 yes 确认 (?:install|uninstall)，/);
     assert.deepEqual(await readFile(target), bytes);
     assert.equal((await stat(target)).ino, replacement.ino);
     assert.equal((await stat(target)).mode & 0o7777, originalIdentity.mode & 0o7777);
@@ -807,11 +850,11 @@ test('npx recovery refuses unknown contents and changed identities without conti
       const { app, target, source } = await syntheticInstallation(box, `${command}-${conflict}`);
       const change = (steps: PtyStep[]) => npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps });
       if (command === 'uninstall') assert.equal((await npmPackage.runNpmExecPty(['install', '--app', app], {
-        ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }],
+        ...box, steps: [{ waitFor: '输入 yes 确认 install，', send: 'yes\n' }],
       })).status, 0);
       const scenario = join(box.directory, 'boundary.json');
       await writeFile(scenario, JSON.stringify({ killAfterRename: target }));
-      assert.notEqual((await change([{ waitFor: `Type yes to ${command},`, send: 'yes\n' }])).status, 0);
+      assert.notEqual((await change([{ waitFor: `输入 yes 确认 ${command}，`, send: 'yes\n' }])).status, 0);
       await rm(scenario);
       const interrupted = await readFile(target);
       const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
@@ -836,12 +879,12 @@ test('npx recovery refuses unknown contents and changed identities without conti
       const atConfirmation = conflict.endsWith('at-confirmation');
       if (!atConfirmation) await mutate();
       const refused = await change(atConfirmation
-        ? [{ waitFor: 'Type yes to recover', send: 'yes\n', beforeSend: mutate }]
-        : [{ waitFor: 'Action (recheck, cancel)', send: 'cancel\n' }]);
+        ? [{ waitFor: '输入 yes 确认恢复', send: 'yes\n', beforeSend: mutate }]
+        : [{ waitFor: '选择操作（recheck, cancel）', send: 'cancel\n' }]);
       assert.equal(refused.status, 4, refused.stdout + refused.stderr);
       assert.match(refused.stdout, atConfirmation ? /INSPECTION_CHANGED/ : /TARGET_CONFLICT|IDENTITY_CHANGED|RECOVERY_CONFLICT/);
-      assert.doesNotMatch(refused.stdout, /rolled-back|Type yes to (?:install|uninstall),/);
-      if (atConfirmation) assert.match(refused.stdout, /Recovery did not complete/);
+      assert.doesNotMatch(refused.stdout, /已回滚|输入 yes 确认 (?:install|uninstall)，/);
+      if (atConfirmation) assert.match(refused.stdout, /恢复未完成/);
       assert.deepEqual(await readFile(target), preserved);
       assert.deepEqual(await snapshotFiles(root), recoveryFiles);
     }
@@ -855,12 +898,12 @@ test('blocked install exits unsuccessfully and cancelled continuation reports co
   await mkdir(join(target, '..'), { recursive: true });
   await writeFile(target, 'const unsupported = true;');
   const rejected = await npmPackage.runNpmExecPty(['install', '--app', app], {
-    ...box, steps: [{ waitFor: 'Action (recheck, cancel)', send: 'cancel\n' }],
+    ...box, steps: [{ waitFor: '选择操作（recheck, cancel）', send: 'cancel\n' }],
   });
   assert.equal(rejected.status, 3, rejected.stdout + rejected.stderr);
   const source = await readFile(sourceFixture('deferred-site-status.js.txt'));
   await writeFile(target, source);
-  const change = (command: string, steps = [{ waitFor: 'Type yes', send: 'yes\n' }]) =>
+  const change = (command: string, steps = [{ waitFor: '输入 yes 确认', send: 'yes\n' }]) =>
     npmPackage.runNpmExecPty([command, '--app', app], { ...box, steps });
   assert.equal((await change('install')).status, 0);
   const patched = await readFile(target);
@@ -870,11 +913,11 @@ test('blocked install exits unsuccessfully and cancelled continuation reports co
   await rm(scenario);
   assert.deepEqual(await readFile(target), source);
   const cancelled = await change('uninstall', [
-    { waitFor: 'Type yes to recover', send: 'yes\n' },
-    { waitFor: 'Type yes to uninstall,', send: 'no\n' },
+    { waitFor: '输入 yes 确认恢复', send: 'yes\n' },
+    { waitFor: '输入 yes 确认 uninstall，', send: 'no\n' },
   ]);
   assert.equal(cancelled.status, 0, cancelled.stdout + cancelled.stderr);
-  assert.match(cancelled.stdout, /Recovery completed; subsequent action cancelled/);
-  assert.doesNotMatch(cancelled.stdout, /installation unchanged/);
+  assert.match(cancelled.stdout, /恢复已完成，后续操作已取消/);
+  assert.doesNotMatch(cancelled.stdout, /应用文件未修改/);
   assert.deepEqual(await readFile(target), patched);
 });

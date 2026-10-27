@@ -1,6 +1,6 @@
 import { CUA_SCHEME } from './cua-contract.js';
 import type { DeriveCua } from './cua-contract.js';
-import { copyManagedPlan, loadManagedPlan } from './managed-state.js';
+import { copyManagedPlan, loadManagedPlan, managedRecord } from './managed-state.js';
 import { blockingProcesses } from './processes.js';
 import type { ProcessIdentity } from './processes.js';
 import { basename } from 'node:path';
@@ -27,6 +27,12 @@ export function cuaExecutor(derive: DeriveCua) {
       if (!Buffer.from(source).equals(bytes)) return { state: 'incompatible', diagnostics: [{ code: 'INVALID_SOURCE', severity: 'error', message: 'Target must be lossless UTF-8.' }] };
       const derived = derive(source);
       return { state: derived.support === 'supported' ? 'original' : 'incompatible', diagnostics: [...derived.diagnostics] };
+    },
+    async validateSelected(plan) {
+      for (const item of plan.targets) {
+        const current = await managedRecord(item.target.identity.path, derive);
+        check(current?.plan.manifest.contentHash === plan.manifest.contentHash, 'INSPECTION_CHANGED', 'Managed selection changed while acquiring locks.');
+      }
     },
     blockingProcesses: cuaBlockingProcesses,
   });
