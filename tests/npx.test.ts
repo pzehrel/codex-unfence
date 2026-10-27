@@ -513,6 +513,7 @@ test('npx public writes preserve an externally replaced identity even when bytes
 test('npx install and uninstall keep independent private recovery and coordination namespaces', async (t: TestContext) => {
   const box = await packageBox(t);
   const { app, target, source } = await syntheticInstallation(box, 'Namespaces');
+  const metadata: { version: string } = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8'));
   const oldRecovery = join(box.directory, 'home/Library/Application Support/codex-browser-liberation-patch');
   const oldCoordination = join(box.directory, 'home/.codex-browser-patch');
   for (const directory of [oldRecovery, oldCoordination]) {
@@ -530,8 +531,8 @@ test('npx install and uninstall keep independent private recovery and coordinati
     const state = npmPackage.runNpmExec(['check', '--app', app, '--json'], box);
     assert.equal(state.status, 0, state.stdout + state.stderr);
     const recovery = required(required(checkOutput(state.stdout).data).inspection).recovery;
-    assert.deepEqual(required(recovery).tool, { packageName: 'codex-unfence', version: '0.0.2', executable: 'codex-unfence' });
-    assert.equal(required(recovery).command, 'npx --package codex-unfence@0.0.2 codex-unfence');
+    assert.deepEqual(required(recovery).tool, { packageName: 'codex-unfence', version: metadata.version, executable: 'codex-unfence' });
+    assert.equal(required(recovery).command, `npx --package codex-unfence@${metadata.version} codex-unfence`);
     const root = join(box.directory, 'home/Library/Application Support/codex-unfence');
     inside(root, required(recovery).preparation);
     inside(root, required(recovery).store);
@@ -558,6 +559,7 @@ test('npx install and uninstall keep independent private recovery and coordinati
 test('npx uninstall cancellation preserves patched bytes and every recovery artifact', async (t: TestContext) => {
   const box = await packageBox(t);
   const { app, target } = await syntheticInstallation(box, 'CancelUninstall');
+  const metadata: { version: string } = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8'));
   const installed = await npmPackage.runNpmExecPty(['install', '--app', app], {
     ...box, steps: [{ waitFor: '输入 yes 确认 install，', send: 'yes\n' }],
   });
@@ -572,7 +574,7 @@ test('npx uninstall cancellation preserves patched bytes and every recovery arti
     });
     assert.equal(child.status, 0, child.stdout + child.stderr);
     assert.match(child.stdout, /已取消，应用文件未修改/);
-    assert.match(child.stdout, /恢复工具：codex-unfence@0.0.2[\r\n]+命令：codex-unfence/);
+    assert.ok(child.stdout.replaceAll('\r\n', '\n').includes(`恢复工具：codex-unfence@${metadata.version}\n命令：codex-unfence`));
     for (const notice of ['依据：', '前提：', '作用范围：', '签名校验失败']) {
       assert.ok(child.stdout.indexOf(notice) >= 0 && child.stdout.indexOf(notice) < child.stdout.indexOf('输入 yes 确认 uninstall，'), notice);
     }
