@@ -1,70 +1,55 @@
 #!/usr/bin/env node
-import { parseArgs } from 'node:util';
+import { readFile } from 'node:fs/promises';
 import { EXIT_CODES, renderHuman } from './result.js';
 import type { CommandResult } from './result.js';
+import type { ToolIdentity } from './managed-state.js';
+import { commands, parseCliOptions, renderHelp } from './cli-options.js';
+import type { CliOptions } from './cli-options.js';
 import { managedCli } from './managed-cli.js';
-
-const help = `codex-unfence — macOS Codex browser site-status patch
-
-Usage:
-  codex-unfence                         interactive discovery, check and action selection
-  codex-unfence check [--app <absolute-app-path>] [--json]
-  codex-unfence install [--app <absolute-app-path>]
-  codex-unfence uninstall [--app <absolute-app-path>]
-  codex-unfence --help
-
-check reports every discovered installation without writing.
-install and uninstall guide rollback of interrupted operations before continuing.
-Advanced managed aliases: apply, restore, status, recover.
-All selections use --app; recovery materials are managed automatically.
-
-Managed changes require interactive stdin/stdout and explicit confirmation; --json cannot authorize writes.
-Exit and reopen the host manually. Sealed-resource changes invalidate its signature.
-Recovery data stays private outside npm cache; keep the matching local tarball while unpublished.
-Structural support, write readiness and runtime verification are separate. Runtime: not-verified.
-Changing disk source does not immediately clear an already cached blocked result.
-
-Output protocol: schemaVersion 1. Exit codes: 0 success, 1 runtime failure,
-2 invalid arguments, 3 incompatible (including mixed compatible/incompatible), 4 conflict.
-check aggregates runtime failure, conflict, incompatibility, then success.
-check exits 1 when no installations are found.
-Write blockers are reported separately; check success does not authorize writes.
-JSON results (including errors) go to stdout.
-`;
 
 const args = process.argv.slice(2);
 const json = args.includes('--json') || args.some((arg) => arg.startsWith('--json='));
-const commands = ['install', 'uninstall', 'check', 'status', 'apply', 'restore', 'recover'] as const;
+
+async function packagedTool(): Promise<ToolIdentity> {
+  const metadata = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const executable = metadata.bin && typeof metadata.bin === 'object' ? Object.keys(metadata.bin)[0] : undefined;
+  if (typeof metadata.name !== 'string' || typeof metadata.version !== 'string' || !executable) throw new Error('安装包缺少工具名称、版本或命令信息。');
+  return { packageName: metadata.name, version: metadata.version, executable };
+}
 
 async function main(): Promise<CommandResult | null> {
+  let options: CliOptions;
   try {
-    const { values, positionals, tokens } = parseArgs({
-      args, options: { app: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } },
-      strict: true, allowPositionals: true, tokens: true,
-    });
-    const seen = new Set<string>();
-    for (const token of tokens) {
-      if (token.kind !== 'option') continue;
-      if (seen.has(token.name)) throw new Error(`Duplicate option: --${token.name}`);
-      seen.add(token.name);
-    }
-    if (positionals.length > 1 || positionals.some(command => !commands.some(known => known === command))) throw new Error('Expected command: install, check or uninstall. Use --help for usage.');
-    if (values.help) {
-      process.stdout.write(help);
+    options = parseCliOptions(args);
+  } catch (error) {
+    return {
+      schemaVersion: 1, command: commands.find(command => args.includes(command)) ?? null, outcome: 'usage-error', exitCode: EXIT_CODES.usageError, data: null,
+      diagnostics: [{ code: 'INVALID_ARGUMENTS', severity: 'error', message: error instanceof Error ? error.message : '参数无效。' }],
+    };
+  }
+  try {
+    if (options.help) {
+      process.stdout.write(renderHelp(options.command));
       return null;
     }
-    return await managedCli(args);
+    const tool = await packagedTool();
+    if (options.version) {
+      process.stdout.write(`${tool.version}\n`);
+      return null;
+    }
+    return await managedCli(options, tool);
   } catch (error) {
-    const command = commands.find(command => command === args[0]) ?? null;
     return {
-      schemaVersion: 1, command, outcome: 'usage-error', exitCode: EXIT_CODES.usageError, data: null,
-      diagnostics: [{ code: 'INVALID_ARGUMENTS', severity: 'error', message: error instanceof Error ? error.message : 'Invalid arguments.' }],
+      schemaVersion: 1, command: options.command ?? null, outcome: 'runtime-error', exitCode: EXIT_CODES.runtimeError, data: null,
+      diagnostics: [{ code: 'COMMAND_FAILED', severity: 'error', message: error instanceof Error ? error.message : '命令执行失败。' }],
     };
   }
 }
 
 const result = await main();
 if (result) {
-  process.stdout.write(json ? `${JSON.stringify(result)}\n` : renderHuman(result));
+  const output = json ? `${JSON.stringify(result)}\n` : renderHuman(result);
+  if (!json && result.outcome === 'usage-error') process.stderr.write(output);
+  else process.stdout.write(output);
   process.exitCode = result.exitCode;
 }

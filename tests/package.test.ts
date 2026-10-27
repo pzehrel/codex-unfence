@@ -42,9 +42,9 @@ test('installed tarball public bin preserves delivery structure, bundled depende
   const [output]: [{ filename: string; files: { path: string }[] }] = JSON.parse(pack.stdout);
   const files = output.files.map(file => file.path);
   for (const path of files.filter(path => !path.startsWith('node_modules/'))) {
-    assert.ok(path.startsWith('dist/') || path === 'README.md' || path === 'package.json', `Unexpected published file: ${path}`);
+    assert.ok(path.startsWith('dist/') || path === 'README.md' || path === 'LICENSE' || path === 'package.json', `Unexpected published file: ${path}`);
   }
-  for (const path of ['dist/cli.js', 'dist/cua-analysis.js', 'dist/managed-patches.js', 'README.md', 'package.json']) {
+  for (const path of ['dist/cli.js', 'dist/cua-analysis.js', 'dist/managed-patches.js', 'README.md', 'LICENSE', 'package.json']) {
     assert.ok(files.includes(path), `Missing published file: ${path}`);
   }
   for (const name of ['analysis', 'deferred-analysis', 'dependency-analysis', 'dependency-contracts', 'dependency-source', 'resource-provenance', 'handle-provenance', 'descriptor-provenance', 'loader-configuration-proof', 'discovery', 'plan', 'transactions']) {
@@ -65,7 +65,9 @@ test('installed tarball public bin preserves delivery structure, bundled depende
   const binary = join(prefix, 'bin/codex-unfence');
   const installed = join(prefix, 'lib/node_modules/codex-unfence');
   assert.equal(await realpath(binary), join(installed, 'dist/cli.js'));
-  const metadata: { engines: { node: string }; bin: Record<string, string> } = JSON.parse(await readFile(join(installed, 'package.json'), 'utf8'));
+  const metadata: { license: string; engines: { node: string }; bin: Record<string, string> } = JSON.parse(await readFile(join(installed, 'package.json'), 'utf8'));
+  assert.equal(metadata.license, 'MIT');
+  assert.equal(await readFile(join(installed, 'LICENSE'), 'utf8'), await readFile(join(repositoryRoot, 'LICENSE'), 'utf8'));
   assert.equal(metadata.engines.node, '>=22.13.0');
   assert.deepEqual(metadata.bin, { 'codex-unfence': 'dist/cli.js' });
   await assert.rejects(access(join(installed, 'src')));
@@ -77,7 +79,7 @@ test('installed tarball public bin preserves delivery structure, bundled depende
     assert.equal(help.stderr, '');
     for (const command of ['install', 'check', 'uninstall']) assert.match(help.stdout, new RegExp(`codex-unfence ${command}`));
     assert.match(help.stdout, /macOS/);
-    assert.match(help.stdout, /interactive/);
+    assert.match(help.stdout, /交互终端/);
     assert.doesNotMatch(help.stdout, /codex-unfence (?:detect|prepare)|--plan|--store/);
   });
 
@@ -95,7 +97,7 @@ test('installed tarball public bin preserves delivery structure, bundled depende
     const human = runCli(['check', '--app', selected.app], { directory, binary, fixture });
     assert.equal(human.status, 0, human.stdout + human.stderr);
     assert.ok(human.stdout.includes(selected.target));
-    assert.match(human.stdout, /Runtime: not-verified/);
+    assert.match(human.stdout, /运行效果：未验证/);
     assert.deepEqual(await readFile(selected.target), selected.source);
     assert.deepEqual(await readdir(join(directory, 'home')), ['Applications']);
     assert.deepEqual(await readdir(join(selected.target, '..')), ['browser-service.mjs']);

@@ -51,7 +51,7 @@ test('npx check keeps every installation visible and runtime read failure outran
   const alias = join(box.directory, 'home/Applications/Alias.app');
   await symlink(healthy.app, alias);
   const installed = await runNpmExecPty(['install', '--app', damaged.app], {
-    ...box, steps: [{ waitFor: 'Type yes to install,', send: 'yes\n' }],
+    ...box, steps: [{ waitFor: '输入 yes 确认 install，', send: 'yes\n' }],
   });
   assert.equal(installed.status, 0, installed.stdout + installed.stderr);
   const state = check(box, ['--app', damaged.app]);
@@ -73,7 +73,9 @@ test('npx check keeps every installation visible and runtime read failure outran
     failed = check(box);
     const human = runNpmExec(['check'], box);
     assert.equal(human.status, 1, human.stdout + human.stderr);
-    assert.ok(human.stdout.split('\n').some(line => line.includes('INSPECTION_FAILED') && line.includes(`(installation: ${damaged.app})`) && line.includes(locator)), human.stdout);
+    assert.match(human.stdout, /INSPECTION_FAILED/);
+    assert.ok(human.stdout.includes(`路径：${locator}`), human.stdout);
+    assert.ok(human.stdout.includes(`所属应用：${damaged.app}`), human.stdout);
   } finally { await chmod(locator, 0o600); }
   assert.equal(failed.code, 1, JSON.stringify({ outcome: failed.result.outcome, diagnostics: failed.result.diagnostics }));
   assert.equal(failed.result.outcome, 'runtime-error');
@@ -101,10 +103,10 @@ test('npx check keeps every installation visible and runtime read failure outran
   assert.deepEqual(await snapshot(join(box.directory, 'home')), conflictBefore);
   const human = runNpmExec(['check'], box);
   assert.equal(human.status, 4, human.stdout + human.stderr);
-  for (const app of [damaged.app, healthy.app, unsupported.app]) assert.ok(human.stdout.includes(`Installation: ${app}`));
-  assert.match(human.stdout, /file state: conflict/);
-  assert.match(human.stdout, /Structural support: unsupported/);
-  assert.match(human.stdout, /Runtime: not-verified/);
+  for (const app of [damaged.app, healthy.app, unsupported.app]) assert.ok(human.stdout.includes(`应用：${app}`));
+  assert.match(human.stdout, /文件状态：冲突/);
+  assert.match(human.stdout, /结构兼容：不支持/);
+  assert.match(human.stdout, /运行效果：未验证/);
   assert.deepEqual(await snapshot(join(box.directory, 'home')), conflictBefore);
   const selected = check(box, ['--app', healthy.app]);
   assert.equal(selected.code, 0);
@@ -137,10 +139,10 @@ test('npx check aggregates incompatibility and reports write blockers separately
   assert.equal(required(blocked.result.data).runtime, 'not-verified');
   const human = runNpmExec(['check', '--app', supported.app], box);
   assert.equal(human.status, 0, human.stdout + human.stderr);
-  assert.match(human.stdout, /write readiness: blocked/);
-  assert.match(human.stdout, /Can install: no/);
+  assert.match(human.stdout, /写入条件：不满足/);
+  assert.match(human.stdout, /可以安装：否/);
   assert.match(human.stdout, /PROCESSES_RUNNING/);
-  assert.match(human.stdout, /Runtime: not-verified/);
+  assert.match(human.stdout, /运行效果：未验证/);
   await writeFile(scenario, JSON.stringify({ processFailure: true }));
   const failed = check(box);
   assert.equal(failed.code, 1);
@@ -183,15 +185,15 @@ test('npx check reports an unwritable coordination root per installation without
     }
     const human = runNpmExec(['check'], box);
     assert.equal(human.status, 0, human.stdout + human.stderr);
-    assert.match(human.stdout, /Can install: no/);
+    assert.match(human.stdout, /可以安装：否/);
     for (const { app } of [first, second]) {
-      assert.ok(human.stdout.includes(`Installation: ${app}`));
-      assert.ok(human.stdout.includes(`(installation: ${app})`));
+      assert.ok(human.stdout.includes(`应用：${app}`));
+      assert.ok(human.stdout.includes(`所属应用：${app}`));
       assert.ok(blocked.result.diagnostics.some(entry => entry.code === 'COORDINATION_NOT_WRITABLE' && entry.path === coordination && entry.installation === app));
     }
     assert.deepEqual(await snapshot(join(box.directory, 'home')), before);
     const refused = await runNpmExecPty(['install', '--app', first.app], { ...box, steps: [
-      { waitFor: 'Action (recheck, cancel)', send: 'cancel\n' },
+      { waitFor: '选择操作（recheck, cancel）', send: 'cancel\n' },
     ] });
     assert.equal(refused.status, 4, refused.stdout + refused.stderr);
     assert.match(refused.stdout, /COORDINATION_NOT_WRITABLE/);

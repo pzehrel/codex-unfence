@@ -2,7 +2,7 @@ function required<T>(value: T): NonNullable<T> { assert.ok(value !== null && val
 import type { CheckResult, OperationResult } from '../src/result.js';
 type ManagedResult<C extends string> = C extends 'check' ? CheckResult : OperationResult;
 import type { TestContext } from 'node:test';
-import { sourceFixture } from './helpers/paths.js';
+import { repositoryRoot, sourceFixture } from './helpers/paths.js';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -106,20 +106,70 @@ test('human check explains structural evidence and semantic assumptions without 
   const box = await sandbox(t);
   const child = runCli(['check', '--app', box.app], { directory: box.directory, fixture });
   assert.equal(child.status, 0, child.stdout + child.stderr);
-  assert.match(child.stdout, /Support:.*member fetch/);
-  assert.match(child.stdout, /Assumption:.*host contracts/);
-  assert.match(child.stdout, /Runtime: not-verified/);
+  assert.match(child.stdout, /依据：.*fetch/);
+  assert.match(child.stdout, /前提：.*(?:宿主|应用).*(?:约定|契约|接口)/);
+  assert.match(child.stdout, /运行效果：未验证/);
+  assert.ok(child.stdout.includes(`\n\n应用：${box.app}\n  目标文件：${box.target}\n`));
+  assert.ok(child.stdout.includes('\n  结构兼容：支持\n  文件状态：原始文件\n  写入条件：满足\n'));
+  assert.ok(child.stdout.includes('\n  兼容性详情：\n'));
+  assert.equal(child.stderr, '');
 });
 
-test('help documents managed commands and accepts command-specific help', async (t: TestContext) => {
+test('help lists options and examples and scopes help to each command', async (t: TestContext) => {
   const box = await sandbox(t);
-  for (const command of ['install', 'uninstall', 'check', 'apply', 'status', 'restore', 'recover']) {
-    const child = runCli([command, '--help'], { directory: box.directory, fixture });
+  for (const flag of ['-h', '--help']) {
+    const child = runCli([flag], { directory: box.directory, fixture });
     assert.equal(child.status, 0, child.stdout + child.stderr);
-    assert.match(child.stdout, /check \[--app/);
-    assert.match(child.stdout, /interactive/);
+    assert.equal(child.stderr, '');
+    for (const section of ['用法：', '命令：', '选项：', '示例：', '退出码：']) assert.ok(child.stdout.includes(section));
+    assert.match(child.stdout, /-h, --help/);
+    assert.match(child.stdout, /-v, --version/);
+  }
+  for (const command of ['install', 'uninstall', 'check', 'apply', 'status', 'restore', 'recover']) {
+    const child = runCli([command, '-h'], { directory: box.directory, fixture });
+    assert.equal(child.status, 0, child.stdout + child.stderr);
+    assert.equal(child.stderr, '');
+    assert.ok(child.stdout.includes(`codex-unfence ${command} [--app`));
+    if (command === 'check' || command === 'status') assert.match(child.stdout, /--json/);
+    else assert.match(child.stdout, /交互终端/);
     assert.doesNotMatch(child.stdout, /--plan|--store|codex-unfence (?:detect|prepare)/);
   }
+});
+
+test('version uses package metadata without discovering installations or creating recovery data', async (t: TestContext) => {
+  const box = await sandbox(t);
+  const metadata: { version: string } = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8'));
+  for (const flag of ['-v', '--version']) {
+    const child = runCli([flag], { directory: box.directory, fixture, env: { CODEX_TEST_PROCESS_FAILURE: '1' } });
+    assert.equal(child.status, 0, child.stdout + child.stderr);
+    assert.equal(child.stdout, `${metadata.version}\n`);
+    assert.equal(child.stderr, '');
+  }
+  assert.deepEqual(await readdir(join(box.directory, 'home')), ['Applications']);
+  assert.deepEqual(await readFile(box.target), box.source);
+});
+
+test('argument errors use stderr and a help hint while JSON errors remain parseable on stdout', async (t: TestContext) => {
+  const box = await sandbox(t);
+  for (const args of [
+    ['--unknown'], ['check', '--app'], ['check', '--app', 'relative.app'], ['check', 'extra'],
+    ['--version', '-v'], ['--help', '-h'], ['--version', '--help'], ['check', '--version'],
+    ['--version', '--app', box.app], ['--help', '--json'], ['--version', '--json'],
+  ]) {
+    const child = runCli(args, { directory: box.directory, fixture });
+    assert.equal(child.status, 2, child.stdout + child.stderr);
+    if (args.includes('--json')) {
+      assert.equal(child.stderr, '');
+      const result: OperationResult = JSON.parse(child.stdout);
+      assert.equal(result.outcome, 'usage-error');
+      assert.equal(result.diagnostics[0]?.code, 'INVALID_ARGUMENTS');
+    } else {
+      assert.equal(child.stdout, '');
+      assert.match(child.stderr, /INVALID_ARGUMENTS/);
+      assert.match(child.stderr, /--help 查看用法/);
+    }
+  }
+  assert.deepEqual(await readdir(join(box.directory, 'home')), ['Applications']);
 });
 
 test('managed writes require real confirmation and missing status preserves its command', async (t: TestContext) => {
@@ -168,6 +218,6 @@ test('check reports all installations including unsupported sources without crea
   assert.equal(human.status, 3, human.stdout + human.stderr);
   assert.ok(human.stdout.includes(box.app));
   assert.ok(human.stdout.includes('Unsupported.app'));
-  assert.match(human.stdout, /Can install: yes/);
-  assert.match(human.stdout, /Can install: no/);
+  assert.match(human.stdout, /可以安装：是/);
+  assert.match(human.stdout, /可以安装：否/);
 });
